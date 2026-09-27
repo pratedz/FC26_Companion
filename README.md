@@ -1,6 +1,6 @@
-# FC26 Companion — Career Studio synergy
+# FC26 Companion for FC 26 Live Editor
 
-Companion for **FC 26 Live Editor**. Dual-mode + **workflow packs**, **SAFE free-agent Add team**, **cross-tab handoffs** (Cards ↔ Add team ↔ Editor ↔ Squad), **batch apply**, turbo queue.
+Manage players, find cards, build squads, and run career workflows from one desktop app.
 
 ## Primary UI (desktop EXE)
 
