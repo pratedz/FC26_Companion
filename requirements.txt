@@ -1,0 +1,14 @@
+# Premium UI
+customtkinter>=5.2.0
+pillow>=10.0.0
+
+# Optional (live Futbin attempts)
+curl_cffi>=0.7.0
+cloudscraper>=1.2.71
+beautifulsoup4>=4.12.0
+
+# Build .exe
+# pyinstaller>=6.0
+
+# AI provider (OpenAI API key mode). Codex Account does not need this.
+openai>=1.40.0

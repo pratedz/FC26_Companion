@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "le-companion/job.schema.json",
+  "title": "LE Companion protocol v3 job",
+  "type": "object",
+  "required": ["schema", "job_id", "core_min", "ops"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": 3 },
+    "job_id": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "core_min": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "label": { "type": "string", "maxLength": 200 },
+    "origin": { "type": "string", "maxLength": 100 },
+    "created_at": { "type": "integer", "minimum": 0 },
+    "deadline_kind": { "enum": ["immediate", "next_session", "manual"] },
+    "require_cm": { "type": "boolean" },
+    "dry_run": { "type": "boolean" },
+    "atomic": { "type": "boolean" },
+    "budget_ms": { "type": "integer", "minimum": 1, "maximum": 5000 },
+    "max_attempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+    "expires_at": { "type": "integer", "minimum": 1 },
+    "snapshot_to": { "type": "string" },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "career_mode": { "type": "boolean" },
+        "save_uid": { "type": "string" },
+        "core_version": { "type": "string" }
+      }
+    },
+    "grants": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_create_player": { "type": "boolean" },
+        "allow_add_to_team": { "type": "boolean" },
+        "allow_delete_row": { "type": "boolean" },
+        "allow_memory_patch": { "type": "boolean" },
+        "allow_mass_edit": { "type": "boolean" }
+      }
+    },
+    "ops": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["op", "id"],
+        "properties": {
+          "op": {
+            "enum": [
+              "diag.ping", "db.dump", "set_fields", "create_player",
+              "add_to_team", "repair_partial_add", "transfer", "budget", "bulk_edit",
+              "export_squad", "snapshot", "growth_sync", "career.set",
+              "injury.scan", "injury.cure"
+            ]
+          },
+          "id": { "type": "string", "minLength": 1, "maxLength": 60 },
+          "v": { "type": "integer", "minimum": 1 },
+          "on_error": { "enum": ["abort", "continue"] }
+        }
+      }
+    }
+  }
+}

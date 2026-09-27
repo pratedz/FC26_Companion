@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LE Companion</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="ds" data-app="le-companion-web">
+  <div id="app" class="app-shell">
+    <header class="top-chrome" role="banner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">LE</span>
+        <div>
+          <h1 class="brand-title">LE Companion</h1>
+          <p class="brand-sub">Career Studio · FC 26 Live Editor</p>
+        </div>
+      </div>
+      <div class="chrome-status" id="chrome-status">
+        <span class="pill pill-off" id="pill-live" title="Worker LIVE state">OFF</span>
+        <span class="muted" id="status-line">Connecting…</span>
+        <span class="muted" id="target-pill">Target: —</span>
+      </div>
+      <div class="chrome-actions">
+        <button type="button" class="btn ghost" id="btn-install" data-action="install">Install worker</button>
+        <button type="button" class="btn secondary" id="btn-live" data-action="go-live">Go LIVE</button>
+        <button type="button" class="btn secondary" id="btn-bridge" data-action="copy-bridge">Copy bridge</button>
+      </div>
+    </header>
+
+    <div class="body-row">
+      <nav class="side-nav" aria-label="Primary">
+        <button type="button" class="nav-item active" data-view="home">Home</button>
+        <button type="button" class="nav-item" data-view="cards">Cards</button>
+        <button type="button" class="nav-item" data-view="boost">Boost</button>
+        <button type="button" class="nav-item" data-view="add_team">Add team</button>
+        <button type="button" class="nav-item" data-view="squad">Squad</button>
+        <button type="button" class="nav-item" data-view="editor">Editor</button>
+        <button type="button" class="nav-item" data-view="catalog">Catalog</button>
+        <button type="button" class="nav-item" data-view="about">About</button>
+      </nav>
+
+      <main class="main-panel" id="main-panel" role="main">
+        <!-- views injected by app.js -->
+      </main>
+    </div>
+
+    <footer class="apply-dock" id="apply-dock" role="status" aria-live="polite">
+      <div class="dock-left">
+        <span class="dock-label">APPLY</span>
+        <span class="dock-detail" id="dock-detail">Idle · set target and pick a card or pack</span>
+      </div>
+      <div class="dock-mid">
+        <span class="chip" id="dock-queue">Queue: 0</span>
+        <span class="chip" id="dock-live">Worker: —</span>
+      </div>
+      <div class="dock-right">
+        <button type="button" class="btn success" id="btn-apply" disabled>Apply</button>
+      </div>
+    </footer>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

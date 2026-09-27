@@ -1,0 +1,13 @@
+Card DB download manifest
+Succeeded: 8/8
+
+Year coverage strategy:
+  18-20: kafagy FutHead dumps (face stats) + FIFA19 Futbin detailed
+  22: SoFIFA complete players_22
+  23: FIFA23_official_data
+  26: EAFC26 DataHub (bonus)
+  21/24/25: use Futbin import (HTML/JSON) or add CSVs named *21* *24* *25*
+  local LE: player_presets/cards.csv always loaded by catalog
+
+Drop any extra CSV into this folder; filenames containing 18-26 are auto-detected.
+Futbin upgrades: put JSON under card_db/futbin/ or use --import-futbin-html

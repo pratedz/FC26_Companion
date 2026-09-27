@@ -1,0 +1,74 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.pytest_codex*/
+.first_run_done
+HANDOVER_INJURIES_CURSOR.md
+force_drain_snippet.lua
+sign_force_drain.lua
+.coverage
+htmlcov/
+
+# Local credentials, settings, and user data
+.env
+.env.*
+!.env.example
+*credentials*.json
+*secret*.json
+*token*.json
+companion_config.json
+profiles.json
+current_squad.json
+job_history.json
+last_apply_snapshot.json
+state.sqlite*
+
+# Logs, runtime queues, and generated databases
+*.log
+err.txt
+out.txt
+logs/
+*.jsonl
+queue/*
+!queue/.gitkeep
+card_db/*
+!card_db/MANIFEST.txt
+generated/
+snapshots/
+
+# Downloaded assets and local capture/review material
+assets/
+feedback/
+review/
+reviewgpt/
+code review/
+tmp_*/
+
+# Build products and compiled binaries
+build/
+build_*/
+build_tcl/
+dist/
+dist_*/
+*.exe
+*.exe.*
+*.dll
+*.pyd
+
+# Historical app snapshots and agent worktrees
+FC26_Companion_*/
+FC26_Companion_app*/
+LE_Profile_Executor_app/
+_internal*/
+.grok*/
+phase0_backup_*/
+
+# OS/editor files
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/

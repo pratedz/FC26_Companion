@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "le-companion/result.schema.json",
+  "title": "LE Companion protocol v3 result",
+  "type": "object",
+  "required": ["schema", "job_id", "state", "ok"],
+  "properties": {
+    "schema": { "const": 3 },
+    "job_id": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "label": { "type": "string" },
+    "session_id": { "type": "string" },
+    "core_version": { "type": "string" },
+    "state": {
+      "enum": [
+        "queued", "claimed", "running", "deferred", "done", "no_op",
+        "partial", "rejected", "failed", "poisoned", "crashed", "expired"
+      ]
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "true iff EVERY op succeeded and EVERY requested field verified. Three field failures out of 91 => ok:false. There is no reading of this file under which written=88 looks like a clean run."
+    },
+    "outcome": {
+      "enum": [
+        "crashed", "failed", "rejected", "expired", "partial",
+        "no_op", "applied", "deferred", "queued"
+      ],
+      "description": "Optional explicit ApplyOutcome name; wins over state+ok mapping when present."
+    },
+    "started_at": { "type": "number" },
+    "finished_at": { "type": "number" },
+    "duration_ms": { "type": "number" },
+    "steps": {
+      "type": "object",
+      "properties": {
+        "total": { "type": "integer" },
+        "completed": { "type": "integer" },
+        "resumes": { "type": "integer" },
+        "attempts": { "type": "integer" }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "ops_total": { "type": "integer" },
+        "ops_ok": { "type": "integer" },
+        "ops_failed": { "type": "integer" },
+        "targets": { "type": "integer" },
+        "found": { "type": "integer" },
+        "missing": { "type": "integer" },
+        "fields_requested": { "type": "integer" },
+        "fields_written": { "type": "integer" },
+        "fields_failed": { "type": "integer" },
+        "fields_skipped": { "type": "integer" },
+        "growth_mirrored": { "type": "integer" },
+        "growth_failed": { "type": "integer" }
+      }
+    },
+    "ops": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "op", "ok"],
+        "properties": {
+          "id": { "type": "string" },
+          "op": { "type": "string" },
+          "ok": { "type": "boolean" },
+          "counts": { "type": "object" },
+          "data": { "type": "object" }
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["reason"],
+        "properties": {
+          "phase": { "type": "string" },
+          "op": { "type": "string" },
+          "target": {},
+          "field": { "type": "string" },
+          "requested": {},
+          "readback": {},
+          "reason": { "type": "string" },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "error": {
+      "type": ["object", "null"],
+      "properties": {
+        "phase": { "type": "string" },
+        "op": { "type": "string" },
+        "step": { "type": "integer" },
+        "message": { "type": "string" },
+        "traceback": { "type": "string" },
+        "last_error": { "type": "string" }
+      }
+    },
+    "writes_performed": {
+      "type": ["integer", "null"],
+      "description": "On rejected results this MUST be 0 — an explicit machine-checkable claim that nothing was touched."
+    },
+    "index": { "type": "object" },
+    "env": {
+      "type": "object",
+      "properties": {
+        "in_cm": { "type": "boolean" },
+        "user_teamid": { "type": "integer" },
+        "save_uid": { "type": "string" },
+        "game_date": { "type": "object" }
+      }
+    },
+    "quarantined_to": { "type": "string" },
+    "advice": { "type": "string" },
+    "partial_progress": { "type": "object" },
+    "diagnostic": { "type": "string" },
+    "log": { "type": "array", "items": { "type": "string" } }
+  }
+}
