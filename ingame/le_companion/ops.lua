@@ -32,6 +32,30 @@ local function fail_result(reason, detail, counts, failures)
     }
 end
 
+-- A queued plan can outlive a manager's move to another club in the same save.
+local function bound_team_ready(teamid)
+    local getter = rawget(_G, "GetUserTeamID") or rawget(_G, "GetUserTeamId")
+    if type(getter) ~= "function" then return false end
+    local ok, current = pcall(getter)
+    return ok and tonumber(current) == tonumber(teamid)
+end
+
+local function plan_club_members(teamid, job, ctx)
+    local cache = ctx and ctx._plan_club_members
+    if cache and cache.job == job and cache.teamid == teamid then return cache.members end
+    local links = db.open("teamplayerlinks")
+    if not links then return nil end
+    local members = {}
+    for link in links:records() do
+        if tonumber(links:get("teamid", link)) == teamid then
+            local pid = tonumber(links:get("playerid", link))
+            if pid then members[pid] = true end
+        end
+    end
+    if ctx then ctx._plan_club_members = { job = job, teamid = teamid, members = members } end
+    return members
+end
+
 -------------------------------------------------------------------------------
 -- diag.ping — pure; proves claim + attribution with zero side effects
 -------------------------------------------------------------------------------
@@ -46,6 +70,10 @@ ops.handlers["diag.ping"] = function(op, job, ctx)
         at = util.now(),
         contract = version.CONTRACT,
     }, {})
+end
+
+ops.handlers["assets.legacy"] = function(op, job, ctx)
+    return require("ops.legacy_assets").run(op, job, ctx)
 end
 
 -------------------------------------------------------------------------------
@@ -189,6 +217,24 @@ ops.handlers["set_fields"] = function(op, job, ctx)
     end
 
     local displaced = nil
+    if op.teamid ~= nil and not bound_team_ready(op.teamid) then
+        return fail_result("club_changed", "the active Career club differs from this plan; refresh Club before continuing")
+    end
+    if table_name == "players" and op.teamid ~= nil then
+        local want_team = tonumber(op.teamid)
+        if not want_team or want_team <= 0 then
+            return fail_result("bad_teamid", "player write requires a positive club ID")
+        end
+        local members = plan_club_members(want_team, job, ctx)
+        if not members then
+            return fail_result("team_link_missing", "cannot verify the player's original club")
+        end
+        if not members[tonumber(key_value)] then
+            return fail_result("team_link_missing", "player is no longer on the club that authored this plan", {
+                fields_requested = n_req, fields_written = 0, found = 0, missing = 1,
+            })
+        end
+    end
     if table_name == "teamplayerlinks" and tonumber(op.teamid) and tonumber(op.teamid) > 0 then
         local want_team = math.floor(tonumber(op.teamid))
         local exact = nil
@@ -199,7 +245,12 @@ ops.handlers["set_fields"] = function(op, job, ctx)
                 break
             end
         end
-        if exact then rec = exact end
+        if not exact then
+            return fail_result("team_link_missing", "player is not on the requested team", {
+                fields_requested = n_req, fields_written = 0, found = 0, missing = 1,
+            })
+        end
+        rec = exact
         local new_no = tonumber(fields.jerseynumber)
         -- Park the current wearer on a free number before this write. Moving
         -- them onto this player's old shirt duplicates that number until the
@@ -217,6 +268,9 @@ ops.handlers["set_fields"] = function(op, job, ctx)
             local wanted = math.floor(new_no)
             local other = used[wanted]
             if other and other ~= rec then
+                if op.displace == false then
+                    return fail_result("shirt_taken", "the shirt changed since the plan was reviewed; refresh Club and rebuild")
+                end
                 local replacement = nil
                 for n = 1, 99 do
                     if used[n] == nil then replacement = n break end
@@ -437,6 +491,28 @@ ops.handlers["export_squad"] = function(op, job, ctx)
     if not ph then
         return fail_result("players_table_unavailable", "could not open players table")
     end
+    -- Collect planning values with the normal Club refresh. Build can reuse
+    -- this single save-bound read instead of queuing another player snapshot
+    -- and waiting for a second Career/menu event. Resolve the schema once.
+    local planning_fields = {}
+    for _, fname in ipairs({
+        "overallrating", "potential", "modifier", "internationalrep",
+        "preferredposition1", "nationality", "height", "weight", "birthdate",
+        "acceleration", "sprintspeed", "positioning", "finishing", "shotpower",
+        "longshots", "volleys", "penalties", "vision", "crossing",
+        "freekickaccuracy", "shortpassing", "longpassing", "curve", "agility",
+        "balance", "reactions", "ballcontrol", "dribbling", "composure",
+        "interceptions", "headingaccuracy", "defensiveawareness",
+        "standingtackle", "slidingtackle", "jumping", "stamina", "strength",
+        "aggression", "gkdiving", "gkhandling", "gkkicking", "gkpositioning",
+        "gkreflexes", "trait1", "trait2", "icontrait1", "icontrait2",
+        "skillmoves", "weakfootabilitytypecode", "preferredfoot", "skillmoveslikelihood",
+        "bodytypecode", "muscularitycode", "runstylecode", "headassetid",
+        "hairtypecode", "skintonecode", "firstnameid", "lastnameid", "commonnameid",
+        "playerjerseynameid",
+    }) do
+        if db.field("players", fname) then planning_fields[#planning_fields + 1] = fname end
+    end
     local teamname = ""
     if type(rawget(_G, "GetTeamName")) == "function" then
         local ok, value = pcall(_G.GetTeamName, teamid)
@@ -549,14 +625,9 @@ ops.handlers["export_squad"] = function(op, job, ctx)
                 playerid = pid, teamid = teamid, teamname = teamname,
                 jerseynumber = jersey_by_id[pid] or 0,
             }
-            for _, fname in ipairs({
-                "overallrating", "potential", "preferredposition1",
-                "nationality", "height", "weight",
-            }) do
-                if db.field("players", fname) then
-                    local value = ph:get(fname, prec)
-                    if value ~= nil then entry[fname] = value end
-                end
+            for _, fname in ipairs(planning_fields) do
+                local value = ph:get(fname, prec)
+                if value ~= nil then entry[fname] = value end
             end
             if edited_names[pid] then
                 entry.name = edited_names[pid]
@@ -1264,14 +1335,51 @@ ops.handlers["snapshot"] = function(op, job, ctx)
     local h = db.open(op.table or "players")
     if not h then return fail_result("no_table", "players") end
     local rows = {}
+    local found = {}
+    local want_team = tonumber(op.teamid)
+    if op.teamid ~= nil and (not want_team or want_team <= 0) then
+        return fail_result("bad_teamid", "snapshot teamid must be a positive ID")
+    end
+    if want_team and not bound_team_ready(want_team) then
+        return fail_result("club_changed", "snapshot belongs to a different Career club")
+    end
+    local club_members = nil
+    if want_team and (op.table or "players") == "players" then
+        club_members = plan_club_members(want_team, job, ctx)
+        if not club_members then return fail_result("team_link_missing", "cannot verify squad membership") end
+    end
+    if #ids == 1 and not want_team then
+        found[tonumber(ids[1])] = db.scan_for(h, "playerid", tonumber(ids[1]))
+    else
+        -- A 20-player plan needs one valid-record pass, not twenty full scans.
+        local wanted, remaining = {}, 0
+        for i = 1, #ids do
+            local pid = tonumber(ids[i])
+            if pid and not wanted[pid] then
+                wanted[pid] = true
+                remaining = remaining + 1
+            end
+        end
+        for rec in h:records() do
+            local pid = tonumber(h:get("playerid", rec))
+            if wanted[pid] and not found[pid]
+                and (not want_team or (club_members and club_members[pid])
+                    or (not club_members and tonumber(h:get("teamid", rec)) == want_team)) then
+                found[pid] = rec
+                remaining = remaining - 1
+                if remaining == 0 then break end
+            end
+        end
+    end
+    local fields = op.fields
+    if fields == "*" then
+        fields = util.keys(db.table_fields(op.table or "players") or {})
+    end
     for i = 1, #ids do
-        local rec = db.scan_for(h, "playerid", tonumber(ids[i]))
+        local rec = found[tonumber(ids[i])]
         if rec then
             local row = { playerid = tonumber(ids[i]) }
-            local fields = op.fields
-            if fields == "*" then
-                fields = util.keys(db.table_fields(op.table or "players") or {})
-            end
+            if want_team then row.teamid = want_team end
             if type(fields) == "table" then
                 for _, f in ipairs(fields) do row[f] = h:get(f, rec) end
             end
@@ -1542,6 +1650,21 @@ function ops.capture_envelope_snapshot(job, ctx)
         if not h then
             return false, { reason = "snapshot_no_table", detail = tostring(state) }
         end
+        local teamid = nil
+        if table_name == "teamplayerlinks" then
+            teamid = tonumber(op.teamid)
+            if not teamid or teamid <= 0 then
+                return false, { reason = "snapshot_team_required", detail = "teamplayerlinks snapshot requires teamid" }
+            end
+            rec = nil
+            for candidate in h:records() do
+                if tonumber(h:get(key_field, candidate)) == tonumber(key.value)
+                    and tonumber(h:get("teamid", candidate)) == teamid then
+                    rec = candidate
+                    break
+                end
+            end
+        end
         if not rec and not (op.upsert and table_name == "editedplayernames") then
             return false, {
                 reason = "snapshot_target_missing",
@@ -1559,6 +1682,7 @@ function ops.capture_envelope_snapshot(job, ctx)
             op_id = op.id,
             table = table_name,
             key = { field = key_field, value = key.value },
+            teamid = teamid,
             existed = rec ~= nil,
             fields = before,
         }

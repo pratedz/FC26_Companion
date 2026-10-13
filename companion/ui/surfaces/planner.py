@@ -44,6 +44,7 @@ from ..widgets.primitives import (
 )
 from ..widgets.table import Column, DataGrid, TableModel, inclusive_span
 from ._common import set_status
+from .planner_controller import PlannerController, REQUEST_PRESETS, load_requests, save_request
 
 try:  # pragma: no cover
     import customtkinter as ctk
@@ -95,9 +96,18 @@ def _plan_progress(
     """Show Codex as a bar. ``wait`` pulses; ``ratio`` fills from finished groups."""
     label = state.get("progress_lbl")
     bar = state.get("progress_bar")
+    if state.get("review_root"):
+        view_phase = (state.get("phase"), bool(state.get("busy")), bool(state.get("interpreting")), bool(state.get("applying")))
+        if view_phase != state.get("review_phase"):
+            state["review_phase"] = view_phase
+            from .planner_review import refresh_review
+            refresh_review(state)
     try:
         if label is not None:
-            label.configure(text=text)
+            tone = theme.SUCCESS if mode == "ready" else theme.CODEX if mode in {"wait", "ratio"} else theme.MUTED
+            if any(word in text.casefold() for word in ("failed", "stopped", "need attention")):
+                tone = theme.WARNING
+            label.configure(text=text, text_color=tone)
     except Exception:
         pass
     if bar is None:
@@ -156,6 +166,12 @@ def open_planner(
     ensure_ctk()
     try:
         plan = plan_from_rows(selected_rows)
+        squad = svc.store.snapshot().squad
+        if hasattr(plan, "bind_source"):
+            plan = plan.bind_source(
+                save_uid=squad.save_uid, teamid=squad.teamid,
+                snapshot_revision=squad.taken.isoformat() if squad.taken else "",
+            )
     except (JobValidationError, Exception) as exc:
         _LOG.exception("squad planner failed to build")
         set_status(svc, f"Squad Planner: {exc}")
@@ -273,176 +289,178 @@ def _with_squad_shirts(svc: Any, plan: SquadPlan) -> SquadPlan:
 
 
 def _open_session_planner(
-    svc: Any,
-    plan: SquadPlan,
-    *,
-    prompt: str,
-    club_name: str,
+    svc: Any, plan: SquadPlan, *, prompt: str, club_name: str,
     selected_rows: Sequence[Mapping[str, Any]],
 ) -> None:
-    """Per-player Career session: interpret → pin/exclude → snapshot → propose → APPLY."""
-    del selected_rows
+    """Compact request, split review and one persistent status/action area."""
     ensure_ctk()
+    from .planner_review import mount_review, render_players
+    from ...domain.team_plan import context_from_rows
     plan = _with_squad_shirts(svc, plan)
+    controller = PlannerController(plan, request=(prompt or "").strip())
+    from ...integrations.squad_cache import SquadProposalCache
+    cache = SquadProposalCache(scope=":".join(str(getattr(plan, name, "")) for name in (
+        "source_save_uid", "source_teamid", "source_snapshot_revision")))
+    club_rows = tuple(getattr(svc.store.snapshot().squad, "players", ()) or selected_rows)
     state: dict[str, Any] = {
-        "plan": plan,
-        "busy": False,
-        "mode": "per_player",
-        "session": None,
-        "prompt": (prompt or "").strip(),
-        "club_name": club_name or "",
-        "include_vars": {},
-        "pin_vars": {},
-        "phase": "interpret",
+        "plan": plan, "busy": False, "mode": "per_player", "session": None,
+        "prompt": (prompt or "").strip(), "club_name": club_name or "",
+        "include_vars": {}, "pin_vars": {}, "phase": "interpret",
+        "controller": controller, "original_plan": plan,
+        "proposal_cache": cache,
+        "original_selected_plan": plan, "whole_club_rows": club_rows,
+        "team_context": context_from_rows(club_rows),
     }
-
     win = _new_toplevel()
     win.title("Plan these players")
-    win.geometry("1080x860")
-    try:
-        win.minsize(940, 720)
-    except Exception:
-        pass
+    win.geometry("1020x740")
+    win.minsize(800, 600)
     win.configure(fg_color=theme.BG)
     _raise_window(win)
-
-    header = ctk.CTkFrame(
-        win, fg_color=theme.PANEL, corner_radius=theme.R_MD,
-        border_width=1, border_color=theme.BORDER,
-    )
-    header.pack(fill="x", padx=theme.SP4, pady=(theme.SP3, theme.SP2))
-    stripe = ctk.CTkFrame(header, width=4, height=8, fg_color=theme.CODEX, corner_radius=0)
-    stripe.pack(side="left", fill="y", padx=(0, 0))
-    head_copy = ctk.CTkFrame(header, fg_color="transparent")
-    head_copy.pack(side="left", fill="x", expand=True, padx=theme.SP3, pady=theme.SP3)
-    eyebrow(head_copy, "Codex squad session").pack(anchor="w")
-    text_label(head_copy, "Plan these players", size=20, bold=True).pack(anchor="w", pady=(2, 0))
-    subtitle = muted_label(
-        head_copy,
-        "One build per player. A number you type stays locked.",
-        size=12,
-    )
-    subtitle.pack(anchor="w", pady=(2, 0))
-    count_chip = ctk.CTkFrame(header, fg_color=theme.CARD, corner_radius=theme.R_SM)
-    count_chip.pack(side="right", padx=theme.SP3, pady=theme.SP3)
-    text_label(count_chip, str(plan.player_count), size=18, bold=True, color=theme.CODEX).pack(
-        anchor="center", padx=theme.SP3, pady=(theme.SP2, 0)
-    )
-    muted_label(count_chip, "players", size=10).pack(anchor="center", padx=theme.SP3, pady=(0, theme.SP2))
-
+    header = ctk.CTkFrame(win, fg_color="transparent")
+    header.pack(fill="x", padx=20, pady=(16, 12))
+    text_label(header, "Plan these players", size=22, bold=True).pack(side="left")
+    subtitle = muted_label(header, f"{club_name or 'Squad'}  ·  {plan.player_count} selected", size=12)
+    subtitle.pack(side="left", padx=16)
     tools = panel(win, level=1)
-    tools.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP2))
-    from ..widgets.ai_bar import mount_ai_provider_bar
-
-    mount_ai_provider_bar(tools, svc).pack_configure(padx=theme.SP3, pady=(theme.SP2, 0))
-    grok_row = ctk.CTkFrame(tools, fg_color="transparent")
-    grok_row.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP1))
-    prompt_entry = ctk.CTkEntry(
-        grok_row,
-        placeholder_text="cr7 overall 88, messi jersey 10",
-        height=40,
-        fg_color=theme.BG,
-        border_color=theme.CODEX,
-        border_width=1,
-        text_color=theme.TEXT,
-        placeholder_text_color=theme.MUTED,
-    )
-    prompt_entry.pack(side="left", fill="x", expand=True, padx=(0, theme.SP2))
+    tools.pack(fill="x", padx=16, pady=(0, 12))
+    request_row = ctk.CTkFrame(tools, fg_color="transparent")
+    request_row.pack(fill="x", padx=12, pady=(12, 8))
+    prompt_entry = ctk.CTkEntry(request_row, placeholder_text="What should change? e.g. messi jersey 10",
+                               height=38, fg_color=theme.BG, border_color=theme.BORDER,
+                               text_color=theme.TEXT, placeholder_text_color=theme.MUTED)
+    prompt_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
     if state["prompt"]:
         prompt_entry.insert(0, state["prompt"])
-    interpret_btn = button(
-        grok_row, "Update",
-        lambda: _start_interpret(
-            svc, state, prompt_entry.get(), chip_host, preview_host,
-            matrix_host, status_lbl, subtitle, interpret_btn, propose_btn,
-        ),
-        kind="accent", height=40, width=96,
-    )
-    interpret_btn.pack(side="left")
-
-    progress_host = ctk.CTkFrame(tools, fg_color="transparent")
-    progress_host.pack(fill="x", padx=theme.SP3, pady=(theme.SP1, theme.SP2))
-    progress_lbl = muted_label(progress_host, "Codex is idle.", size=11)
-    progress_lbl.pack(anchor="w")
-    progress_bar = ctk.CTkProgressBar(
-        progress_host,
-        height=8,
-        corner_radius=theme.R_PILL,
-        progress_color=theme.CODEX,
-        fg_color=theme.BORDER,
-    )
-    progress_bar.set(0)
-    progress_bar.pack(fill="x", pady=(theme.SP1, 0))
-    state["progress_lbl"] = progress_lbl
-    state["progress_bar"] = progress_bar
-    ceiling_row = ctk.CTkFrame(tools, fg_color="transparent")
-    ceiling_row.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP2))
-    muted_label(ceiling_row, "PlayStyle+ ceiling", size=11).pack(side="left")
+    saved_path = svc.paths.root / "planner_requests.json"
+    requests = {**REQUEST_PRESETS, **load_requests(saved_path)}
+    def save_current_request():
+        dialog = ctk.CTkInputDialog(text="Name this request so you can reuse it.", title="Save request")
+        name = dialog.get_input()
+        if name:
+            try:
+                save_request(saved_path, name, prompt_entry.get())
+                requests[name] = prompt_entry.get().strip()
+                preset_menu.configure(values=["Choose a request", *requests])
+                set_status(svc, f"Saved request: {name}")
+            except (ValueError, OSError) as exc:
+                set_status(svc, str(exc))
+    interpret_btn = button(request_row, "Save request", save_current_request,
+                           kind="ghost", height=38, width=110)
+    interpret_btn.pack(side="right")
+    options = ctk.CTkFrame(tools, fg_color="transparent")
+    options.pack(fill="x", padx=12, pady=(0, 10))
+    def load_current_request(label):
+        if label in requests:
+            prompt_entry.delete(0, "end")
+            prompt_entry.insert(0, requests[label])
+            _request_changed(state)
+    preset_menu = ctk.CTkOptionMenu(options, values=["Choose a request", *requests],
+                                    command=load_current_request, width=180, height=28)
+    preset_menu.set("Choose a request")
+    preset_menu.pack(side="left")
     ceiling_var = ctk.BooleanVar(value=False)
     state["ceiling_unlimited"] = ceiling_var
-    ctk.CTkSwitch(
-        ceiling_row,
-        text="No ceiling",
-        variable=ceiling_var,
-        progress_color=theme.CODEX,
-        button_color=theme.TEXT,
-        button_hover_color=theme.MUTED,
-        text_color=theme.TEXT,
-    ).pack(side="left", padx=(theme.SP3, 0))
-
-    chip_host = ctk.CTkFrame(tools, fg_color="transparent")
-    chip_host.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP2))
-
-    status_lbl = muted_label(win, "Checking the names you typed…", size=11)
-    status_lbl.pack(anchor="w", padx=theme.SP4)
-
-    foot = ctk.CTkFrame(win, fg_color="transparent", height=52)
-    foot.pack(side="bottom", fill="x", padx=theme.SP3, pady=(0, theme.SP3))
-    try:
-        foot.pack_propagate(False)
-    except Exception:
-        pass
-
-    body = ctk.CTkScrollableFrame(win, fg_color="transparent")
-    body.pack(fill="both", expand=True, padx=theme.SP3, pady=theme.SP2)
-    preview_host = ctk.CTkFrame(body, fg_color="transparent")
-    preview_host.pack(fill="x")
-    matrix_host = ctk.CTkFrame(body, fg_color="transparent")
-    matrix_host.pack(fill="both", expand=True, pady=(theme.SP2, 0))
-
-    apply_btn = button(
-        foot, "Apply these builds…",
-        lambda: _apply(svc, state, win),
-        kind="secondary", height=36, width=190,
-        disabled_reason="Codex is still writing each build.",
-    )
+    ceiling_switch = ctk.CTkSwitch(options, text="No PlayStyle+ ceiling", variable=ceiling_var,
+                  progress_color=theme.ACCENT, button_color=theme.TEXT, text_color=theme.TEXT,
+                  command=lambda: _ceiling_changed(state))
+    ceiling_switch.pack(side="right")
+    state.update(ceiling_switch=ceiling_switch, interpret_btn=interpret_btn)
+    state.update(prompt_entry=prompt_entry, request_presets=preset_menu)
+    prompt_entry.bind("<KeyRelease>", lambda _event: _request_changed(state))
+    team_host = ctk.CTkFrame(tools, fg_color="transparent")
+    def toggle_team():
+        if team_host.winfo_manager():
+            team_host.pack_forget()
+        else:
+            team_host.pack(fill="x", padx=12, pady=(0, 10))
+    button(header, "Team plan", toggle_team, kind="ghost", height=28, width=86).pack(side="right", padx=6)
+    from .planner_team import mount_team_controls
+    mount_team_controls(team_host, state, on_dirty=lambda: _mark_review_dirty(state))
+    settings_host = ctk.CTkFrame(tools, fg_color="transparent")
+    def settings():
+        if settings_host.winfo_manager():
+            settings_host.pack_forget()
+        else:
+            if not settings_host.winfo_children():
+                from ..widgets.ai_bar import mount_ai_provider_bar
+                mount_ai_provider_bar(settings_host, svc)
+            settings_host.pack(fill="x", padx=12, pady=(0, 10))
+    button(header, "AI settings", settings, kind="ghost", height=28, width=92).pack(side="right")
+    footer = ctk.CTkFrame(win, fg_color=theme.CHROME, corner_radius=0)
+    footer.pack(side="bottom", fill="x")
+    action_row = ctk.CTkFrame(footer, fg_color="transparent")
+    action_row.pack(fill="x", padx=16, pady=(12, 12))
+    progress = ctk.CTkFrame(action_row, fg_color="transparent")
+    progress.pack(side="left", fill="x", expand=True, padx=(0, 16))
+    status_lbl = muted_label(progress, "Ready to build a plan", size=11, anchor="w",
+                              wraplength=440, justify="left")
+    status_lbl.pack(fill="x")
+    progress_bar = ctk.CTkProgressBar(progress, height=4, progress_color=theme.CODEX,
+                                      fg_color=theme.BORDER)
+    progress_bar.set(0)
+    progress_bar.pack(fill="x", pady=(6, 0))
+    state.update(progress_lbl=status_lbl, progress_bar=progress_bar)
+    apply_btn = button(action_row, "Apply changes…", lambda: _apply(svc, state, win),
+                        kind="primary", height=38, width=145,
+                        disabled_reason="Build a plan to review first.")
     apply_btn.pack(side="right")
-    propose_btn = button(
-        foot, "Rebuild",
-        lambda: _start_session_propose(
-            svc, state, preview_host, matrix_host, status_lbl, subtitle, propose_btn
-        ),
-        kind="primary", height=32, width=190,
-    )
-    propose_btn.pack(side="right", padx=(0, theme.SP2))
-    button(
-        foot, "Codex login",
-        lambda: _connect_grok(svc, status_lbl),
-        kind="ghost", height=32, width=110,
-    ).pack(side="left")
-    state["apply_btn"] = apply_btn
+    def view_results():
+        from .squad_receipts import open_receipt
+        if state.get("receipt_id"):
+            open_receipt(svc, state["receipt_id"])
+    receipt_btn = button(action_row, "View results", view_results, kind="ghost", height=38, width=95)
+    state["receipt_btn"] = receipt_btn
+    propose_btn = button(action_row, "Build plan", lambda: _start_session_propose(
+        svc, state, preview_host, matrix_host, status_lbl, subtitle, propose_btn),
+        kind="secondary", height=38, width=120)
+    propose_btn.pack(side="right", padx=(0, 8))
+    body = ctk.CTkFrame(win, fg_color="transparent")
+    body.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+    chip_host, preview_host, matrix_host = mount_review(body, state, lambda: _mark_review_dirty(state))
+    state.update(apply_btn=apply_btn, propose_btn=propose_btn)
+    def repair_player(pid):
+        state["retry_playerids"] = {int(pid)}
+        _start_session_propose(svc, state, preview_host, matrix_host, status_lbl, subtitle, propose_btn)
+    state["repair_player"] = repair_player
+    win._planner_state = state
+    def close():
+        controller.close(getattr(svc, "executor", None))
+        win.destroy()
+    win.protocol("WM_DELETE_WINDOW", close)
+    # A real selection is visible immediately, before any provider request.
+    state["session"] = _draft_session(plan, state["prompt"], club_name, state.get("team_context"))
+    state["draft_session"] = state["session"]
+    ceiling_var.set(state["session"].recipe.unlimited_playstyles)
+    state["phase"] = "preview"
+    render_players(state)
     _sync_session_apply(state)
+    _plan_progress(state, "Describe your changes above, then Build plan.")
 
-    if state["prompt"]:
-        _start_interpret(
-            svc, state, state["prompt"], chip_host, preview_host,
-            matrix_host, status_lbl, subtitle, interpret_btn, propose_btn,
-        )
-    else:
-        try:
-            status_lbl.configure(text="Type each overall, then Update.")
-        except Exception:
-            pass
+
+def _request_changed(state: dict[str, Any]) -> None:
+    controller = state.get("controller")
+    entry = state.get("prompt_entry")
+    if entry is not None and (controller is None or controller.update_request(entry.get())):
+        _mark_review_dirty(state)
+
+
+def _ceiling_changed(state: dict[str, Any]) -> None:
+    state["ceiling_edited"] = True
+    _mark_review_dirty(state)
+
+
+def _mark_review_dirty(state: dict[str, Any]) -> None:
+    if state.get("busy") or state.get("interpreting") or state.get("applying"):
+        return
+    state["edits_dirty"] = True
+    if state.get("review_summary") is not None:
+        state["review_summary"].configure(text="Preview needs a rebuild")
+        from .planner_review import refresh_request_checks
+
+        refresh_request_checks(state)
+    _plan_progress(state, "Selection or targets changed. Rebuild to refresh the preview.")
+    _sync_session_apply(state)
 
 
 def session_interpret_worker(
@@ -481,6 +499,7 @@ def session_propose_worker(
     on_progress: Any = None,
     on_success: Any = None,
     on_error: Any = None,
+    cache: Any = None,
 ) -> None:
     try:
         if getattr(token, "cancelled", False):
@@ -501,6 +520,7 @@ def session_propose_worker(
                     str(row.get("position") or ""),
                     int(row.get("target_ovr") or 80),
                     catalog,
+                    **({"cache": cache} if cache is not None else {}),
                 )
             row = dict(row)
             row["library_hint"] = hint
@@ -515,13 +535,14 @@ def session_propose_worker(
             problems=problems,
             on_chunk=lambda cur, total: on_progress and on_progress(
                 (
-                    f"Codex is writing {total} group{'s' if total != 1 else ''} of players."
+                    "Designing player changes…"
                     if cur <= 0
-                    else f"Codex finished {cur} of {total}."
+                    else f"Designing player changes · {round(100 * cur / total)}%"
                 ),
                 cur,
                 total,
             ),
+            **({"cache": cache} if cache is not None else {}),
         )
         if getattr(token, "cancelled", False):
             return
@@ -552,8 +573,12 @@ def session_propose_worker(
 def _codex_progress(svc: Any, state: dict[str, Any], status_lbl: Any):
     """Marshal a Codex group update onto the plan window."""
 
+    controller = state.get("controller")
+    generation = controller.generation if controller is not None else None
     def report(msg: str, done: int = 0, total: int = 0) -> None:
         def ui(message: str = msg, finished: int = done, groups: int = total) -> None:
+            if controller is not None and not controller.accepts(generation):
+                return
             try:
                 status_lbl.configure(text=message)
             except Exception:
@@ -578,16 +603,22 @@ def _ui(svc: Any, fn: Any) -> None:
         fn()
 
 
-def _submit(svc: Any, name: str, work: Any) -> None:
+def _submit(svc: Any, name: str, work: Any, *, state: dict | None = None) -> None:
+    controller = (state or {}).get("controller")
+    if controller is not None:
+        name = controller.task_key(name)
     if getattr(svc, "executor", None) is not None and hasattr(svc.executor, "submit"):
         svc.executor.submit(name, work)
     else:
         work(type("T", (), {"cancelled": False})())
 
 
-def _draft_session(plan: SquadPlan, prompt: str, club_name: str) -> SquadSession:
+def _draft_session(plan: SquadPlan, prompt: str, club_name: str, team_context: Any = None) -> SquadSession:
     """Python ranking so the checklist appears before Codex returns."""
     recipe = parse_recipe(prompt, club_name)
+    if team_context is not None:
+        recipe = replace(recipe, starter_ids=tuple(team_context.starters), formation=team_context.formation,
+                         planning_roles=tuple(sorted(team_context.roles.items())))
     roster = roster_from_rows(
         [
             {
@@ -606,7 +637,11 @@ def _draft_session(plan: SquadPlan, prompt: str, club_name: str) -> SquadSession
             for member in plan.members
         ]
     )
-    return build_session(roster, recipe)
+    session = build_session(roster, recipe)
+    if team_context is not None:
+        from ...domain.team_plan import apply_team_context
+        session = apply_team_context(session, team_context)
+    return session
 
 
 def _snapshot_preview_edits(state: dict[str, Any]) -> tuple[set[int], dict[int, str]]:
@@ -614,13 +649,17 @@ def _snapshot_preview_edits(state: dict[str, Any]) -> tuple[set[int], dict[int, 
     pins: dict[int, str] = {}
     for pid, flag in (state.get("include_vars") or {}).items():
         try:
-            if not bool(flag.get()):
+            draft = state.get("draft_session") or state.get("session")
+            if not bool(flag.get()) and (draft is None or int(pid) in draft.playerids):
                 excluded.add(int(pid))
         except (TypeError, ValueError, AttributeError):
             continue
     for pid, entry in (state.get("pin_vars") or {}).items():
         try:
-            pins[int(pid)] = str(entry.get()).strip()
+            value = str(entry.get()).strip()
+            target = state["session"].target_for(int(pid)) if state.get("session") else None
+            if target is None or value != str(target.target_ovr):
+                pins[int(pid)] = value
         except (TypeError, ValueError, AttributeError):
             continue
     return excluded, pins
@@ -634,6 +673,7 @@ def _sync_session_apply(state: dict[str, Any]) -> None:
     ready = (
         state.get("phase") == "review"
         and not state.get("applying")
+        and not state.get("edits_dirty")
         and plan is not None
         and not getattr(plan, "blocking_issues", ())
         and bool(
@@ -645,10 +685,24 @@ def _sync_session_apply(state: dict[str, Any]) -> None:
     set_disabled(
         btn,
         "" if ready else (
-            "Rebuild to complete every player's PlayStyle+ proposal."
-            if getattr(plan, "blocking_issues", ()) else "Codex is still writing each build."
+            "Rebuild after changing the selection or targets." if state.get("edits_dirty") else
+            "Repair the affected players to complete this plan."
+            if getattr(plan, "blocking_issues", ()) else
+            "Codex is still writing each build."
         ),
     )
+    if state.get("review_root"):
+        btn.configure(text="Applied" if state.get("phase") == "applied" else "Apply changes…")
+        active = bool(state.get("busy") or state.get("interpreting") or state.get("applying"))
+        control_state = "disabled" if active else "normal"
+        repair_needed = bool(getattr(plan, "blocking_issues", ()) and not state.get("edits_dirty"))
+        state["propose_btn"].configure(text="Repair affected players" if repair_needed else
+                                      "Rebuild" if state.get("phase") in {"review", "applied"} else "Build plan", state=control_state)
+        state["interpret_btn"].configure(state=control_state)
+        state["ceiling_switch"].configure(state=control_state)
+        for control in (state.get("prompt_entry"), state.get("request_presets"), *state.get("team_controls", ())):
+            if control is not None:
+                control.configure(state=control_state)
 
 
 def _start_interpret(
@@ -684,6 +738,8 @@ def _start_interpret(
         set_status(svc, "Codex is already working…")
         return
     state["interpreting"] = True
+    controller = state.get("controller")
+    generation = controller.begin() if controller is not None else None
     state["prompt"] = request
     state["phase"] = "interpret"
     _plan_progress(
@@ -746,6 +802,8 @@ def _start_interpret(
 
     def on_success(session: SquadSession) -> None:
         def ui() -> None:
+            if controller is not None and not controller.accepts(generation):
+                return
             state["interpreting"] = False
             excluded, pins = _snapshot_preview_edits(state)
             state["kept_excluded"] = excluded
@@ -758,8 +816,9 @@ def _start_interpret(
                 pass
             _render_session_preview(state, chip_host, preview_host, status_lbl, subtitle)
             try:
-                for child in list(matrix_host.winfo_children()):
-                    child.destroy()
+                if not state.get("review_root"):
+                    for child in list(matrix_host.winfo_children()):
+                        child.destroy()
             except Exception:
                 pass
             _sync_session_apply(state)
@@ -773,6 +832,8 @@ def _start_interpret(
 
     def on_error(exc: BaseException) -> None:
         def err() -> None:
+            if controller is not None and not controller.accepts(generation):
+                return
             state["interpreting"] = False
             _LOG.error("squad interpret failed: %s", exc)
             _plan_progress(state, f"Codex stopped: {exc}", mode="idle")
@@ -799,7 +860,7 @@ def _start_interpret(
         )
 
     try:
-        _submit(svc, "squad.grok.interpret", work)
+        _submit(svc, "squad.grok.interpret", work, state=state)
     except Exception as exc:  # noqa: BLE001
         state["interpreting"] = False
         _LOG.exception("could not start squad interpret")
@@ -821,179 +882,27 @@ def _named_pins_ready(session: SquadSession) -> bool:
 
 def _session_status(phase: str, session: SquadSession | None) -> str:
     """Plain status for the plan window. Names and overalls, not internal steps."""
-    who = ""
-    if session is not None and session.targets:
-        who = ", ".join(
-            f"{item.name} → {item.target_ovr}" for item in session.targets[:6]
-        )
     if phase == "review":
-        return "Builds are ready. Look through the changes, then Apply."
+        return "Review each player, then Apply changes."
     if phase in {"reading", "proposing"}:
-        if who:
-            return f"Writing builds for {who}."
-        return "Writing attributes and playstyles…"
-    if who:
-        return f"Check these overalls: {who}."
-    return "Checking the names you typed…"
+        return "Reading current player values…" if phase == "reading" else "Designing player changes…"
+    return "Adjust the selection or overall targets, then Build plan."
 
 
 def _render_session_preview(
-    state: dict[str, Any],
-    chip_host: Any,
-    preview_host: Any,
-    status_lbl: Any,
-    subtitle: Any,
+    state: dict[str, Any], chip_host: Any, preview_host: Any,
+    status_lbl: Any, subtitle: Any,
 ) -> None:
-    session: SquadSession | None = state.get("session")
-    for host in (chip_host, preview_host):
-        try:
-            for child in list(host.winfo_children()):
-                child.destroy()
-        except Exception:
-            return
+    del chip_host, preview_host, subtitle
+    from .planner_review import render_players
+    session = state.get("session")
     if session is None:
         return
     ceiling = state.get("ceiling_unlimited")
     if ceiling is not None:
-        try:
-            ceiling.set(bool(session.recipe.unlimited_playstyles))
-        except Exception:
-            pass
-    for chip in session.chips[:8]:
-        pill(chip_host, chip, tone="info").pack(side="left", padx=(0, theme.SP1), pady=(0, theme.SP1))
-    include_vars: dict[int, Any] = {}
-    pin_vars: dict[int, Any] = {}
-    card = panel(preview_host, level=1)
-    card.pack(fill="x")
-    head = ctk.CTkFrame(card, fg_color="transparent")
-    head.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, 0))
-    eyebrow(head, "These players").pack(side="left")
-    muted_label(head, f"{len(session.targets)}", size=11).pack(side="right")
-    muted_label(
-        card,
-        "Untick anyone to skip them. Change a number, then Rebuild.",
-        size=10,
-    ).pack(anchor="w", padx=theme.SP3, pady=(2, 0))
-    for note in session.warnings:
-        muted_label(card, note, size=11, color=theme.WARNING).pack(
-            anchor="w", padx=theme.SP3, pady=(2, 0)
-        )
-    tools = ctk.CTkFrame(card, fg_color="transparent")
-    tools.pack(fill="x", padx=theme.SP3, pady=(theme.SP1, 0))
-
-    def _set_all(value: bool) -> None:
-        for var in include_vars.values():
-            try:
-                var.set(value)
-            except Exception:
-                pass
-
-    button(tools, "All", lambda: _set_all(True), kind="ghost", height=24, width=48).pack(
-        side="left"
-    )
-    button(tools, "None", lambda: _set_all(False), kind="ghost", height=24, width=56).pack(
-        side="left", padx=(theme.SP1, 0)
-    )
-    kept_excluded = {int(pid) for pid in (state.get("kept_excluded") or set())}
-    kept_pins = {
-        int(pid): str(value)
-        for pid, value in (state.get("kept_pins") or {}).items()
-    }
-    for item in session.targets:
-        row = ctk.CTkFrame(
-            card, fg_color=theme.BG, corner_radius=theme.R_SM,
-            border_width=1, border_color=theme.BORDER,
-        )
-        row.pack(fill="x", padx=theme.SP3, pady=2)
-        flag = ctk.BooleanVar(value=item.playerid not in kept_excluded)
-        include_vars[item.playerid] = flag
-
-        def _range_tick(event: Any, pid: int = item.playerid) -> None:
-            shift = bool(int(getattr(event, "state", 0) or 0) & 0x0001)
-            order = [target.playerid for target in session.targets]
-            anchor = state.get("include_anchor")
-            if not shift:
-                state["include_anchor"] = pid
-                return
-            span = inclusive_span(order, anchor, pid)
-            if span is None:
-                state["include_anchor"] = pid
-                return
-
-            def apply(selected: tuple[int, ...] = span) -> None:
-                for key in selected:
-                    box = include_vars.get(key)
-                    if box is not None:
-                        box.set(True)
-
-            try:
-                event.widget.after_idle(apply)
-            except Exception:
-                apply()
-
-        tick = ctk.CTkCheckBox(
-            row,
-            text="",
-            variable=flag,
-            width=28,
-            height=22,
-            checkbox_width=16,
-            checkbox_height=16,
-            fg_color=theme.CODEX,
-            hover_color=theme.CARD_HOVER,
-            border_color=theme.BORDER,
-        )
-        tick.pack(side="left", padx=(theme.SP2, 0), pady=theme.SP2)
-        tick.bind("<Button-1>", _range_tick, add="+")
-        row.bind("<Button-1>", _range_tick, add="+")
-        before_fill, before_fg = theme.ovr_colors(item.ovr)
-        before_chip = ctk.CTkFrame(
-            row, width=40, height=28, fg_color=before_fill, corner_radius=theme.R_SM,
-        )
-        before_chip.pack(side="left", padx=(theme.SP1, theme.SP2), pady=theme.SP2)
-        before_chip.pack_propagate(False)
-        text_label(
-            before_chip,
-            str(item.ovr if item.ovr is not None else "—"),
-            size=12,
-            bold=True,
-            color=before_fg,
-        ).pack(expand=True)
-        words = ctk.CTkFrame(row, fg_color="transparent")
-        words.pack(side="left", fill="x", expand=True, pady=theme.SP1)
-        name_lbl = text_label(words, item.name, size=13, bold=True)
-        name_lbl.pack(anchor="w")
-        name_lbl.bind("<Button-1>", _range_tick, add="+")
-        words.bind("<Button-1>", _range_tick, add="+")
-        detail = item.position or "Player"
-        if item.rung:
-            detail = f"{detail}  ·  {item.rung}"
-        if item.pinned:
-            detail = f"{detail}  ·  overall locked"
-        muted_label(words, detail, size=10).pack(anchor="w")
-        muted_label(row, "→", size=14, color=theme.CODEX).pack(side="left", padx=(0, theme.SP2))
-        after_fill, _after_fg = theme.ovr_colors(item.target_ovr)
-        pin = ctk.CTkEntry(
-            row,
-            width=52,
-            height=28,
-            justify="center",
-            fg_color=theme.CARD,
-            border_color=after_fill,
-            border_width=1,
-            text_color=theme.TEXT,
-        )
-        pin.insert(0, kept_pins.get(item.playerid) or str(item.target_ovr))
-        pin.pack(side="left", padx=(0, theme.SP3), pady=theme.SP2)
-        pin_vars[item.playerid] = pin
-    muted_label(card, "", size=4).pack(pady=(0, theme.SP1))
-    state["include_vars"] = include_vars
-    state["pin_vars"] = pin_vars
-    try:
-        status_lbl.configure(text=_session_status(str(state.get("phase") or "preview"), session))
-        subtitle.configure(text=_session_status(str(state.get("phase") or "preview"), session))
-    except Exception:
-        pass
+        ceiling.set(bool(session.recipe.unlimited_playstyles))
+    render_players(state)
+    status_lbl.configure(text=_session_status(str(state.get("phase") or "preview"), session))
 
 
 def _collect_session_edits(state: dict[str, Any]) -> SquadSession:
@@ -1011,7 +920,9 @@ def _collect_session_edits(state: dict[str, Any]) -> SquadSession:
         try:
             typed = int(str(entry.get()).strip())
         except (TypeError, ValueError, AttributeError):
-            continue
+            raise JobValidationError(f"{item.name}: enter an overall between 1 and 99.")
+        if not 1 <= typed <= 99:
+            raise JobValidationError(f"{item.name}: enter an overall between 1 and 99.")
         if typed != item.target_ovr:
             pins[item.playerid] = typed
     return refine_session(session, excluded_ids=excluded, pins=pins)
@@ -1026,10 +937,45 @@ def _start_session_propose(
     subtitle: Any,
     propose_btn: Any,
 ) -> None:
+    if state.get("busy") or state.get("interpreting") or state.get("applying"):
+        set_status(svc, "Codex is already working…")
+        return
+    controller = state.get("controller")
+    generation = controller.begin() if controller is not None else None
+    original = controller.original_plan if controller is not None else state.get("original_plan", state["plan"])
+    previous = state["plan"]
+    retry_ids = state.pop("retry_playerids", None)
+    if retry_ids is None:
+        retry_ids = {member.playerid for member in previous.members
+                     if any(issue.startswith(member.name + ":") for issue in previous.blocking_issues)}
+    cache = state.get("proposal_cache")
+    if retry_ids and cache is not None:
+        cache.invalidate_players(retry_ids)
+    excluded, pins = _snapshot_preview_edits(state)
+    request = state["prompt_entry"].get().strip() if state.get("prompt_entry") is not None else state.get("prompt", "")
+    if not request:
+        set_status(svc, "Describe your changes above, then Build plan.")
+        return
+    try:
+        from .planner_team import collect_team_context
+        context = collect_team_context(state)
+        state["session"] = _draft_session(original, request, str(state.get("club_name") or ""), context)
+        state["draft_session"] = state["session"]
+        state["prompt"] = request
+        state["kept_excluded"], state["kept_pins"] = excluded, pins
+        if controller is not None:
+            controller.request = request
+            if previous.overrides or previous.jersey_numbers:
+                controller.last_proposal = previous
+    except (ValueError, JobValidationError) as exc:
+        set_status(svc, f"Could not build this request: {exc}")
+        return
     session = state.get("session")
     ceiling = state.get("ceiling_unlimited")
     if session is not None and ceiling is not None:
         try:
+            if not state.get("ceiling_edited"):
+                ceiling.set(session.recipe.unlimited_playstyles)
             session = replace(
                 session,
                 recipe=replace(
@@ -1057,7 +1003,13 @@ def _start_session_propose(
         set_status(svc, blocked)
         return
     try:
+        if state.get("review_root"):
+            from .planner_review import render_players
+            render_players(state)
         refined = _collect_session_edits(state)
+        if context is not None:
+            from ...domain.team_plan import apply_team_context
+            refined = apply_team_context(refined, context)
     except Exception as exc:  # noqa: BLE001
         set_status(svc, f"Could not apply pins: {exc}")
         return
@@ -1066,35 +1018,46 @@ def _start_session_propose(
         return
     state["session"] = refined
     try:
-        plan = state["plan"].keeping(refined.playerids)
+        plan = original.keeping(refined.playerids)
     except Exception as exc:  # noqa: BLE001
         set_status(svc, str(exc))
         return
     state["plan"] = plan
+    missing = [m for m in plan.members if needs_live_base(m, refined.recipe)]
     state["busy"] = True
-    state["phase"] = "reading"
-    _plan_progress(state, "Codex is preparing this squad.", mode="wait")
+    state["phase"] = "reading" if missing else "proposing"
+    state["edits_dirty"] = False
+    _plan_progress(state, "Reading current player values…" if missing else "Designing player changes…", mode="wait")
     _sync_session_apply(state)
     try:
         propose_btn.configure(state="disabled")
-        status_lbl.configure(text=_session_status("reading", refined))
+        status_lbl.configure(text=_session_status(state["phase"], refined))
     except Exception:
         pass
 
     def after_bases(plan_ready: SquadPlan) -> None:
+        if controller is not None and not controller.accepts(generation):
+            return
+        if controller is not None:
+            controller.update_bases({m.playerid: m.base for m in plan_ready.members})
+            state["original_plan"] = controller.original_plan
         state["plan"] = plan_ready
         state["phase"] = "proposing"
         try:
             status_lbl.configure(text=_session_status("proposing", state.get("session")))
         except Exception:
             pass
-        set_status(svc, "Writing attributes and playstyles…")
+        set_status(svc, "Designing requested player changes…")
 
         def on_success(staged: SquadPlan) -> None:
             def ui() -> None:
+                if controller is not None and not controller.accepts(generation):
+                    return
+                if controller is not None:
+                    controller.last_proposal = staged
                 state["busy"] = False
                 state["phase"] = "review"
-                _plan_progress(state, "Builds are ready.", mode="ready")
+                _plan_progress(state, "Review each player, then Apply changes.", mode="ready")
                 try:
                     propose_btn.configure(state="normal")
                 except Exception:
@@ -1110,7 +1073,13 @@ def _start_session_propose(
 
         def on_error(exc: BaseException) -> None:
             def err() -> None:
+                if controller is not None and not controller.accepts(generation):
+                    return
                 state["busy"] = False
+                if controller is not None and controller.last_proposal is not None:
+                    state["plan"] = controller.last_proposal
+                    state["phase"] = "review"
+                    state["edits_dirty"] = True
                 _plan_progress(state, f"Codex stopped: {exc}", mode="idle")
                 try:
                     propose_btn.configure(state="normal")
@@ -1131,10 +1100,11 @@ def _start_session_propose(
                 on_progress=_codex_progress(svc, state, status_lbl),
                 on_success=on_success,
                 on_error=on_error,
+                cache=state.get("proposal_cache"),
             )
 
         try:
-            _submit(svc, "squad.grok.session", work)
+            _submit(svc, "squad.grok.session", work, state=state)
         except Exception as exc:  # noqa: BLE001
             state["busy"] = False
             try:
@@ -1143,7 +1113,6 @@ def _start_session_propose(
             except Exception:
                 pass
 
-    missing = [m for m in plan.members if needs_live_base(m)]
     if not missing:
         try:
             status_lbl.configure(text=_session_status("proposing", state.get("session")))
@@ -1167,31 +1136,22 @@ def _start_session_propose(
 
     def on_rows(rows: Mapping[int, Mapping[str, Any]]) -> None:
         def ui() -> None:
+            if controller is not None and not controller.accepts(generation):
+                return
             filled = state["plan"].with_member_bases(rows)
-            skipped = [m.name for m in filled.members if needs_live_base(m)]
+            skipped = [m.name for m in filled.members if needs_live_base(m, refined.recipe)]
             if skipped:
-                try:
-                    status_lbl.configure(
-                        text=f"No live stats for {', '.join(skipped[:4])}. Editing the rest."
-                    )
-                except Exception:
-                    pass
-                keep = [m.playerid for m in filled.members if not needs_live_base(m)]
-                if not keep:
-                    state["busy"] = False
-                    try:
-                        propose_btn.configure(state="normal")
-                    except Exception:
-                        pass
-                    set_status(svc, "Live read returned no usable players.")
-                    return
-                filled = filled.keeping(keep)
-                state["session"] = refine_session(
-                    state["session"],
-                    excluded_ids=[
-                        pid for pid in state["session"].playerids if pid not in set(keep)
-                    ],
+                state["busy"] = False
+                state["phase"] = "preview"
+                message = (
+                    f"Missing live values for {', '.join(skipped[:4])}"
+                    + (f" and {len(skipped) - 4} more" if len(skipped) > 4 else "")
+                    + ". Keep Career Mode open and rebuild; all selected players must be read."
                 )
+                _plan_progress(state, message, mode="idle")
+                _sync_session_apply(state)
+                set_status(svc, message)
+                return
             try:
                 status_lbl.configure(text=f"Reading live stats {len(rows)}/{len(missing)}")
                 _plan_progress(
@@ -1209,7 +1169,12 @@ def _start_session_propose(
 
     def on_error(exc: BaseException) -> None:
         def err() -> None:
+            if controller is not None and not controller.accepts(generation):
+                return
             state["busy"] = False
+            state["phase"] = "preview"
+            _plan_progress(state, f"Live read failed: {exc}", mode="idle")
+            _sync_session_apply(state)
             try:
                 propose_btn.configure(state="normal")
                 status_lbl.configure(text=f"Live read failed: {exc}")
@@ -1400,11 +1365,20 @@ def _set_plan(
 ) -> None:
     state["plan"] = plan
     try:
-        subtitle.configure(text=plan.blast_summary())
+        if not state.get("review_root"):
+            subtitle.configure(text=plan.blast_summary())
         status_lbl.configure(text=msg)
     except Exception:
         pass
-    _render_matrix(matrix_host, plan)
+    if state.get("review_root"):
+        from .planner_review import render_players
+        render_players(state)
+        if plan.blocking_issues:
+            _plan_progress(state, "Build incomplete. Use Repair affected players, or select a player and Repair this player.")
+        else:
+            _plan_progress(state, "Review each player, then Apply changes.", mode="ready")
+    else:
+        _render_matrix(matrix_host, plan)
 
 
 def _apply_preset(
@@ -1597,6 +1571,9 @@ def _apply(svc: Any, state: dict, win: Any) -> None:
         set_status(svc, "Codex is still writing each build.")
         return
     plan: SquadPlan = state["plan"]
+    if state.get("edits_dirty"):
+        set_status(svc, "Rebuild after changing the selection or targets.")
+        return
     if plan.blocking_issues:
         set_status(svc, "Rebuild this plan: " + " ".join(plan.blocking_issues))
         return
@@ -1604,6 +1581,8 @@ def _apply(svc: Any, state: dict, win: Any) -> None:
         set_status(svc, "Stage a template or per-player review before Apply.")
         return
     token = "APPLY"
+    controller = state.get("controller")
+    generation = controller.generation if controller is not None else None
     if plan.player_count > 1:
         kind = "per-player patches" if plan.overrides else "template"
         dialog = ctk.CTkInputDialog(
@@ -1619,29 +1598,47 @@ def _apply(svc: Any, state: dict, win: Any) -> None:
             return
     def finished(result: Any) -> None:
         def ui() -> None:
+            if controller is not None and not controller.accepts(generation):
+                return
             from ...app.commands.apply import _status_line
 
             text = _status_line(result)
+            receipt = getattr(result, "raw", {}).get("plan_receipt", {})
+            if receipt.get("plan_id"):
+                state["receipt_id"] = receipt["plan_id"]
+                if state.get("receipt_btn"):
+                    state["receipt_btn"].pack(side="right", padx=(0, 8))
             if not result.outcome.is_terminal:
                 _plan_progress(state, text, mode="wait")
                 set_status(svc, text)
                 return
             state["applying"] = False
-            _sync_session_apply(state)
-            if result.outcome.is_success:
+            verified = receipt.get("verification") == "verified" if receipt else result.outcome.is_success
+            if result.outcome.is_success and verified:
+                state["phase"] = "applied"
                 _plan_progress(state, "Plan applied.", mode="ready")
-                try:
-                    win.after(600, win.destroy)
-                except Exception:
-                    pass
+                if not state.get("review_root"):
+                    try:
+                        win.after(600, win.destroy)
+                    except Exception:
+                        pass
             else:
-                _plan_progress(state, text, mode="idle")
+                if receipt and receipt.get("verification") == "pending" and result.outcome.is_success:
+                    state["applying"] = True
+                    state["phase"] = "verifying"
+                    text = "Player writes finished. Waiting for read-back verification."
+                    _plan_progress(state, text, mode="wait")
+                else:
+                    state["phase"] = "attention"
+                    _plan_progress(state, text, mode="idle")
+            _sync_session_apply(state)
             set_status(svc, text)
 
         _ui(svc, ui)
 
     try:
         state["applying"] = True
+        state["receipt_id"] = None
         btn = state.get("apply_btn")
         if btn is not None:
             btn.configure(state="disabled")
@@ -1652,6 +1649,9 @@ def _apply(svc: Any, state: dict, win: Any) -> None:
             confirm_token=token if plan.player_count > 1 else "APPLY",
             on_result=finished,
         )
+        state["receipt_id"] = state.get("receipt_id") or jid
+        if state.get("receipt_btn"):
+            state["receipt_btn"].pack(side="right", padx=(0, 8))
         set_status(
             svc,
             f"Squad plan queued ({jid[:8]}…) — {plan.blast_summary()}.",

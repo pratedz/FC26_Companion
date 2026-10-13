@@ -165,7 +165,17 @@ def test_scan_and_heal_use_memory_object_without_global_bytes_api():
 
 def test_unsupported_version_never_reads_memory():
     host = Host()
-    host.lua.globals().LE_VERSION = "v26.3.6"
+    host.lua.globals().LE_VERSION = "v26.3.7"
     result, error = host.reader.scan(host.ids(CARLOS))
     assert result is None and "not supported" in error
     assert not host.reads and not host.writes
+
+
+def test_verified_26_3_6_profile_scans_and_heals_with_same_guards():
+    host = Host()
+    host.lua.globals().LE_VERSION = "v26.3.6"
+    result = host.handler.scan(host.lua.table(), host.lua.table(), host.lua.table())
+    assert result.ok and result.data.players[1].playerid == CARLOS
+    result = host.reader.cure(host.ids(CARLOS))
+    assert list(result.cured_ids.values()) == [CARLOS]
+    assert len(host.reader.scan(host.ids(CARLOS)).players) == 0

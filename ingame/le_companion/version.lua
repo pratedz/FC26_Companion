@@ -30,7 +30,7 @@ WHY THIS MODULE EXISTS
 local version = {}
 
 -- Semantic version of the resident core. Bump on any behaviour change.
-version.VERSION = "2.6.26"
+version.VERSION = "2.6.37"
 
 -- Wire protocol contract number. Job envelopes carry `"schema": 3`; results
 -- carry `"schema": 3`. This is PROTOCOL v3 (docs/V2_ARCHITECTURE.md §3), one
@@ -55,6 +55,7 @@ version.SHA256 = ""
      the one the app intended. Absent from this table == unknown op. ]]
 version.OP_VERSIONS = {
     ["diag.ping"]     = 1,
+    ["assets.legacy"] = 1,
     ["db.dump"]       = 1,
     ["set_fields"]    = 1,
     ["create_player"] = 1,

@@ -106,10 +106,21 @@ def squad_board_row(player: Mapping[str, Any]) -> dict[str, Any]:
         "pos": player.get("position") or player.get("preferredposition1") or player.get("pos") or "—",
         "ovr": player.get("overallrating") or player.get("ovr") or "—",
         "pot": player.get("potential") or player.get("pot") or "—",
-        "age": player.get("age") or "—",
+        "age": _board_age(player),
         "id": player_id,
         "_raw": dict(player),
     }
+
+
+def _board_age(player: Mapping[str, Any]) -> Any:
+    """Show a stored age, or the age implied by the exported birthdate."""
+    raw = player.get("age")
+    if raw not in (None, "", "—", 0, "0"):
+        return raw
+    from ...domain.card_import import age_from_birthdate
+
+    years = age_from_birthdate(player.get("birthdate"))
+    return years if years is not None else "—"
 
 
 def squad_row_ovr(row: Mapping[str, Any]) -> int:

@@ -112,6 +112,16 @@ class JobFinished:
 
 
 @dataclass(frozen=True, slots=True)
+class SigningBatchQueued:
+    job_ids: Sequence[str]
+    selected_count: int
+    save_uid: str
+    teamid: int | None
+    session_id: str = ""
+    at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class JobHistoryCleared:
     """Clear only the visible session history; the durable audit stays intact."""
 
@@ -172,6 +182,7 @@ Event = (
     | JobSubmitted
     | JobProgressed
     | JobFinished
+    | SigningBatchQueued
     | JobHistoryCleared
     | JobQueueCleared
     | SquadSynced

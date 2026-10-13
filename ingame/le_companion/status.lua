@@ -70,6 +70,8 @@ function status.write_session(extra)
         caps[k] = v and true or false
     end
     caps.add_to_team = cfg.core_ops and cfg.core_ops.add_to_team == true or false
+    caps.legacy_file_check = type(rawget(_G, "LegacyFileExist")) == "function"
+    caps.legacy_file_export = type(rawget(_G, "LegacyFileExport")) == "function"
     -- Reflect whether we can see the jobs directory.
     local enum = util.enumeration_source(util.join(cfg.queue_dir, "jobs"))
     caps.enumerate = enum
@@ -85,6 +87,7 @@ function status.write_session(extra)
         limits = version.LIMITS,
         ops = version.OP_VERSIONS,
         lua = tostring(_VERSION),
+        le_version = tostring(rawget(_G, "LE_VERSION") or "unknown"),
     }
     if type(extra) == "table" then
         local extra_caps = extra.capabilities

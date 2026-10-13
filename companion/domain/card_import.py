@@ -8,7 +8,7 @@ module returns only editable player-table fields.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Mapping
 
 from .builds import BuildProposal, proposal
@@ -120,6 +120,22 @@ def forced_birthdate_for_age(age: int) -> int:
         raise PlayerValidationError("Forced age must be between 16 and 40.")
     birthday = FC26_SEASON_START.replace(year=FC26_SEASON_START.year - requested_age)
     return (birthday - EA_DATE_EPOCH).days
+
+
+def age_from_birthdate(raw: Any, *, on: date | None = None) -> int | None:
+    """Years old at the FC 26 season start. ``None`` when the date is unusable."""
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if days <= 0:
+        return None
+    born = EA_DATE_EPOCH + timedelta(days=days)
+    season = on or FC26_SEASON_START
+    years = int((season - born).days / 365.25)
+    if years < 14 or years > 55:
+        return None
+    return years
 
 
 @dataclass(frozen=True, slots=True)

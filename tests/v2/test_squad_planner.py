@@ -87,10 +87,10 @@ def test_empty_selection_and_empty_template_refused():
         build_apply_job(plan)
 
 
-def test_max_players_cap():
+def test_full_selection_is_preserved_above_legacy_player_limit():
     many = _rows(*[(i, f"P{i}", "CM") for i in range(1, MAX_PLAYERS + 5)])
     plan = plan_from_rows(many)
-    assert plan.player_count == MAX_PLAYERS
+    assert plan.player_count == len(many)
 
 
 def test_confirm_squad_apply_gate():
@@ -189,7 +189,7 @@ def test_open_squad_planner_invokes_open_planner_once():
     assert "on_row_click" in club
     assert "Plan these {n}" in club
     assert 'mode="per_player"' in club
-    assert "cap_prompt_rows(rows)" in club
+    assert "cap_prompt_rows(rows)" not in club
 
 
 def test_grok_worker_accepts_token_and_reports_empty_prompt():

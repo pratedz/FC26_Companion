@@ -129,6 +129,20 @@ def run(svc: Services) -> Report:
         )
 
     lv = svc.transport.liveness()
+    if lv.armed:
+        from ... import core_at_least
+        from ...domain.legacy_assets import ASSET_CORE_MIN
+
+        available = core_at_least(lv.core_version, ASSET_CORE_MIN) and bool(
+            (lv.capabilities or {}).get("legacy_file_check")
+            and (lv.capabilities or {}).get("legacy_file_export")
+        )
+        checks.append(Check(
+            "Game asset API", available,
+            "Asset checks and export available" if available else "Legacy file API unavailable in this session",
+            "" if available else "Install the updated Companion worker; restart with LE v26.3.6 or later.",
+            "warn",
+        ))
     worker_installed = next(
         (check.ok for check in checks if check.name == "Worker installation"),
         False,

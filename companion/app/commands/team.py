@@ -7,7 +7,7 @@ the app preference and the live worker capability say it is enabled.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import json
@@ -226,11 +226,17 @@ def _member_body(
     pool: Sequence[int],
     dummy: Mapping[str, Any],
     plan: TeamCardPlan,
+    card: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from ...domain.card_import import card_source_playerid
+    player = _player_payload(plan)
+    source = card_source_playerid(card or {})
+    if source is not None:
+        player["source_playerid"] = source
     return {
         "dummy_pool": [int(pid) for pid in pool],
         "dummy_filter": _dummy_filter_for(dummy),
-        "player": _player_payload(plan),
+        "player": player,
         "contract": {"transfersum": 0, "wage": 5000, "months": 60},
     }
 
@@ -298,7 +304,7 @@ def build_add_card_job(
     pool = _resolved_dummy_pool(requested, by_id)
     dummy = by_id[pool[0]]
     plan = prepared_plan or prepare_card_for_team(svc, card, forced_age=forced_age)
-    member = _member_body(pool=pool, dummy=dummy, plan=plan)
+    member = _member_body(pool=pool, dummy=dummy, plan=plan, card=card)
     op = op_add_to_team(
         "add",
         teamid=int(state.squad.teamid),
@@ -455,7 +461,7 @@ def _jobs_from_preview(svc: Services, preview: TeamAddPreview) -> tuple[Job, ...
     for index, entry in enumerate(preview.entries):
         pool = _resolved_dummy_pool(pools[index], by_id)
         dummy = by_id[pool[0]]
-        members.append(_member_body(pool=pool, dummy=dummy, plan=entry.plan))
+        members.append(_member_body(pool=pool, dummy=dummy, plan=entry.plan, card=entry.card))
         names.append(entry.name)
     if not members:
         raise JobValidationError("Select at least one Library card first.")
@@ -827,6 +833,147 @@ def _verified_native_name_ids(identity: Mapping[str, Any]) -> dict[str, int] | N
     return values if any(value > 0 for value in values.values()) else None
 
 
+_RELINK_PREFS = "sign.squad_full_relink_ids"
+_RELINK_CORE = "2.6.32"
+
+
+def _relink_player_ids(result: Any) -> tuple[int, ...]:
+    ops = (getattr(result, "raw", None) or {}).get("ops") or []
+    if not ops or not isinstance(ops[0], Mapping):
+        return ()
+    progress = (ops[0].get("data") or {}).get("progress") or {}
+    found: list[int] = []
+    for member in progress.get("members") or []:
+        if not isinstance(member, Mapping):
+            return ()
+        pid = _as_int(member.get("playerid"))
+        if pid is None or pid < 1 or pid in found:
+            return ()
+        found.append(pid)
+    return tuple(found)
+
+
+def _sign_was_refused(result: Any) -> bool:
+    for failure in getattr(result, "failures", ()) or ():
+        reason = str(getattr(failure, "reason", "") or "")
+        detail = str(getattr(failure, "detail", "") or "")
+        if reason == "squad_full":
+            return True
+        if reason == "team_not_applied" and "111592" in detail:
+            return True
+    return False
+
+
+def queue_squad_full_relink(svc: Services) -> str | None:
+    try:
+        return _queue_squad_full_relink(svc)
+    except JobValidationError:
+        return None
+
+
+def _queue_squad_full_relink(svc: Services) -> str | None:
+    """Place an already-written sign onto the club after FC reported a full squad.
+
+    The native transfer refuses once the senior squad is full, but the free-agent
+    rows were already overwritten. A newer worker moves those exact rows onto
+    the club. Older workers must not receive this job: they would try to pick
+    the now high-rated rows as fresh dummies.
+    """
+    from ...domain.outcome import JobResult
+
+    live = svc.store.snapshot().bridge.liveness
+    if not core_at_least(str(getattr(live, "core_version", "") or ""), _RELINK_CORE):
+        return None
+    if svc.db is None or active_team_add_jobs(svc):
+        return None
+    done = svc.db.get_pref(_RELINK_PREFS, [])
+    done_ids = {str(item) for item in done} if isinstance(done, list) else set()
+    state = svc.store.snapshot()
+    for record in svc.db.job_records(limit=40):
+        source_id = str(record.job_id)
+        if source_id in done_ids or not is_sign_job_label(str(record.label or "")):
+            continue
+        if state.squad.save_uid and record.save_uid and record.save_uid != state.squad.save_uid:
+            continue
+        raw = record.result_json or {}
+        if not raw:
+            continue
+        result = JobResult.from_wire(raw)
+        if not result.outcome.is_terminal or not _sign_was_refused(result):
+            continue
+        job_json = record.job_json if isinstance(record.job_json, Mapping) else {}
+        source_ops = job_json.get("ops") if isinstance(job_json, Mapping) else None
+        source_op = source_ops[0] if isinstance(source_ops, list) and source_ops else {}
+        teamid = _as_int(source_op.get("teamid")) if isinstance(source_op, Mapping) else None
+        if state.squad.teamid and teamid and int(state.squad.teamid) != teamid:
+            continue
+        queued = _submit_relink(
+            svc, source_id, result,
+            save_uid=str(record.save_uid or state.squad.save_uid or ""),
+            teamid=int(teamid or state.squad.teamid or 0),
+        )
+        done_ids.add(source_id)
+        svc.db.set_pref(_RELINK_PREFS, sorted(done_ids))
+        return queued
+    return None
+
+
+def _submit_relink(
+    svc: Services, source_id: str, result: Any, *, save_uid: str, teamid: int,
+) -> str | None:
+    from .. import events as E
+
+    record = svc.db.job_record(source_id) if svc.db is not None else None
+    job_json = record.job_json if record is not None else None
+    source_ops = job_json.get("ops") if isinstance(job_json, Mapping) else None
+    source_op = source_ops[0] if isinstance(source_ops, list) and source_ops else None
+    source_batch = source_op.get("batch") if isinstance(source_op, Mapping) else None
+    player_ids = _relink_player_ids(result)
+    if not isinstance(source_batch, list) or len(source_batch) != len(player_ids) or not player_ids:
+        return None
+    members: list[dict[str, Any]] = []
+    for pid, source in zip(player_ids, source_batch, strict=True):
+        if not isinstance(source, Mapping):
+            return None
+        members.append({
+            "relink_only": True,
+            "playerid": pid,
+            "dummy_pool": [pid],
+            "dummy_filter": {},
+            "player": dict(source.get("player") or {}),
+            "contract": dict(source.get("contract") or {}),
+        })
+    state = _validate_team_add(svc)
+    op = op_add_to_team(
+        "add",
+        teamid=int(state.squad.teamid),
+        batch=tuple(members),
+        verify={"name": True, "team": True, "fields": True},
+        experimental=True,
+    )
+    label = str(job_json.get("label") or f"Sign {len(members)}")
+    job = replace(
+        _add_job_envelope(state, op, label),
+        origin="ui.sign.relink",
+        requires={
+            "core_version": _RELINK_CORE,
+            **({"save_uid": state.squad.save_uid} if state.squad.save_uid else {}),
+        },
+    )
+    job_id = submit_job(svc, job)
+    svc.store.dispatch(E.SigningBatchQueued(
+        job_ids=(job_id,),
+        selected_count=len(members),
+        save_uid=save_uid,
+        teamid=teamid,
+        session_id=str(getattr(svc.store.snapshot().bridge.liveness, "session_id", "") or ""),
+        at=svc.clock.now(),
+    ))
+    if svc.log is not None:
+        svc.log.info("queued squad-full relink for %s as %s", source_id, job_id)
+    return job_id
+
+
 __all__ = [
     "TeamAddEntry",
     "TeamAddPreview",
@@ -840,6 +987,7 @@ __all__ = [
     "confirm_team_add",
     "preview_cards_for_team",
     "prepare_card_for_team",
+    "queue_squad_full_relink",
     "remaining_sign_labels",
     "sign_force_drain_text",
 ]

@@ -128,6 +128,10 @@ def trusted_cached_teamid(state: Any, *, now: datetime | None = None) -> int | N
     # must not carry a cached team id across that boundary.
     if not live_session or squad_session != live_session:
         return None
+    live_save = str(getattr(live, "save_uid", "") or "")
+    squad_save = str(getattr(squad, "save_uid", "") or "")
+    if live_save and squad_save != live_save:
+        return None
 
     taken = getattr(squad, "taken", None)
     if now is not None and isinstance(taken, datetime):

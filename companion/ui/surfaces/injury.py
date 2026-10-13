@@ -248,6 +248,11 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         if injury_cmd.is_success(result):
             data = injury_cmd.scan_data(result)
             view["players"] = injury_cmd.parse_scan_players(data)
+            from ...app.commands.signed_portraits import identities
+            signed = identities(svc, str(result.env.get("save_uid") or ""))
+            for player in view["players"]:
+                if player["playerid"] in signed:
+                    player["name"] = signed[player["playerid"]]["name"]
             view["error"] = ""
             view["scanned"] = True
             view["covered"] = data.get("covered", "your")
@@ -277,9 +282,12 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
             return
         if injury_cmd.is_success(result) or result.outcome is ApplyOutcome.PARTIAL:
             cured = injury_cmd.cure_names(result)
+            cured_ids = injury_cmd.cure_player_ids(result)
+            display_names = {p["playerid"]: p["name"] for p in view.get("players", [])}
+            if cured_ids and all(pid in display_names for pid in cured_ids):
+                cured = [display_names[pid] for pid in sorted(cured_ids)]
             view["error"] = injury_cmd.result_message(result) if result.outcome is ApplyOutcome.PARTIAL else ""
             if cured:
-                cured_ids = injury_cmd.cure_player_ids(result)
                 if cured_ids:
                     view["players"] = [p for p in view.get("players", []) if p.get("playerid") not in cured_ids]
                 elif result.outcome is not ApplyOutcome.PARTIAL:

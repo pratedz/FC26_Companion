@@ -247,7 +247,15 @@ def _open_review_window(
             if chosen_age != age:
                 cards = tuple(entry.card for entry in preview.entries)
                 current = preview_cards_for_team(svc, cards, forced_age=chosen_age)
+            signing_scope = svc.store.snapshot().squad
+            submitted_at = svc.clock.now()
             job_ids = add_reviewed_cards_to_team(svc, current)
+            from ....app import events as E
+            svc.store.dispatch(E.SigningBatchQueued(
+                job_ids=job_ids, selected_count=current.selected_count,
+                save_uid=signing_scope.save_uid, teamid=signing_scope.teamid,
+                session_id=signing_scope.session_id, at=submitted_at,
+            ))
             names = ", ".join(entry.name for entry in current.entries)
             try:
                 from ....core.log import get_logger

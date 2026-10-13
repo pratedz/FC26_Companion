@@ -743,7 +743,8 @@ def test_update_review_cta_requeries_active_jobs_and_does_not_freeze_the_lock():
     source = inspect.getsource(add_player.build)
     body = source[source.index("def update_review_cta"):]
     body = body.split("def refresh_signing_progress")[0]
-    assert "_active_add_count(svc)" in body
+    assert "_signing_progress_copy(svc)" in body
+    assert "latest_signing_handoff(svc)" in body
     assert "if active else" not in body
     assert "Add a verified card to your bag first." in body
 

@@ -24,6 +24,8 @@ from .state import (
     DEFAULT_CORE_OPS,
     SearchState,
     SquadState,
+    SigningBatch,
+    SigningState,
     TargetState,
 )
 
@@ -68,6 +70,23 @@ def _mark_stale_for_hub_exit(state: AppState, lv: Any) -> bool:
 
 
 _HISTORY_MAX = 200
+
+
+def _signing_applied_in_scope(state: AppState, batches: tuple[SigningBatch, ...]) -> bool:
+    """A verified addition requires a fresh read, including partial job success."""
+    for batch in batches:
+        if (batch.save_uid, batch.teamid) != (state.squad.save_uid, state.squad.teamid):
+            continue
+        for result in batch.results.values():
+            if result.env.get("save_uid") and result.env["save_uid"] != batch.save_uid:
+                continue
+            if result.session_id and batch.session_id and result.session_id != batch.session_id:
+                continue
+            for op in result.ops:
+                if (op.op == "add_to_team" and op.outcome is ApplyOutcome.APPLIED
+                        and op.data.get("verified") is True and op.data.get("teamid") == batch.teamid):
+                    return True
+    return False
 
 
 def reduce(state: AppState, event: E.Event) -> AppState:  # noqa: C901 — a flat dispatch
@@ -193,6 +212,21 @@ def reduce(state: AppState, event: E.Event) -> AppState:  # noqa: C901 — a fla
             )
 
         # ---- jobs ------------------------------------------------------
+        case E.SigningBatchQueued(job_ids=ids, selected_count=count, save_uid=uid,
+                                 teamid=tid, session_id=sid, at=at):
+            job_ids = tuple(dict.fromkeys(str(jid) for jid in ids if jid))
+            if not job_ids or count < 1:
+                return state
+            # Inline or fast transports can finish before the submit returns.
+            known = {v.job_id: v.result for v in (*state.jobs.active.values(), *state.jobs.history)
+                     if v.job_id in job_ids and v.result is not None}
+            batch = SigningBatch(job_ids, count, uid, tid, sid, at, known)
+            batches = (batch,) + tuple(old for old in state.signing.batches
+                                      if old.job_ids != job_ids)[:49]
+            return state.with_(signing=SigningState(batches),
+                               squad=replace(state.squad, stale=True)
+                               if _signing_applied_in_scope(state, (batch,)) else state.squad)
+
         case E.JobSubmitted(job_id=jid, label=lbl, at=at):
             view = JobView(
                 job_id=jid, label=lbl, outcome=ApplyOutcome.QUEUED, submitted=at
@@ -228,7 +262,14 @@ def reduce(state: AppState, event: E.Event) -> AppState:  # noqa: C901 — a fla
             active = dict(state.jobs.active)
             active.pop(jid, None)
             history = (view,) + tuple(old for old in state.jobs.history if old.job_id != jid)[: _HISTORY_MAX - 1]
-            return state.with_(jobs=JobsState(active=active, history=history))
+            batches = tuple(replace(batch, results={**batch.results, jid: res})
+                            if jid in batch.job_ids else batch for batch in state.signing.batches)
+            affected = tuple(replace(batch, results={jid: res})
+                             for batch in batches if jid in batch.job_ids)
+            return state.with_(jobs=JobsState(active=active, history=history),
+                               signing=SigningState(batches) if batches != state.signing.batches else state.signing,
+                               squad=replace(state.squad, stale=True)
+                               if _signing_applied_in_scope(state, affected) else state.squad)
 
         case E.JobHistoryCleared():
             return state.with_(jobs=JobsState(active=state.jobs.active, history=()))

@@ -28,6 +28,7 @@ class AppPaths(Protocol):
     state_db: Path        # state.sqlite — replaces 7 loose json files
     profiles_file: Path   # profiles.json (authored content, stays a file)
     logs: Path
+    assets: Path          # queue/assets/ — isolated per-job game exports/reports
 
     def confine(self, base: Path, name: str) -> Path | None: ...
 
@@ -86,6 +87,7 @@ class RealAppPaths:
         self.state_db = self.root / "state.sqlite"
         self.profiles_file = self.root / "profiles.json"
         self.logs = self.root / "logs"
+        self.assets = self.queue / "assets"
 
     def ensure_layout(self) -> None:
         """Create the v3 queue subtree. Never touches v1's flat files."""
@@ -98,6 +100,7 @@ class RealAppPaths:
             self.poison,
             self.archive,
             self.logs,
+            self.assets,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

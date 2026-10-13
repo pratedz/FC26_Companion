@@ -126,6 +126,8 @@ def job_requests_fast_read(job: Job) -> bool:
     if not job.ops:
         return False
     for op in job.ops:
+        if op.op == "assets.legacy" and op.body.get("action") == "check":
+            continue
         if op.op == "budget":
             if str(op.body.get("action") or "get") != "get":
                 return False
@@ -499,6 +501,11 @@ class FileTransport:
         session either differs from the current live session or whose session
         pid is dead can never complete.
         """
+        # session.json disappears for an instant while the worker replaces it.
+        # Sweeping in that window wrote a fake crash over a live signing job,
+        # and the Sign page then stayed on "waiting" after the real result landed.
+        if self.session() is None:
+            return []
         live_sid = self._live_session_id()
         swept: list[str] = []
         for jid in self.claimed_ids():

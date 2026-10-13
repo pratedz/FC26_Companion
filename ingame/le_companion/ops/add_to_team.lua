@@ -263,6 +263,120 @@ local function verify_team_membership(playerid, wanted_teamid)
     return false, nil, actual, readable
 end
 
+-- FC's free-agent roster. A stable 111592 after TransferPlayer is a rejection,
+-- not an in-flight move. -1 / nil / 0 are the values that still mean "settling".
+local FREE_AGENT_TEAM_ID = 111592
+
+local function squad_link_count(teamid)
+    local links = db.open("teamplayerlinks")
+    if not links or not db.field("teamplayerlinks", "teamid") then return nil end
+    local count = 0
+    for rec in links:records() do
+        if tonumber(links:get("teamid", rec)) == teamid then count = count + 1 end
+    end
+    return count
+end
+
+local function unused_jersey(links, teamid)
+    if not db.field("teamplayerlinks", "jerseynumber") then return nil end
+    local used = {}
+    for rec in links:records() do
+        if tonumber(links:get("teamid", rec)) == teamid then
+            local jersey = tonumber(links:get("jerseynumber", rec))
+            if jersey and jersey > 0 then used[math.floor(jersey)] = true end
+        end
+    end
+    local jersey = 1
+    while jersey <= 99 do
+        if not used[jersey] then return jersey end
+        jersey = jersey + 1
+    end
+    return nil
+end
+
+--- Move one free-agent roster row onto ``teamid``.
+-- TransferPlayer logs "Target Team Squad is Full" and leaves the player on
+-- 111592. The roster row itself can still change club; that is how a full
+-- senior squad can accept a reviewed free agent without a second native call.
+local function relink_free_agent(pid, teamid)
+    local links = db.open("teamplayerlinks")
+    if not links then return false, "no_teamplayerlinks", "roster table is unavailable" end
+    local rec, matches = db.scan_matches(links, "playerid", pid)
+    if not rec or matches ~= 1 then
+        return false, "link_ambiguous", "expected exactly one roster row for this player"
+    end
+    local current = tonumber(links:get("teamid", rec))
+    if current == teamid then return true, "already", "" end
+    if current ~= FREE_AGENT_TEAM_ID then
+        return false, "not_free_agent",
+            string.format("player is on team %s, not the free-agent roster", tostring(current))
+    end
+    local fields = { teamid = teamid }
+    local jersey = unused_jersey(links, teamid)
+    if jersey then fields.jerseynumber = jersey end
+    local written, failures = db.set_many(links, rec, fields, { on_field_error = "continue" })
+    if failures[1] then
+        return false, failures[1].reason or "relink_failed", failures[1].detail or ""
+    end
+    if (written or 0) < 1 then
+        return false, "relink_failed", "roster row did not change"
+    end
+    return true, "teamplayerlinks", ""
+end
+
+--- Returns kind, reason, detail.
+-- kind is "ok" (player is on teamid), "wait" (host id is still unknown),
+-- or "fail". A stable free-agent id never waits: FC already refused the move.
+local function finish_transfer(pid, teamid)
+    local verified, source = verify_team_membership(pid, teamid)
+    if verified then return "ok", source or "verified", "" end
+    local actual
+    local team_fn = rawget(_G, "GetTeamIdFromPlayerId")
+    if type(team_fn) == "function" then
+        local called, value = pcall(team_fn, pid)
+        if called then actual = tonumber(value) end
+    end
+    if actual == nil or actual < 0 or actual == 0 then
+        return "wait", "settling", ""
+    end
+    if math.floor(actual) == FREE_AGENT_TEAM_ID then
+        local moved, how, detail = relink_free_agent(pid, teamid)
+        if moved then
+            local again, again_source = verify_team_membership(pid, teamid)
+            if again then return "ok", again_source or how or "teamplayerlinks", "" end
+        end
+        local count = squad_link_count(teamid)
+        return "fail", "squad_full",
+            string.format(
+                "FC refused the transfer because the squad is full (%s players). %s",
+                tostring(count or "the current"),
+                (detail ~= "" and detail) or "The free-agent roster row could not be moved."
+            )
+    end
+    return "fail", "team_not_applied",
+        string.format("expected %s, observed %s", tostring(teamid), tostring(actual))
+end
+
+local function call_transfer(pid, teamid, contract)
+    if type(rawget(_G, "TransferPlayer")) ~= "function" then
+        return false, "unsupported_op", "TransferPlayer host API missing"
+    end
+    local from_team = 0
+    local team_fn = rawget(_G, "GetTeamIdFromPlayerId")
+    if type(team_fn) == "function" then
+        local called, value = pcall(team_fn, pid)
+        local current = called and tonumber(value) or nil
+        if current and current > 0 then from_team = math.floor(current) end
+    end
+    local c = type(contract) == "table" and contract or {}
+    local ok, err = pcall(
+        _G.TransferPlayer, pid, teamid,
+        tonumber(c.transfersum) or 0, tonumber(c.wage) or 5000,
+        tonumber(c.months) or 60, from_team, tonumber(c.release_clause) or -1)
+    if not ok then return false, "transfer_threw", tostring(err) end
+    return true, nil, nil
+end
+
 local function set_map(pid, fields)
     if util.is_empty(fields or {}) then return 0, {}, {} end
     local h, rec, reason = player_record(pid)
@@ -909,14 +1023,31 @@ local function step_batch(op, job, ctx, state)
         while i <= count do
             local mstate = member_at(members, i)
             if not (mstate and tonumber(mstate.playerid) and tonumber(mstate.playerid) > 0) then
-                local kind, a, b = try_pick_member(member_at(batch, i) or {}, consumed, used)
-                if kind == "ok" then
-                    mstate.playerid, mstate.dummy_index = a, b
-                    used[a] = true
-                elseif kind == "wait" then
-                    saw_wait = true
+                local member = member_at(batch, i) or {}
+                if member.relink_only then
+                    local pool = type(member.dummy_pool) == "table" and member.dummy_pool or {}
+                    local pid = tonumber(pool[1] or member.playerid)
+                    if not pid or pid <= 0 then
+                        return fail("bad_dummy", "relink needs the free-agent player id", state)
+                    end
+                    pid = math.floor(pid)
+                    if used[pid] then
+                        return fail("duplicate_relink", "the same player was listed twice", state)
+                    end
+                    mstate.playerid = pid
+                    mstate.fields_written = true
+                    mstate.relink_only = true
+                    used[pid] = true
                 else
-                    return fail(a or last_reason, b or last_detail, state)
+                    local kind, a, b = try_pick_member(member, consumed, used)
+                    if kind == "ok" then
+                        mstate.playerid, mstate.dummy_index = a, b
+                        used[a] = true
+                    elseif kind == "wait" then
+                        saw_wait = true
+                    else
+                        return fail(a or last_reason, b or last_detail, state)
+                    end
                 end
             end
             i = i + 1
@@ -984,12 +1115,12 @@ local function step_batch(op, job, ctx, state)
         return next_step(state, { names_deferred = true }, { fields_written = written_total })
     end
 
-    -- transfer_all: every reserved id, then one awaiting_event
+    -- transfer_all: native TransferPlayer, then a roster-row move when FC
+    -- rejects the call because the senior squad is already full.
     if step == 4 then
-        if type(rawget(_G, "TransferPlayer")) ~= "function" then
-            return fail("unsupported_op", "TransferPlayer host API missing", state)
-        end
         local i = 1
+        local waiting = false
+        local placed = 0
         while i <= count do
             local member = member_at(batch, i) or {}
             local mstate = member_at(members, i)
@@ -997,20 +1128,40 @@ local function step_batch(op, job, ctx, state)
             if not pid or pid <= 0 then
                 return fail("lost_progress", "playerid missing", state)
             end
+            if not mstate.transfer_started then
+                local called, reason, detail = call_transfer(pid, state.teamid, member.contract)
+                if not called then return fail(reason, detail, state) end
+                mstate.transfer_started = true
+            end
             if not mstate.transferred then
-                local c = type(member.contract) == "table" and member.contract or {}
-                local ok, err = pcall(
-                    _G.TransferPlayer, pid, state.teamid,
-                    tonumber(c.transfersum) or 0, tonumber(c.wage) or 5000,
-                    tonumber(c.months) or 60, 0, tonumber(c.release_clause) or -1)
-                if not ok then return fail("transfer_threw", tostring(err), state) end
-                mstate.transferred = true
+                local kind, reason, detail = finish_transfer(pid, state.teamid)
+                if kind == "ok" then
+                    mstate.transferred = true
+                    mstate.transfer_via = reason
+                    placed = placed + 1
+                elseif kind == "wait" then
+                    waiting = true
+                else
+                    return fail(reason, detail, state)
+                end
+            else
+                placed = placed + 1
             end
             i = i + 1
         end
-        local res = next_step(state, { transferred = count }, { side_effects = count })
-        res.awaiting_event = true
-        return res
+        if waiting then
+            state.verify_team_tries = (tonumber(state.verify_team_tries) or 0) + 1
+            if state.verify_team_tries >= 12 then
+                return fail("team_verify_unavailable",
+                    "membership stayed unreadable after 12 waits", state)
+            end
+            return wait_event(state, {
+                waiting_for = "team",
+                expected_teamid = state.teamid,
+                tries = state.verify_team_tries,
+            })
+        end
+        return next_step(state, { transferred = count }, { side_effects = placed })
     end
 
     if step == 5 then
@@ -1028,7 +1179,15 @@ local function step_batch(op, job, ctx, state)
                 mstate.team_verified = true
                 mstate.verify_source = source
             else
-                all_ok = false
+                local kind, reason, detail = finish_transfer(mstate.playerid, state.teamid)
+                if kind == "ok" then
+                    mstate.team_verified = true
+                    mstate.verify_source = reason
+                elseif kind == "fail" then
+                    return fail(reason, detail, state)
+                else
+                    all_ok = false
+                end
             end
             i = i + 1
         end
@@ -1291,18 +1450,27 @@ function M.step(op, job, ctx)
     end
 
     if step == 7 then
-        if type(rawget(_G, "TransferPlayer")) ~= "function" then
-            return fail("unsupported_op", "TransferPlayer host API missing", state)
+        if not state.transfer_started then
+            local called, reason, detail = call_transfer(state.playerid, state.teamid, op.contract)
+            if not called then return fail(reason, detail, state) end
+            state.transfer_started = true
         end
-        local c = type(op.contract) == "table" and op.contract or {}
-        local ok, err = pcall(
-            _G.TransferPlayer, state.playerid, state.teamid,
-            tonumber(c.transfersum) or 0, tonumber(c.wage) or 5000,
-            tonumber(c.months) or 60, 0, tonumber(c.release_clause) or -1)
-        if not ok then return fail("transfer_threw", tostring(err), state) end
-        local res = next_step(state, { transferred = true }, { side_effects = 1 })
-        res.awaiting_event = true
-        return res
+        local kind, reason, detail = finish_transfer(state.playerid, state.teamid)
+        if kind == "fail" then return fail(reason, detail, state) end
+        if kind == "wait" then
+            state.verify_team_tries = (tonumber(state.verify_team_tries) or 0) + 1
+            if state.verify_team_tries >= 12 then
+                return fail("team_verify_unavailable",
+                    "membership stayed unreadable after 12 waits", state)
+            end
+            return wait_event(state, {
+                waiting_for = "team",
+                expected_teamid = state.teamid,
+                tries = state.verify_team_tries,
+            })
+        end
+        state.verify_source = reason
+        return next_step(state, { transferred = true, transfer_via = reason }, { side_effects = 1 })
     end
 
     if step == 8 then
@@ -1316,13 +1484,23 @@ function M.step(op, job, ctx)
                 actual_teamid = actual,
             })
         end
+        local kind, reason, detail = finish_transfer(state.playerid, state.teamid)
+        if kind == "ok" then
+            state.verify_source = reason
+            return next_step(state, {
+                team_verified = true,
+                verify_source = reason,
+                actual_teamid = state.teamid,
+            })
+        end
+        if kind == "fail" then return fail(reason, detail, state) end
         -- TransferPlayer is async. Wait for Career events before failing; a
         -- hard fail on a -1 host sentinel used to leave face+stats on a late
         -- squad join without reaching the final durable name pass.
         state.verify_team_tries = (tonumber(state.verify_team_tries) or 0) + 1
         if state.verify_team_tries >= 12 then
-            local reason = readable and "team_not_applied" or "team_verify_unavailable"
-            return fail(reason,
+            local why = readable and "team_not_applied" or "team_verify_unavailable"
+            return fail(why,
                 string.format("expected %s, observed %s after %s waits (membership sources=%s)",
                     state.teamid, tostring(actual), state.verify_team_tries,
                     readable and "readable" or "unavailable"), state)

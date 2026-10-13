@@ -57,7 +57,7 @@ def test_reports_ground_named_actions_from_shipped_surfaces() -> None:
     assert "Refresh squad" in club_src
     assert "Refresh squad" in club_rep
 
-    auto_src = (ROOT / "companion/ui/surfaces/automations.py").read_text(encoding="utf-8")
+    auto_src = (ROOT / "companion/ui/surfaces/matchday.py").read_text(encoding="utf-8")
     auto_rep = (REVIEW / "automations.md").read_text(encoding="utf-8")
     assert "Activity" in auto_src
     assert "APPLY QUEUE" in auto_rep

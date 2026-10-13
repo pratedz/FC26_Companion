@@ -65,14 +65,14 @@ PUMP_MS = 50        # UI-callback drain cadence
 POLL_MS = 1000      # liveness + finished-job sweep cadence
 
 _SURFACE_DEPS: dict[str, tuple[str, ...]] = {
-    "club": ("squad", "target", "bridge_view", "squad_sync"),
+    "club": ("squad", "target", "bridge_view", "squad_sync", "signing"),
     # Do not rebuild Player merely because a live read was submitted: its card
     # picker owns a visible "Reading from FC 26…" state until the result
     # changes target/editor data and naturally refreshes the page.
     "player": ("target", "editor", "squad"),
     # Add Player owns a persisted draft VM, so it can safely rebuild as each
     # individual member of a reviewed batch moves through the queue.
-    "add_player": ("squad", "bridge_view", "prefs", "jobs"),
+    "add_player": ("squad", "bridge_view", "prefs", "jobs", "signing"),
     # Automations owns a visible queue backed by JobsState.  Without this
     # dependency a clicked boost was submitted but the on-page queue remained
     # frozen until the user changed tabs.
@@ -177,6 +177,7 @@ class Shell:
         self._toasts = ToastHost(self.root)
         self._bind_keys()
         self.svc.ui.bind_navigation(self._show)
+        self.svc.ui.bind_club(self._open_club)
         self.svc.ui.bind_review(self.review)
         self.svc.ui.bind_activity(self.open_drawer)
         self.svc.ui.bind_signing(self._open_signing)
@@ -518,6 +519,22 @@ class Shell:
             self.registry.forget(key)
             self._show(key)
 
+    def _open_club(self, payload: dict[str, Any]) -> None:
+        """Rebuild Club so its pending save-scoped player selection is consumed."""
+        _ = payload
+        key = "club"
+        if self.active == key:
+            self._rebuild(key)
+            return
+        widget = self._surfaces.pop(key, None)
+        if widget is not None:
+            try:
+                widget.destroy()
+            except Exception:
+                pass
+        self.registry.forget(key)
+        self._show(key)
+
     def _open_player_card(self, card: dict[str, Any]) -> None:
         """Navigate to Player Card Library and rebuild so the pending card is consumed."""
         _ = card
@@ -692,7 +709,7 @@ class Shell:
             "AI & Codex",
             subtitle="One provider and one model for Club, Player, and Sign.",
         )
-        from ..widgets.ai_bar import mount_ai_settings
+        from .widgets.ai_bar import mount_ai_settings
 
         mount_ai_settings(ai, self.svc)
 
@@ -728,7 +745,7 @@ class Shell:
 
         def do_install() -> None:
             try:
-                report = le_install.install()
+                report = le_install.install(queue_dir=self.svc.paths.queue)
                 ok = bool(report.get("ok") if isinstance(report, dict) else report)
                 self._status(
                     "Worker installed." if ok else f"Install: {report}",
@@ -842,7 +859,7 @@ class Shell:
 
     def _automation_help(self) -> None:
         self._status(
-            "Automations are already queued. FC runs writes only after a settled Career screen event; open Team Management or return to the Career hub."
+            "Matchday preparation is queued. FC runs writes only after a settled Career screen event; open Team Management or return to the Career hub."
         )
 
     def _commit(self) -> None:
@@ -934,9 +951,9 @@ class Shell:
         if self.active == "automations":
             # Automation controls submit durable jobs immediately. A player
             # Review/Apply dock on this tab implies a second click is needed.
-            self.changes_title.configure(text="Automation queue", text_color=theme.ACCENT)
+            self.changes_title.configure(text="Matchday preparation", text_color=theme.ACCENT)
             self.changes_summary.configure(
-                text="Choose a boost above; queued jobs run at the next safe Career screen event."
+                text="Prepare your squad; FC applies it at the next safe Career screen."
             )
             self.review_btn.configure(text="How it runs", command=self._automation_help)
             self.apply_btn.configure(text="Open activity", command=self.open_drawer)
@@ -1104,6 +1121,8 @@ class Shell:
             from ..app.commands.squad import ensure_squad_fresh
 
             steps.append(("squad", lambda: ensure_squad_fresh(self.svc)))
+            from ..app.commands.signed_portraits import sync as sync_portraits
+            steps.append(("portraits", lambda: sync_portraits(self.svc)))
         for name, step in steps:
             try:
                 step()

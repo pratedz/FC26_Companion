@@ -257,6 +257,19 @@ def ingest_result(svc: Services, result: JobResult) -> bool:
     return True
 
 
+def _with_squad_age(player: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep a display age on the squad row. The export stores birthdate, not age."""
+    from ...domain.card_import import age_from_birthdate
+
+    row = dict(player)
+    if row.get("age") not in (None, "", "—", 0, "0"):
+        return row
+    years = age_from_birthdate(row.get("birthdate"))
+    if years is not None:
+        row["age"] = years
+    return row
+
+
 def _failure_detail(result: JobResult) -> str:
     if result.failures:
         failure = result.failures[0]
@@ -264,6 +277,44 @@ def _failure_detail(result: JobResult) -> str:
     if result.error:
         return str(result.error.get("detail") or result.error.get("message") or "")
     return result.diagnostic
+
+
+def _with_signed_names(
+    svc: Services, players: Sequence[Mapping[str, Any]], *, save_uid: str,
+) -> Sequence[Mapping[str, Any]]:
+    """Restore chosen identities when FC's name resolver returns dummy names.
+
+    Audit receipts survive restarts and map each card to the exact player ID
+    used by the worker. Only rows present in this live save are decorated.
+    """
+    if svc.db is None or not save_uid:
+        return players
+    from ...domain.signing_identity import signed_player_names
+
+    names: dict[int, str] = {}
+    # Filter before limiting: normal squad reads must never age a signing out.
+    for record in svc.db.job_records(save_uid=save_uid, op="add_to_team", limit=None):
+        if not isinstance(record.job_json, Mapping) or not isinstance(record.result_json, Mapping):
+            continue
+        try:
+            receipt = JobResult.from_wire(record.result_json)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            continue
+        if receipt.job_id != record.job_id:
+            continue
+        for pid, name in signed_player_names(record.job_json, receipt, save_uid=save_uid).items():
+            names.setdefault(pid, name)  # newest signing wins
+    rows = []
+    for player in players:
+        row = dict(player)
+        try:
+            pid = int(row.get("playerid", row.get("id")))
+        except (TypeError, ValueError, OverflowError):
+            pid = None
+        if pid in names:
+            row["name"] = names[pid]
+        rows.append(row)
+    return rows
 
 
 def _ingest(svc: Services, result: JobResult) -> None:
@@ -300,7 +351,7 @@ def _ingest(svc: Services, result: JobResult) -> None:
             data = dict(op.data)
             raw = data.get("players")
             if isinstance(raw, list):
-                players = [p for p in raw if isinstance(p, Mapping)]
+                players = [_with_squad_age(p) for p in raw if isinstance(p, Mapping)]
             raw_free = data.get("free_agents")
             if isinstance(raw_free, list):
                 free_agents = [
@@ -326,6 +377,7 @@ def _ingest(svc: Services, result: JobResult) -> None:
     if teamid is None:
         env_tid = result.env.get("user_teamid")
         teamid = int(env_tid) if isinstance(env_tid, (int, float)) else None
+    players = _with_signed_names(svc, players, save_uid=save_uid)
     svc.store.dispatch(
         E.SquadSynced(
             save_uid=save_uid,
@@ -362,6 +414,8 @@ def _ingest(svc: Services, result: JobResult) -> None:
     svc.store.dispatch(
         E.StatusSet(f"Squad ready — {len(players)} live player(s) read.")
     )
+    from .signed_portraits import sync as sync_portraits
+    svc.executor.submit("signed-portraits", lambda _token: sync_portraits(svc))
 
 
 def _reconcile_target(

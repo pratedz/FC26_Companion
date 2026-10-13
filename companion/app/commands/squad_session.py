@@ -30,6 +30,7 @@ def snapshot_players(
         ids.append(pid)
     if not ids:
         raise PlayerValidationError("No players to read.")
+    source = svc.store.snapshot().squad
     liveness = svc.transport.liveness()
     from .. import events as E
 
@@ -38,6 +39,10 @@ def snapshot_players(
         raise PlayerValidationError(
             svc.store.snapshot().bridge.liveness.message or "Live Editor is not armed."
         )
+    if source.save_uid and getattr(liveness, "save_uid", "") and source.save_uid != liveness.save_uid:
+        raise PlayerValidationError("The Career save changed. Refresh Club and rebuild the plan.")
+    if source.session_id and liveness.session_id and source.session_id != liveness.session_id:
+        raise PlayerValidationError("The game session changed. Refresh Club before reading this plan.")
     job = Job(
         ops=(
             op_snapshot(
@@ -50,10 +55,19 @@ def snapshot_players(
         origin="ui.squad_planner.session_read",
         require_cm=True,
         budget_ms=5000,
+        requires={"save_uid": source.save_uid} if source.save_uid else {},
     )
 
     def loaded(result: JobResult) -> None:
         try:
+            current = svc.store.snapshot().squad
+            if source.save_uid and (current.save_uid != source.save_uid or current.teamid != source.teamid):
+                raise PlayerValidationError("The Career save or club changed during the read. Reopen the plan from Club.")
+            result_save = str(result.env.get("save_uid") or "")
+            if source.save_uid and result_save and source.save_uid != result_save:
+                raise PlayerValidationError("The read belongs to another Career save. Nothing was staged.")
+            if source.session_id and result.session_id and source.session_id != result.session_id:
+                raise PlayerValidationError("The read belongs to an older game session. Refresh Club.")
             rows = rows_from_snapshot_result(result, ids)
             if not rows and result.outcome in (ApplyOutcome.APPLIED, ApplyOutcome.NO_OP):
                 raise PlayerValidationError("Live read returned no players.")
@@ -88,5 +102,8 @@ def rows_from_snapshot_result(
             except PlayerValidationError:
                 continue
             if pid in wanted:
-                found[pid] = normalize_record(row)
+                normalized = normalize_record(row)
+                if not row.get("name") and not row.get("playername"):
+                    normalized.pop("name", None)
+                found[pid] = normalized
     return found

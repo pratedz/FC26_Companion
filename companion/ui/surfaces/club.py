@@ -15,7 +15,6 @@ from ..widgets.primitives import button, ensure_ctk, eyebrow, muted_label, panel
 from ..widgets.states import loading_row, skeleton_table
 from ..widgets.table import Column, DataGrid, TableModel
 from ._common import (
-    cap_prompt_rows,
     filter_squad_rows,
     identity_row,
     monogram,
@@ -36,6 +35,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     view = vm if isinstance(vm, dict) else {}
     view.setdefault("squad_query", "")
     view.setdefault("checked_ids", [])
+    refresh_club_selection(svc, view)
     state = svc.store.snapshot()
     live = liveness_view(state.bridge.liveness)
     # Explicit clock so age/TTL captions are real (tests inject fixed now via clock).
@@ -88,6 +88,48 @@ def club_phase(*, has_players: bool, sync_pending: bool) -> str:
     if has_players:
         return "board"
     return "reading" if sync_pending else "setup"
+
+
+def refresh_club_selection(svc: Any, view: dict[str, Any]) -> bool:
+    """Consume a return-to-Club selection only in its refreshed Career scope."""
+    take = getattr(getattr(svc, "ui", None), "take_club_selection", None)
+    pending = take() if callable(take) else None
+    if pending is not None:
+        view["pending_club_selection"] = pending
+    state = svc.store.snapshot()
+    squad, live = state.squad, state.bridge.liveness
+    scope = (squad.save_uid, squad.teamid)
+    old_scope = view.get("selection_scope")
+    if old_scope is not None and old_scope != scope:
+        view["checked_ids"] = []
+        view["recently_added"] = False
+    view["selection_scope"] = scope
+    pending = view.get("pending_club_selection")
+    if not pending:
+        return False
+    uid, tid = pending.get("save_uid"), pending.get("teamid")
+    if ((live.save_uid and uid and live.save_uid != uid)
+            or (squad.save_uid and uid and squad.save_uid != uid)
+            or (squad.teamid is not None and tid is not None and squad.teamid != tid)):
+        view.pop("pending_club_selection", None)
+        view["checked_ids"] = []
+        view["recently_added"] = False
+        set_status(svc, "These players belong to another Career save or club. Refresh and select this squad.")
+        return False
+    if squad_view(state, now=svc.clock.now()).get("stale") or not squad.taken or not uid or scope != (uid, tid):
+        view["checked_ids"] = []
+        return False
+    roster_ids = {int(row.get("playerid") or row.get("id")) for row in squad.players
+                  if row.get("playerid") or row.get("id")}
+    ids = tuple(int(pid) for pid in pending.get("playerids", ()))
+    view["checked_ids"] = [pid for pid in ids if pid in roster_ids]
+    view["recently_added"] = bool(pending.get("recently_added"))
+    view["squad_query"] = ""
+    view.pop("pending_club_selection", None)
+    missing = len(ids) - len(view["checked_ids"])
+    if missing:
+        set_status(svc, f"Selected {len(view['checked_ids'])} current squad players; {missing} are no longer in this club.")
+    return True
 
 
 def _build_setup(
@@ -399,7 +441,15 @@ def _paint_selection_card(host: Any, row: dict | None, svc: Any) -> None:
     )
     mono.pack(side="left", padx=(0, theme.SP3))
     mono.pack_propagate(False)
-    text_label(mono, letters[:2], size=16, bold=True).pack(expand=True)
+    from .signed_portrait import avatar, controls as portrait_controls
+    try:
+        portrait_pid = int(row.get("id"))
+    except (ValueError, TypeError):
+        portrait_pid = 0
+    if portrait_pid > 0:
+        avatar(mono, svc, portrait_pid, name)
+    else:
+        text_label(mono, letters[:2], size=16, bold=True).pack(expand=True)
     meta = ctk.CTkFrame(head, fg_color="transparent")
     meta.pack(side="left", fill="x", expand=True)
     text_label(meta, name, size=14, bold=True).pack(anchor="w")
@@ -430,6 +480,8 @@ def _paint_selection_card(host: Any, row: dict | None, svc: Any) -> None:
         kind="accent",
         height=theme.BTN_MD,
     ).pack(fill="x", padx=theme.SP3, pady=(0, theme.SP3))
+    if portrait_pid > 0:
+        portrait_controls(host, svc, portrait_pid)
 
 
 def _build_squad(
@@ -733,6 +785,14 @@ def _build_squad(
         width=62,
     ).pack(side="left", padx=(theme.SP2, 0))
 
+    def toggle_recently_added() -> None:
+        view["recently_added"] = not bool(view.get("recently_added"))
+        apply_filter()
+
+    recent_button = button(search_row, "Recently Added", toggle_recently_added,
+                           kind="ghost", height=theme.BTN_MD)
+    recent_button.pack(side="left", padx=(theme.SP2, 0))
+
     count_row = ctk.CTkFrame(table_card, fg_color="transparent")
     count_row.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP1))
     muted_label(count_row, f"{squad['count']} players", size=11).pack(side="left")
@@ -764,10 +824,17 @@ def _build_squad(
     def apply_filter(*_args: Any) -> None:
         view["squad_query"] = query.get() or ""
         needle = (query.get() or "").strip()
-        if not needle:
+        recent_only = bool(view.get("recently_added"))
+        recent_button.configure(text="All players" if recent_only else "Recently Added")
+        if not needle and not recent_only:
             model.set_filter_fn(None)
         else:
             allowed = {row["id"] for row in filter_squad_rows(all_rows, needle)}
+            if recent_only:
+                from .sign.handoff import recently_added_ids
+                recent_ids = set(recently_added_ids(svc))
+                allowed &= recent_ids
+                model.checked &= recent_ids
             model.set_filter_fn(lambda row, ids=allowed: row.get("id") in ids)
         grid.refresh()
         on_sel(model.selected_rows())
@@ -777,6 +844,8 @@ def _build_squad(
 
     def refresh_board() -> bool:
         """Update the squad rows without destroying the grid."""
+        nonlocal all_rows
+        refresh_club_selection(svc, view)
         state_now = svc.store.snapshot()
         now_at = svc.clock.now() if getattr(svc, "clock", None) is not None else None
         fresh = squad_view(state_now, now=now_at)
@@ -789,9 +858,11 @@ def _build_squad(
         if pending_now != bool(sync_pending) or not fresh["players"]:
             return False
         rows_now = tuple(squad_board_row(player) for player in fresh["players"])
+        all_rows = rows_now
         grid.set_rows(rows_now)
         live_now = {row["id"] for row in rows_now}
         view["checked_ids"] = [key for key in (view.get("checked_ids") or []) if key in live_now]
+        model.checked = set(view["checked_ids"])
         try:
             identity.caption_label.configure(text=_squad_caption(fresh, _avg_ovr(fresh)))
             identity.title_label.configure(
@@ -803,7 +874,7 @@ def _build_squad(
             from ...core.log import get_logger
 
             get_logger("ui.club").exception("club caption refresh failed")
-        _sync_club_cta()
+        apply_filter()
         return True
 
     root.refresh_board = refresh_board
@@ -819,24 +890,16 @@ def _ask_squad_grok(
     if not rows:
         set_status(svc, "No squad players to send to Codex.")
         return
-    capped, truncated = cap_prompt_rows(rows)
-    if truncated:
-        set_status(
-            svc,
-            f"Using the highest-OVR {len(capped)} players (session cap).",
-            tone="warn",
-        )
     try:
         from ...core.log import get_logger
         from .planner import open_planner
 
         get_logger("ui.club").info(
-            "opening squad session n=%s truncated=%s prompt=%s",
-            len(capped),
-            truncated,
+            "opening squad session n=%s prompt=%s",
+            len(rows),
             text[:80],
         )
-        open_planner(svc, capped, mode="per_player", prompt=text, club_name=team)
+        open_planner(svc, rows, mode="per_player", prompt=text, club_name=team)
     except Exception as exc:  # noqa: BLE001
         try:
             from ...core.log import get_logger

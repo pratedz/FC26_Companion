@@ -8,8 +8,10 @@ local events = {}
 events.FALLBACK_IDS = {
     ABOUT_TO_INIT_MODE = 5,
     CAREER_TYPE_SELECTED = 6,
+    HOURS_PASSED = 14,
     DAY_PASSED = 15,
     WEEK_PASSED = 16,
+    MONTH_PASSED = 17,
     SEASON_RESET = 23,
     SEASON_ENDED = 24,
     ENTERED_HUB_FIRST_TIME = 26,
@@ -67,12 +69,21 @@ events.BLACKOUT_NAMES = {
 events.PUMP_NAMES = {
     -- Only front-end states where the Career DB is settled. DAY_PASSED,
     -- WEEK_PASSED and match/finance events are deliberately excluded.
-    "ENTERED_HUB_FIRST_TIME", "SCREEN_HAS_DONE_LOADING", "ENTERING_TEAM_MANAGEMENT",
+    "ENTERED_HUB_FIRST_TIME", "ENTERING_TEAM_MANAGEMENT",
 }
 -- IsInCM is already true on the career menus, before GetUserTeamID is safe.
 -- Only these two mean the hub (or team management) is actually open.
 events.HUB_READY_NAMES = {
     "ENTERED_HUB_FIRST_TIME", "ENTERING_TEAM_MANAGEMENT",
+}
+-- Calendar simulate and match entry fire these in a tight loop on the game
+-- thread. The companion must not touch disk or the player DB while they do.
+events.BUSY_NAMES = {
+    "HOURS_PASSED", "DAY_PASSED", "WEEK_PASSED", "MONTH_PASSED",
+    "ABOUT_TO_ENTER_PREMATCH", "ABOUT_TO_ENTER_A_MATCH",
+    "ABOUT_TO_SIM_OVER_A_MATCH", "ABOUT_TO_ENTER_QUICK_SIM",
+    "ABOUT_TO_ENTER_INTERACTIVE_SIM", "ABOUT_TO_ENTER_PLAY_HIGHLIGHTS",
+    "ABOUT_TO_ENTER_PLAY_FULL_MATCH_SIM",
 }
 
 events.id_of = {}
@@ -82,6 +93,7 @@ events.invalidate_players = {}
 events.invalidate_squads = {}
 events.blackout = {}
 events.pump = {}
+events.busy = {}
 events.resolved_from = "fallback"
 
 local function resolve_id(name)
@@ -118,12 +130,14 @@ function events.load()
     events.blackout = {}
     events.pump = {}
     events.hub = {}
+    events.busy = {}
     fill(events.hard_reset, events.HARD_RESET_NAMES)
     fill(events.invalidate_players, events.INVALIDATE_PLAYERS_NAMES)
     fill(events.invalidate_squads, events.INVALIDATE_SQUADS_NAMES)
     fill(events.blackout, events.BLACKOUT_NAMES)
     fill(events.pump, events.PUMP_NAMES)
     fill(events.hub, events.HUB_READY_NAMES)
+    fill(events.busy, events.BUSY_NAMES)
     return true
 end
 
@@ -156,6 +170,10 @@ end
 
 function events.is_blackout(id)
     return type(id) == "number" and events.blackout[id] ~= nil
+end
+
+function events.is_busy(id)
+    return type(id) == "number" and events.busy[id] ~= nil
 end
 
 events.load()

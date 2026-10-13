@@ -201,17 +201,23 @@ function LEC.arm()
         end)
     end)
 
-    pcall(add, "pre__CareerModeEvent", function(_mgr, event_id)
-        util.pcall_named("on_career_pre", function()
-            runner.on_career(event_id, "pre")
-        end)
-    end)
-
-    pcall(add, "post__CareerModeEvent", function(_mgr, event_id)
-        util.pcall_named("on_career_post", function()
-            runner.on_career(event_id, "post")
-        end)
-    end)
+    -- Career events are synchronous native callbacks. A pre-event must revoke
+    -- readiness before the game starts saving, resetting or advancing time.
+    -- runner.on_career does only Lua state changes outside a settled post-hub.
+    local function career_handler(phase)
+      return function(a, b)
+        local id = nil
+        if type(b) == "number" then
+            id = b
+        elseif type(a) == "number" then
+            id = a
+        end
+        if not id then return end
+        runner.on_career(id, phase)
+      end
+    end
+    pcall(add, "pre__CareerModeEvent", career_handler("pre"))
+    pcall(add, "post__CareerModeEvent", career_handler("post"))
 
     -- Write session immediately so Python sees ARMED without waiting for LEInitDone.
     if LEC.config.queue_dir then

@@ -85,12 +85,45 @@ class SquadPlan:
     shirt_book: Mapping[int, int] = field(default_factory=dict)
     shirt_names: Mapping[int, str] = field(default_factory=dict)
     jersey_numbers: Mapping[int, int] = field(default_factory=dict)
+    source_save_uid: str = ""
+    source_teamid: int | None = None
+    source_snapshot_revision: str = ""
+    source_snapshot_fingerprint: str = ""
+
+    def bind_source(self, save_uid: str, teamid: int | None,
+                    snapshot_revision: str = "") -> "SquadPlan":
+        """Capture the export that authored this plan; never rebind a draft."""
+        if self.source_save_uid and (self.source_save_uid != str(save_uid)
+                                     or self.source_teamid != teamid):
+            raise JobValidationError("This plan belongs to a different Career save or club. Rebuild it.")
+        return replace(self, source_save_uid=self.source_save_uid or str(save_uid),
+                       source_teamid=self.source_teamid if self.source_teamid is not None else teamid,
+                       source_snapshot_revision=self.source_snapshot_revision or str(snapshot_revision),
+                       source_snapshot_fingerprint=self.source_snapshot_fingerprint or hashlib.sha256(
+                           json.dumps([dict(member.base) for member in self.members], sort_keys=True,
+                                      separators=(",", ":"), default=str).encode()).hexdigest())
+
+    def reselect(self, rows: Sequence[Mapping[str, Any]]) -> "SquadPlan":
+        """Change selected membership while retaining the original club context."""
+        chosen = plan_from_rows(rows)
+        prior = {member.playerid: member for member in self.members}
+        members = tuple(prior.get(member.playerid, member) for member in chosen.members)
+        selected = {member.playerid for member in members}
+        previous = set(self.playerids)
+        return replace(self, members=members, selection_revision="",
+                       overrides={pid: patch for pid, patch in self.overrides.items() if pid in selected},
+                       jersey_numbers={pid: number for pid, number in self.jersey_numbers.items()
+                                       if pid in selected or pid not in previous})
 
     def __post_init__(self) -> None:
         if not self.selection_revision and self.members:
             object.__setattr__(
                 self, "selection_revision", selection_revision(self.members)
             )
+        if self.source_save_uid and not self.source_snapshot_fingerprint:
+            object.__setattr__(self, "source_snapshot_fingerprint", hashlib.sha256(
+                json.dumps([dict(member.base) for member in self.members], sort_keys=True,
+                           separators=(",", ":"), default=str).encode()).hexdigest())
 
     @property
     def playerids(self) -> tuple[int, ...]:
@@ -140,6 +173,8 @@ class SquadPlan:
     ) -> "SquadPlan":
         cleaned: dict[int, dict[str, int]] = {}
         for raw_pid, patch in overrides.items():
+            if not patch:
+                continue
             fields = normalize_patch(patch)
             if not fields:
                 continue
@@ -154,7 +189,7 @@ class SquadPlan:
             for pid, number in dict(jersey_numbers or {}).items()
             if 1 <= int(number) <= 99
         }
-        if not cleaned and not shirts:
+        if not cleaned and not shirts and not blocking_issues:
             raise JobValidationError("No per-player patches to stage.")
         return replace(
             self,
@@ -202,7 +237,10 @@ class SquadPlan:
                 members.append(member)
                 continue
             merged = dict(member.base)
-            merged.update(dict(row))
+            # Detailed database snapshots do not include a display name.
+            # normalize_record supplies an empty one; it is not a rename.
+            merged.update({name: value for name, value in row.items()
+                           if name != "name" or value not in (None, "")})
             ovr_raw = merged.get("overallrating", member.ovr)
             try:
                 ovr = int(ovr_raw) if ovr_raw not in (None, "") else member.ovr
@@ -267,8 +305,10 @@ def selection_revision(members: Sequence[SquadMember]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def plan_from_rows(rows: Sequence[Mapping[str, Any]]) -> SquadPlan:
-    """Build an empty plan from Club grid selection (max MAX_PLAYERS)."""
+def plan_from_rows(rows: Sequence[Mapping[str, Any]], *, source_save_uid: str = "",
+                   source_teamid: int | None = None,
+                   source_snapshot_revision: str = "") -> SquadPlan:
+    """Keep the full Club selection; worker jobs are bounded independently."""
     members: list[SquadMember] = []
     seen: set[int] = set()
     for row in rows:
@@ -280,11 +320,10 @@ def plan_from_rows(rows: Sequence[Mapping[str, Any]]) -> SquadPlan:
             continue
         seen.add(member.playerid)
         members.append(member)
-        if len(members) >= MAX_PLAYERS:
-            break
     if not members:
         raise JobValidationError("Select at least one squad player.")
-    return SquadPlan(members=tuple(members))
+    return SquadPlan(members=tuple(members), source_save_uid=source_save_uid,
+                     source_teamid=source_teamid, source_snapshot_revision=source_snapshot_revision)
 
 
 def template_from_fields(
@@ -403,9 +442,15 @@ def build_apply_job(
         raise JobValidationError("No players in the plan.")
     if not plan.template and not plan.overrides and not plan.jersey_numbers:
         raise JobValidationError("Stage a template before applying.")
-    if plan.player_count > MAX_PLAYERS:
-        raise JobValidationError(f"At most {MAX_PLAYERS} players per plan.")
 
+    teamid = int(plan.source_teamid or 0)
+    for member in (() if teamid else plan.members):
+        try:
+            teamid = int(member.base.get("teamid") or 0)
+        except (TypeError, ValueError):
+            teamid = 0
+        if teamid > 0:
+            break
     ops: list[Op] = []
     for member in plan.members:
         patch = plan.patch_for(member.playerid)
@@ -419,16 +464,9 @@ def build_apply_job(
                 fields=safe,
                 growth_mirror=growth_mirror,  # type: ignore[arg-type]
                 on_field_error="continue",
+                teamid=teamid or None,
             )
         )
-    teamid = 0
-    for member in plan.members:
-        try:
-            teamid = int(member.base.get("teamid") or 0)
-        except (TypeError, ValueError):
-            teamid = 0
-        if teamid > 0:
-            break
     # Never write a shirt that somebody still wears. The game reads each
     # teamplayerlinks update immediately and crashes on a shared number.
     current_shirts = dict(plan.shirt_book)

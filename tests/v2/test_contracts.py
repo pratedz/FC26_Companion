@@ -643,6 +643,18 @@ def test_sweep_does_not_fail_a_claim_still_being_stamped(tmp_path):
     assert t.result(jid) is None
 
 
+def test_sweep_skips_while_session_file_is_being_replaced(tmp_path):
+    """A missing session marker is a replace window, not a dead Live Editor."""
+    t, paths, _ = _transport(tmp_path, alive_pids={4242})
+    jid = new_ulid()
+    atomic_write_json(
+        paths.claimed / f"{jid}.json",
+        {"schema": 3, "job_id": jid, "claimed_by": "S", "ops": []},
+    )
+    assert t.sweep_crashed() == []
+    assert t.result(jid) is None
+
+
 def test_sweep_leaves_live_sessions_claims(tmp_path):
     t, paths, _ = _transport(tmp_path, alive_pids={4242})
     jid = new_ulid()

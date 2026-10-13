@@ -177,7 +177,7 @@ def test_player_review_is_on_the_tab_and_library_stage_copy_is_one_line():
         encoding="utf-8"
     )
     assert "Send to Sign with no lock" in library
-    automations = (ROOT / "companion" / "ui" / "surfaces" / "automations.py").read_text(
+    automations = (ROOT / "companion" / "ui" / "surfaces" / "matchday.py").read_text(
         encoding="utf-8"
     )
     assert "refresh_automation_queue" in automations

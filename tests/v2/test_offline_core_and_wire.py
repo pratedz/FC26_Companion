@@ -471,7 +471,6 @@ def test_automations_squad_boost_emits_scope_not_empty_where():
     )
     assert "where={}" not in src
     assert "core scopes to user team when empty" not in src
-    assert "quick_rail" in src
     rail_ids = {p.id for p in quick_rail()}
     assert "squad_boost" in rail_ids and "ping" in rail_ids
     wire = build_job("squad_boost").to_wire()
@@ -490,5 +489,4 @@ def test_automations_build_source_no_undefined_k():
     src = inspect.getsource(automations.build)
     assert "or k in" not in src
     assert "_PACKS" not in src
-    assert "quick_rail" in src
     assert "ping" in QUICK_RAIL_IDS and "export_squad" in QUICK_RAIL_IDS

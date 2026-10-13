@@ -20,6 +20,21 @@ def test_filter_squad_rows_matches_name_position_and_id():
     assert rows[0]["id"] == 7
 
 
+def test_squad_board_row_derives_age_from_birthdate():
+    from companion.domain.card_import import forced_birthdate_for_age
+
+    shown = squad_board_row(
+        {"playerid": 1, "name": "Zidane", "birthdate": forced_birthdate_for_age(34)}
+    )
+    assert shown["age"] == 34
+    kept = squad_board_row(
+        {"playerid": 2, "name": "Henry", "age": 28, "birthdate": forced_birthdate_for_age(20)}
+    )
+    assert kept["age"] == 28
+    missing = squad_board_row({"playerid": 3, "name": "Cafu"})
+    assert missing["age"] == "—"
+
+
 def test_club_roster_filters_and_hides_id_column():
     source = inspect.getsource(club._build_squad)
     assert "Filter by name, position, or ID" in source

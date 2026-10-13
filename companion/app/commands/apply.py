@@ -116,7 +116,7 @@ def submit_job(
 def _is_write_job(job: Job) -> bool:
     if job.dry_run:
         return False
-    read_only = {"diag.ping", "db.dump", "export_squad", "snapshot", "injury.scan"}
+    read_only = {"diag.ping", "assets.legacy", "db.dump", "export_squad", "snapshot", "injury.scan"}
     return any(op.op not in read_only for op in job.ops)
 
 
@@ -129,7 +129,7 @@ def _is_recorded_write(svc: Services, job_id: str) -> bool:
         return False
     if bool(rec.job_json.get("dry_run", False)):
         return False
-    read_only = {"diag.ping", "db.dump", "export_squad", "snapshot", "injury.scan"}
+    read_only = {"diag.ping", "assets.legacy", "db.dump", "export_squad", "snapshot", "injury.scan"}
     return any(
         isinstance(op, Mapping) and str(op.get("op", "")) not in read_only
         for op in (rec.job_json.get("ops") or ())
@@ -249,6 +249,7 @@ def _persist_prewrite_snapshot(svc: Services, result: JobResult) -> None:
                 {
                     "table": table,
                     "key": {"field": key_field, "value": key_value},
+                    "teamid": row.get("teamid"),
                     "f": str(field_name),
                     "v": value,
                 }
@@ -281,8 +282,11 @@ def restore_snapshot(
     snap = svc.db.snapshot(snapshot_id) if snapshot_id else svc.db.last_apply_snapshot()
     if snap is None or not snap.fields:
         raise ApplyError("No verified undo snapshot is available.")
-    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
-    keys: dict[tuple[str, str, str], Any] = {}
+    current_save = svc.store.snapshot().squad.save_uid
+    if snap.save_uid and str(snap.save_uid) != str(current_save):
+        raise ApplyError("Open the snapshot's original Career save and refresh Club before undoing.")
+    grouped: dict[tuple[str, str, str, int | None], dict[str, Any]] = {}
+    keys: dict[tuple[str, str, str, int | None], Any] = {}
     for item in snap.fields:
         if not isinstance(item, Mapping) or "f" not in item:
             continue
@@ -295,7 +299,11 @@ def restore_snapshot(
             key_field, key_value = "playerid", snap.target_id
         if key_value is None:
             continue
-        token = (table, key_field, str(key_value))
+        teamid = item.get("teamid")
+        if table == "teamplayerlinks":
+            if not teamid or int(teamid) != svc.store.snapshot().squad.teamid:
+                raise ApplyError("This shirt snapshot has no matching club scope. Use the complete Squad plans undo receipt.")
+        token = (table, key_field, str(key_value), int(teamid) if teamid else None)
         grouped.setdefault(token, {})[str(item["f"])] = item.get("v")
         keys[token] = key_value
     if not grouped:
@@ -309,14 +317,16 @@ def restore_snapshot(
             fields=fields,
             growth_mirror="auto" if table == "players" else "off",
             upsert=table == "editedplayernames",
+            teamid=teamid,
         )
         for index, (token, fields) in enumerate(grouped.items(), start=1)
-        for table, key_field, _ in (token,)
+        for table, key_field, _, teamid in (token,)
     )
     job = Job(
         ops=ops,
         label=f"Undo: {snap.label or snap.id}",
         origin="ui.activity.undo",
+        requires={"save_uid": str(snap.save_uid)} if snap.save_uid else {},
     )
     undo_dir = svc.paths.root / "snapshots"
     undo_dir.mkdir(parents=True, exist_ok=True)
@@ -535,7 +545,10 @@ def collect_finished(svc: Services) -> list[JobResult]:
             out.append(res)
     for job_id in svc.transport.sweep_crashed():
         res = svc.transport.result(job_id)
-        if res is not None:
+        # A live claim rewrites a crash file back to a non-terminal "still
+        # working" result. Publishing that as finished removed the job from
+        # the active list, so the real squad-full result never reached Sign.
+        if res is not None and res.outcome.is_terminal:
             svc.store.dispatch(E.JobFinished(job_id=job_id, result=res))
             _persist_result(svc, res)
             svc.store.dispatch(E.StatusSet(_status_line(res)))
@@ -543,6 +556,14 @@ def collect_finished(svc: Services) -> list[JobResult]:
 
             ingest_result(svc, res)
             out.append(res)
+    reconcile_signing_results(svc)
+    try:
+        from .team import queue_squad_full_relink
+
+        queue_squad_full_relink(svc)
+    except Exception:
+        if svc.log is not None:
+            svc.log.exception("could not queue squad-full relink")
     reconciled = reconcile_missing_queue_entries(svc)
     if reconciled:
         svc.store.dispatch(
@@ -552,6 +573,40 @@ def collect_finished(svc: Services) -> list[JobResult]:
             )
         )
     return out
+
+
+def reconcile_signing_results(svc: Services) -> int:
+    """Attach a finished worker file to a Sign batch that is still marked waiting.
+
+    The batch is created before the worker finishes. A later terminal file has
+    to update that batch even when the job is no longer in the active list.
+    """
+    pending: list[str] = []
+    state = svc.store.snapshot()
+    for batch in state.signing.batches:
+        for job_id in batch.job_ids:
+            current = batch.results.get(job_id)
+            if current is not None and current.outcome.is_terminal:
+                continue
+            pending.append(job_id)
+    if svc.db is not None:
+        for record in svc.db.job_records(limit=80):
+            if record.outcome is not None and record.outcome.is_terminal:
+                continue
+            if not is_sign_job_label(str(record.label or "")):
+                continue
+            if record.job_id not in pending:
+                pending.append(record.job_id)
+    updated = 0
+    for job_id in pending:
+        res = svc.transport.result(job_id)
+        if res is None or not res.outcome.is_terminal:
+            continue
+        svc.store.dispatch(E.JobFinished(job_id=job_id, result=res))
+        _persist_result(svc, res)
+        svc.store.dispatch(E.StatusSet(_status_line(res)))
+        updated += 1
+    return updated
 
 
 def reconcile_recorded_worker_results(svc: Services) -> int:

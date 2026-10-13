@@ -20,6 +20,7 @@ except ImportError:
 from .assistant import CodexLibraryDraft, SquadAssistantPanel, grok_library_worker
 from .basket import SignListPanel, bag_summary_copy
 from .details import PlayerDetailsPanel
+from .handoff import latest_signing_handoff, open_signed_club, plan_signed_players
 from .discovery import DiscoveryPanel
 from .readiness import (
     _active_add_count, _copy_sign_lua_drain, _readiness, _recent_signings,
@@ -70,6 +71,10 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     progress_label.pack(side="left", fill="x", expand=True)
     activity_btn = button(progress_inner, "Activity", lambda: svc.ui.open_activity(), kind="ghost", height=28, width=70)
     drain_btn = button(progress_inner, "Copy Lua drain", lambda: _copy_sign_lua_drain(svc), kind="ghost", height=28, width=100)
+    plan_signed_btn = button(progress_inner, "Plan signed players", lambda: None,
+                             kind="primary", height=28)
+    club_signed_btn = button(progress_inner, "Recently Added in Club", lambda: None,
+                             kind="ghost", height=28)
     workspace = ctk.CTkFrame(root, fg_color="transparent", height=1, width=1)
     workspace.pack(fill="both", expand=True)
     workspace.grid_rowconfigure(0, weight=1)
@@ -161,6 +166,9 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
 
     def update_review_cta() -> None:
         message, is_busy = _signing_progress_copy(svc)
+        handoff_message, batch, signed_rows = latest_signing_handoff(svc)
+        if handoff_message:
+            message = handoff_message
         items = sign_list_items(view.get("sign_list"))
         n = len(items)
         bag = refs.get("basket")
@@ -173,25 +181,38 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         if details is not None:
             details.show(search.selected)
         search.grid.refresh()
-        if refs.get("progress") == (message, is_busy):
+        signature = (message, is_busy, tuple(row.get("playerid") or row.get("id") for row in signed_rows))
+        if refs.get("progress") == signature:
             return
-        refs["progress"] = (message, is_busy)
+        refs["progress"] = signature
         progress_label.configure(text=message, text_color=theme.WARNING if is_busy else theme.MUTED)
+        plan_signed_btn.pack_forget()
+        club_signed_btn.pack_forget()
+        activity_btn.pack_forget()
+        drain_btn.pack_forget()
+        if signed_rows and batch is not None:
+            plan_signed_btn.configure(text=f"Plan these {len(signed_rows)} signed players",
+                                      command=lambda selected=batch: plan_signed_players(svc, selected))
+            club_signed_btn.configure(command=lambda selected=batch: open_signed_club(svc, selected))
+            plan_signed_btn.pack(side="right")
+            club_signed_btn.pack(side="right", padx=(0, theme.SP2))
         if is_busy:
             if not progress_row.winfo_manager():
                 progress_row.pack(fill="x", pady=(0, theme.SP2), before=workspace)
             activity_btn.pack(side="right")
             drain_btn.pack(side="right", padx=(0, theme.SP2))
+        elif handoff_message:
+            if not progress_row.winfo_manager():
+                progress_row.pack(fill="x", pady=(0, theme.SP2), before=workspace)
+            if not signed_rows:
+                activity_btn.pack(side="right")
         else:
             progress_row.pack_forget()
 
     def _after_sign_queued() -> None:
         basket.set_items(())
-        try:
-            from ....app.commands.squad import sync_squad
-            sync_squad(svc)
-        except Exception:
-            pass
+        # The normal coordinator refreshes after verified signing finishes.
+        # Reading immediately after queueing could export the pre-sign roster.
         refresh_signing_progress()
 
     basket = SignListPanel(rail, svc, view, on_change=update_review_cta,

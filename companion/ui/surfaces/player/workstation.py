@@ -146,7 +146,11 @@ def _build_target_summary(root: Any, svc: Any, ed: dict[str, Any]) -> None:
     mono.pack(side="left", padx=(0, theme.SP3))
     mono.pack_propagate(False)
     letters = monogram(hv.get("name") or str(hv.get("playerid") or "P"), fallback="P")
-    text_label(mono, letters[:3], size=16, bold=True, color=theme.BG).pack(expand=True)
+    from ..signed_portrait import avatar
+    if hv.get("playerid"):
+        avatar(mono, svc, int(hv["playerid"]), str(hv.get("name") or "Player"))
+    else:
+        text_label(mono, letters[:3], size=16, bold=True, color=theme.BG).pack(expand=True)
 
     names = ctk.CTkFrame(hero, fg_color="transparent")
     names.pack(side="left", fill="x", expand=True)

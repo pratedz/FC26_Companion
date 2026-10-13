@@ -96,27 +96,17 @@ def test_career_boosts_require_the_target_safe_worker_operation_version():
     assert '["career.set"]    = 2' in version
 
 
-def test_automation_workspace_is_fixed_first_and_uses_the_shared_queue():
-    source = (ROOT / "companion" / "ui" / "surfaces" / "automations.py").read_text(encoding="utf-8")
-    assert "CTkScrollableFrame" not in source
-    assert "CTkTabview" not in source
-    assert "Activity" in source
-    assert "Match ready" in source
-    assert "Other matchday actions" in source
-    assert "Customize individual boosts" in source
-    assert "PRIORITY_PROFILES" in source
-    assert "follow=False" in source
-    assert "waiting for a safe career event" in source.lower()
-    assert "retry_recorded_automation" in source
-    assert source.index("_priority_workspace(root") < source.index("_queue_panel(queue_host")
+def test_matchday_surface_keeps_stable_shell_refresh_and_navigation():
+    from companion.ui.nav import SURFACES
+    from companion.ui.surfaces import matchday
+    import inspect
+    source = inspect.getsource(matchday.build)
     assert "refresh_automation_queue" in source
-    assert 'list(view["active"])[:1]' in source
-
-    shell = (ROOT / "companion" / "ui" / "shell.py").read_text(encoding="utf-8")
-    assert '"automations": ("target", "squad", "bridge_view", "jobs")' in shell
-    assert "bind_activity(self.open_drawer)" in shell
-    ui_actions = (ROOT / "companion" / "app" / "ui_actions.py").read_text(encoding="utf-8")
-    assert "def open_activity" in ui_actions
+    assert "CTkTabview" not in source
+    assert "Manage queue" not in source
+    assert "Queue selected action" not in source
+    surface = next(s for s in SURFACES if s.key == "automations")
+    assert surface.title == "Matchday"
 
 
 def test_every_visible_native_automation_builds_a_real_worker_job():

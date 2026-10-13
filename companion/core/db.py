@@ -781,10 +781,11 @@ class Database:
     def job_records(
         self,
         *,
-        limit: int = 50,
+        limit: int | None = 50,
         save_uid: str | None = None,
         outcome: ApplyOutcome | None = None,
         since_utc: str | None = None,
+        op: str | None = None,
     ) -> list[JobRecord]:
         sql = "SELECT * FROM job_record WHERE 1=1"
         params: list[Any] = []
@@ -797,8 +798,14 @@ class Database:
         if since_utc:
             sql += " AND created_utc>=?"
             params.append(since_utc)
-        sql += " ORDER BY created_utc DESC LIMIT ?"
-        params.append(int(limit))
+        if op is not None:
+            sql += (" AND EXISTS (SELECT 1 FROM json_each(job_record.job_json, '$.ops') AS item"
+                    " WHERE json_extract(item.value, '$.op')=?)")
+            params.append(op)
+        sql += " ORDER BY created_utc DESC, job_id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
         return [JobRecord.from_row(r) for r in self.query(sql, params)]
 
     def job_stats(self, *, since_utc: str | None = None) -> dict[str, Any]:

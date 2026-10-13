@@ -60,6 +60,8 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     queue_page = ctk.CTkFrame(root, fg_color="transparent")
     history_page = ctk.CTkFrame(root, fg_color="transparent")
     health_page = ctk.CTkFrame(root, fg_color="transparent")
+    plans_page = ctk.CTkScrollableFrame(root, fg_color="transparent")
+    assets_page = ctk.CTkFrame(root, fg_color="transparent")
     inflight_host = ctk.CTkFrame(queue_page, fg_color="transparent")
     history_host = ctk.CTkFrame(history_page, fg_color="transparent")
     action_row = ctk.CTkFrame(root, fg_color="transparent")
@@ -72,7 +74,8 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         "packed_inflight": False,
         "packed_history": False,
         "segment": str(view_model.get("activity_segment") or "queue"),
-        "pages": {"queue": queue_page, "history": history_page, "health": health_page},
+        "pages": {"queue": queue_page, "history": history_page, "plans": plans_page, "health": health_page, "assets": assets_page},
+        "assets_built": False,
         "action_row": action_row,
         "health_host": health_page,
     }
@@ -80,6 +83,9 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
 
     def refresh_jobs() -> None:
         _render_body(svc, jobs_view(svc.store.snapshot()), history_model, slots)
+        if slots["segment"] == "plans":
+            from .squad_receipts import render_receipts
+            render_receipts(plans_page, svc)
 
     def rebuild() -> None:
         refresh_jobs()
@@ -98,12 +104,20 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         _sync_action(svc, slots, jobs_view(svc.store.snapshot()))
         if key == "health":
             _paint_health(svc, health_page)
+        elif key == "plans":
+            from .squad_receipts import render_receipts
+            render_receipts(plans_page, svc)
+        elif key == "assets" and not slots["assets_built"]:
+            from .legacy_assets import build as build_assets
+            build_assets(assets_page, svc)
+            slots["assets_built"] = True
 
     rail = segmented_rail(
         root,
-        (("queue", "Queue"), ("history", "History"), ("health", "Health")),
+        (("queue", "Queue"), ("history", "History"), ("plans", "Plans"), ("health", "Health"), ("assets", "Assets")),
         active=str(view_model.get("activity_segment") or "queue"),
         on_select=show_segment,
+        compact=True,
     )
     rail.pack(fill="x", pady=(0, theme.SP2))
     action_row.pack(fill="x", pady=(0, theme.SP2))
@@ -138,11 +152,20 @@ def _sync_action(svc: Any, slots: dict[str, Any], view: dict[str, Any]) -> None:
             kind="danger", height=theme.BTN_SM,
             disabled_reason="" if snapshot is not None else "No snapshot to undo.",
         ).pack(side="left")
-    else:
+    elif key == "plans":
+        button(row, "Refresh plan results", lambda: _refresh_plan_receipts(svc, slots["pages"]["plans"]),
+               kind="secondary", height=theme.BTN_SM).pack(side="left")
+    elif key == "health":
         button(
             row, "Run doctor", lambda: _paint_health(svc, slots["health_host"]),
             kind="secondary", height=theme.BTN_SM,
         ).pack(side="left")
+
+
+def _refresh_plan_receipts(svc: Any, host: Any) -> None:
+    from .squad_receipts import render_receipts
+    render_receipts(host, svc)
+    set_status(svc, "Squad plan results refreshed.")
 
 
 def _history_rows(history: list[dict[str, Any]] | tuple) -> tuple[dict[str, Any], ...]:
@@ -364,6 +387,13 @@ def _undo_last(svc: Any, snapshot: Any = None) -> None:
         set_status(svc, "Undo cancelled. Nothing was queued.")
         return
     try:
+        from ...app.commands.squad_plan import list_squad_plans, undo_squad_plan
+        snapshot_id = getattr(snapshot, "id", None)
+        for receipt in list_squad_plans(svc):
+            if snapshot_id and any(part.get("job_id") == snapshot_id for part in receipt.get("parts") or ()):
+                undo_squad_plan(svc, receipt["plan_id"], confirm_token="UNDO")
+                set_status(svc, "Complete squad plan undo queued. Follow it in Squad plans.")
+                return
         from ...app.commands.apply import restore_snapshot
 
         job_id = restore_snapshot(svc)

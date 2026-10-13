@@ -132,7 +132,7 @@ def test_arm_does_not_drain_or_start_the_fast_read_timer() -> None:
     assert "start_fast_read_timer" not in arm
 
 
-def test_fast_read_timer_starts_after_le_init_and_retries_on_career_post() -> None:
+def test_fast_read_timer_waits_for_career_post_instead_of_main_menu_init() -> None:
     init = _text(INIT)
     assert 'pcall(add, "post__LEInitDoneEvent"' in init
     assert "runner.on_init_done()" in init
@@ -141,7 +141,7 @@ def test_fast_read_timer_starts_after_le_init_and_retries_on_career_post() -> No
     init_done = source.split("function runner.on_init_done()", 1)[1].split(
         "function runner.on_career", 1
     )[0]
-    assert "start_fast_read_timer" in init_done
+    assert "start_fast_read_timer" not in init_done
     assert "runner.pump" not in init_done
 
     career_post = source.split('if phase == "post" or phase == nil then', 1)[1].split(

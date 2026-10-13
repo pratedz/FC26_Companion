@@ -157,6 +157,24 @@ class JobsState:
 
 
 @dataclass(frozen=True, slots=True)
+class SigningBatch:
+    """A reviewed signing bag, scoped before submission to its Career save."""
+
+    job_ids: tuple[str, ...]
+    selected_count: int
+    save_uid: str
+    teamid: int | None
+    session_id: str = ""
+    submitted: datetime | None = None
+    results: Mapping[str, JobResult] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SigningState:
+    batches: tuple[SigningBatch, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CatalogState:
     rows: int = 0
     years: tuple[str, ...] = ()
@@ -194,6 +212,7 @@ class AppState:
     editor: EditorState = field(default_factory=EditorState)
     squad: SquadState = field(default_factory=SquadState)
     jobs: JobsState = field(default_factory=JobsState)
+    signing: SigningState = field(default_factory=SigningState)
     catalog: CatalogState = field(default_factory=CatalogState)
     prefs: Prefs = field(default_factory=Prefs)
     status: str = ""

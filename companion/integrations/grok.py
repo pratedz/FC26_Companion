@@ -22,7 +22,10 @@ from typing import Any, Callable, Mapping, Sequence
 from ..domain.builds import BuildProposal, proposal, revision
 from ..domain.add_player import CardRecommendation
 from ..domain.player import FIELD_SPECS
-from ..domain.playstyles import OUTFIELD, GOALKEEPER, encode_names, validate_ai_styles
+from ..domain.playstyles import (
+    OUTFIELD, GOALKEEPER, complete_additive_styles, encode_names,
+    no_ceiling_style_floor, recommended_style_names, validate_ai_styles,
+)
 from ..domain.squad_session import (
     PROPOSE_CHUNK,
     RosterPlayer,
@@ -818,6 +821,7 @@ def propose_squad_players(
     cancel_check: Callable[[], bool] | None = None,
     on_chunk: Callable[[int, int], None] | None = None,
     problems: list[str] | None = None,
+    cache: Any | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, str], dict[int, str]]:
     """Per-player patches in chunks. Never submits a game job."""
     prompt = (request or "").strip()
@@ -827,29 +831,60 @@ def propose_squad_players(
         raise ValueError("No players selected.")
     if not selection_revision:
         raise ValueError("Missing selection revision.")
+    if cancel_check is not None and cancel_check():
+        return {}, {}, {}
     patches: dict[int, dict[str, Any]] = {}
     reasons: dict[int, str] = {}
     hints: dict[int, str] = {}
-    rows = list(players)
+    rows = []
+    keys: dict[int, str] = {}
+    from .ai_provider import provider_id, model_id
+    provider_key = f"{provider_id()}:{model_id()}:{model}"
+    for row in players:
+        pid = int(row["playerid"])
+        key = cache.proposal_key(row, recipe, prompt, provider_key) if cache is not None else ""
+        keys[pid] = key
+        cached = cache.get(key) if cache is not None else None
+        if cached is None:
+            rows.append(row)
+        else:
+            patches[pid], reasons[pid], hints[pid] = cached
+    if not rows:
+        if on_chunk is not None:
+            on_chunk(1, 1)
+        return patches, reasons, hints
     chunks = [rows[index:index + PROPOSE_CHUNK] for index in range(0, len(rows), PROPOSE_CHUNK)]
     total = len(chunks)
 
     def run_chunk(chunk: list[Mapping[str, Any]]):
         if cancel_check is not None and cancel_check():
             return None
-        return _propose_squad_chunk(
+        result = _propose_squad_chunk(
             chunk,
             selection_revision=selection_revision,
             request=prompt,
             recipe=recipe,
             model=model,
         )
+        # Preserve valid groups even when a sibling fails or the user closes
+        # the window; the next request can retry only missing proposals.
+        if cache is not None:
+            part_patches, part_reasons, part_hints = result
+            for pid, patch in part_patches.items():
+                cache.put(keys[pid], (patch, part_reasons.get(pid, ""), part_hints.get(pid, "")))
+        return result
 
     parts: list[tuple[dict, dict, dict] | None] = [None] * total
     if on_chunk is not None:
         on_chunk(0, total)
     if total == 1:
-        parts[0] = run_chunk(chunks[0])
+        try:
+            parts[0] = run_chunk(chunks[0])
+        except Exception as exc:
+            if not patches:
+                raise
+            if problems is not None:
+                problems.append(f"Codex group 1 of 1 failed: {exc}")
         if on_chunk is not None:
             on_chunk(1, 1)
     else:
@@ -874,7 +909,7 @@ def propose_squad_players(
                     on_chunk(done, total)
                 if cancel_check is not None and cancel_check():
                     break
-        if first_error is not None and not any(part for part in parts):
+        if first_error is not None and not patches and not any(part for part in parts):
             if not (cancel_check is not None and cancel_check()):
                 raise first_error
     if cancel_check is not None and cancel_check():
@@ -896,9 +931,16 @@ def library_hint_for(
     position: str,
     target_ovr: int,
     catalog: Any | None,
+    *,
+    cache: Any | None = None,
 ) -> str:
     if catalog is None or not name:
         return ""
+    key = cache.key("hint", id(catalog), name, position, target_ovr) if cache is not None else ""
+    if cache is not None:
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
     try:
         hits = catalog.search(
             name,
@@ -909,25 +951,31 @@ def library_hint_for(
     except Exception:
         return ""
     if not hits:
+        if cache is not None:
+            cache.put(key, "")
         return ""
     card = hits[0]
     ovr = card.get("overallrating") or card.get("ovr") or target_ovr
     pos = card.get("positions_text") or card.get("position") or position or ""
     label = str(card.get("name") or name)
-    return f"Inspired by: {ovr} {pos} Library card ({label})"
+    hint = f"Inspired by: {ovr} {pos} Library card ({label})"
+    if cache is not None:
+        cache.put(key, hint)
+    return hint
 
 
 def _field_contract(recipe: SquadRecipe) -> dict[str, dict[str, Any]]:
     """Bounds for fields this ask may edit. Face, kit, and tattoos stay out."""
     families = set(recipe.families or ())
+    attribute_categories = {
+        "Ratings", "Pace", "Shooting", "Passing", "Dribbling",
+        "Defending", "Physical", "Goalkeeping",
+    }
     body_names = {"height", "weight", "bodytypecode", "muscularitycode", "runstylecode"}
     playstyle_names = {"trait1", "trait2", "icontrait1", "icontrait2"}
     out: dict[str, dict[str, Any]] = {}
     for name, spec in FIELD_SPECS.items():
-        keep = spec.category in {
-            "Ratings", "Pace", "Shooting", "Passing", "Dribbling",
-            "Defending", "Physical", "Goalkeeping",
-        }
+        keep = "attrs" in families and spec.category in attribute_categories
         if "playstyles" in families and name in playstyle_names:
             keep = True
         if "skills" in families and spec.category == "Skills & foot":
@@ -990,6 +1038,14 @@ def _propose_squad_chunk_once(
     field_contract = _field_contract(recipe)
     allowed = list(recipe.families)
     identity_note = club_identity_note(recipe.club_name)
+    attribute_instructions = (
+        "Hit the supplied target_ovr. When pinned is true, overallrating must equal "
+        "that target_ovr exactly. Include full outfield attributes for overall "
+        "rebuilds — never overallrating alone. "
+        if "attrs" in recipe.families
+        else "Do not change overallrating, potential, modifier, or player attributes; "
+        "return only fields from the requested families. "
+    )
     system = (
         "You design safe EA FC 26 Career Mode per-player edits. Return JSON only: "
         '{"selection_revision":"string","players":['
@@ -998,21 +1054,33 @@ def _propose_squad_chunk_once(
         '"changes":[{"field":"canonical_name","value":integer,"reason":"short"}]}]}. '
         "Each player gets a DIFFERENT patch from their live current_values. "
         "Keep relative shape (a creator stays high passing/dribble, a CB stays a CB). "
-        "Hit the supplied target_ovr. When pinned is true, overallrating must equal "
-        "that target_ovr exactly. Include full outfield attributes for overall "
-        "rebuilds — never overallrating alone. "
+        f"{attribute_instructions}"
         f"Allowed families: {allowed}. "
-        "When playstyles are allowed, choose names from playstyle_catalog for "
-        "playstyles and playstyles_plus. Python encodes the masks. Never guess "
+        "When playstyles are allowed, the user may misspell a name. Map it to the "
+        "closest playstyle_catalog spelling and return that official name. "
+        "Python encodes the masks. Never guess "
         "trait1/trait2/icontrait1/icontrait2 numbers in changes. "
         "Include every selected player, including goalkeepers. For a PlayStyle+ "
-        "request, every player needs a nonempty playstyles_plus list. "
+        "request, every outfield player needs a nonempty playstyles_plus list, "
+        "and every goalkeeper needs a goalkeeper PlayStyle+. "
+        "Explicit requested_skill_stars and required_playstyles_plus are binding "
+        "requirements on EVERY applicable selected player, including defenders. "
+        "For example all players 5 stars means skillmoves=4 on every player; "
+        "all players Quick Step+ means that style on every outfield player. "
+        "Choose additional styles individually around those requirements. "
+        "Use formation and planning_role as the user's intended lineup context. "
+        "Explicit exclusions override general improvement; never edit excluded families. "
         "Use goalkeeper PlayStyle+ for keepers and outfield PlayStyle+ for others. "
         "CPU/Career traits such as Injury Prone are not PlayStyle+. "
         "Honor each player's playstyle_plus_max for icontrait1/icontrait2. "
         "A null playstyle_plus_max means the user typed no limit: give each "
         "player as many PlayStyle+ as suit his position and live attributes, "
         "and do not copy one set onto the whole squad. "
+        "For an explicit unlimited improvement, satisfy each player's "
+        "minimum_regular_playstyles and minimum_playstyles_plus; these are floors, "
+        "not caps. Preserve existing styles when adding; include every Plus style "
+        "in the regular list too. Use recommended_style_candidates as role and live "
+        "attribute guidance, while preserving the player's individual strengths. "
         "A higher target_ovr gets more regular playstyles and more PlayStyle+ "
         "than a lower teammate: 88+ should look like a star, not the same two "
         "bits as a 79. When playstyle_plus_max is a number, never exceed it. "
@@ -1036,6 +1104,8 @@ def _propose_squad_chunk_once(
                 "unlimited_playstyles": recipe.unlimited_playstyles,
                 "allow_nerf": recipe.allow_nerf,
                 "soft_band": recipe.soft_band,
+                "requested_skill_stars": recipe.forced_skill_stars,
+                "required_playstyles_plus": list(recipe.forced_playstyle_plus),
                 "named_overalls": [
                     {"name": name, "ovr": ovr}
                     for name, ovr in recipe.named_overalls
@@ -1050,7 +1120,22 @@ def _propose_squad_chunk_once(
                     "target_ovr": row.get("target_ovr"),
                     "pinned": bool(row.get("pinned")),
                     "playstyle_plus_max": row.get("playstyle_plus_max"),
+                    "minimum_regular_playstyles": no_ceiling_style_floor(
+                        recipe.prompt, unlimited=recipe.unlimited_playstyles,
+                        position=row.get("position"), target_ovr=row.get("target_ovr") or 0,
+                    )[0],
+                    "minimum_playstyles_plus": no_ceiling_style_floor(
+                        recipe.prompt, unlimited=recipe.unlimited_playstyles,
+                        position=row.get("position"), target_ovr=row.get("target_ovr") or 0,
+                    )[1],
+                    "recommended_style_candidates": recommended_style_names(
+                        row.get("position"), row.get("current_values") or row,
+                    ) if recipe.wants_playstyles and recipe.unlimited_playstyles else (),
                     "current_values": compact_current(row.get("current_values") or row),
+                    "formation": row.get("formation") or recipe.formation,
+                    "planning_role": row.get("planning_role") or "",
+                    "excluded_families": recipe.excluded_families,
+                    "requested_age_at_FC26_season_start": recipe.requested_age,
                     "library_hint": row.get("library_hint") or "",
                 }
                 for row in chunk
@@ -1082,6 +1167,7 @@ def _propose_squad_chunk_once(
     for item in raw_players:
         if not isinstance(item, Mapping):
             continue
+        locally_added: tuple[str, ...] = ()
         try:
             pid = int(item.get("playerid"))
         except (TypeError, ValueError):
@@ -1107,7 +1193,15 @@ def _propose_squad_chunk_once(
                     if key in item:
                         patch.update(encode_names(item[key], plus=plus))
                 validate_ai_styles(patch, require_plus=recipe.wants_playstyle_plus,
-                                   position=str(rows_by_id[pid].get("position") or ""))
+                                   position=rows_by_id[pid].get("position"))
+                row = rows_by_id[pid]
+                patch, locally_added = complete_additive_styles(
+                    patch, current=row.get("current_values") or row,
+                    position=row.get("position"), target_ovr=row.get("target_ovr") or 0,
+                    prompt=recipe.prompt, unlimited=recipe.unlimited_playstyles,
+                )
+                validate_ai_styles(patch, require_plus=recipe.wants_playstyle_plus,
+                                   position=row.get("position"))
             # Reject invented fields' values before any player reaches Apply.
             for key, value in patch.items():
                 if key in FIELD_SPECS:
@@ -1117,7 +1211,10 @@ def _propose_squad_chunk_once(
             continue
         if patch:
             patches[pid] = patch
-            reasons[pid] = str(item.get("summary") or "").strip()
+            reason = str(item.get("summary") or "").strip()
+            if locally_added:
+                reason += (". " if reason else "") + "Completed unlimited improvement locally: " + ", ".join(locally_added)
+            reasons[pid] = reason
             hints[pid] = str(item.get("library_hint") or "").strip()
     return patches, reasons, hints
 

@@ -7,6 +7,7 @@ import pytest
 from companion.domain.player import FIELD_SPECS, PlayerValidationError, normalize_patch
 from companion.domain.playstyles import GOALKEEPER, OUTFIELD, encode_names, plus_names
 from companion.domain.job import JobValidationError
+from companion.core.clock import FakeClock
 from companion.domain.squad_plan import build_apply_jobs, plan_from_rows
 from companion.domain.squad_session import (
     build_session, parse_recipe, propose_payload, roster_from_members,
@@ -26,7 +27,8 @@ def squad(count=22):
     # Both real players are after the first attribute part, as in the failed run.
     rows[8].update(playerid=85308, name="Manuel Neuer", position="GK")
     rows[9].update(playerid=82407, name="Carvajal", position="RB")
-    plan = plan_from_rows(rows)
+    plan = plan_from_rows(rows, source_save_uid="SAVE", source_teamid=11,
+                          source_snapshot_revision=FakeClock().now().isoformat())
     session = build_session(roster_from_members(plan.members), parse_recipe(PROMPT))
     return plan, session
 
@@ -114,7 +116,8 @@ def test_exact_invalid_bank_repaired_then_every_player_reaches_apply(monkeypatch
     from companion.domain.outcome import ApplyOutcome
 
     clock, store, transport = FakeClock(), Store(), FakeTransport()
-    store.dispatch(E.SquadSynced(save_uid="SAVE", teamid=11, players=(), taken=clock.now()))
+    store.dispatch(E.SquadSynced(save_uid="SAVE", teamid=11,
+                                 players=tuple(member.base for member in plan.members), taken=clock.now()))
     svc = Services(paths=TempAppPaths(tmp_path), clock=clock, store=store,
                    transport=transport, executor=InlineExecutor())
     written, worn = {}, {member.playerid: member.base["jerseynumber"] for member in plan.members}
@@ -204,11 +207,16 @@ def test_missing_plus_is_not_satisfied_by_regular_traits_or_career_bits():
         build_apply_jobs(staged)
 
 
-def test_no_ceiling_can_encode_every_defined_playstyle_without_trimming():
+def test_no_ceiling_keeps_every_position_compatible_playstyle_without_trimming():
     plan, session = squad()
     all_plus = encode_names(list(OUTFIELD) + list(GOALKEEPER), plus=True)
     clean = sanitize_patch(all_plus, recipe=session.recipe, target=session.targets[0], current={})
-    assert len(plus_names(clean)) == 36
+    assert len(plus_names(clean)) == 30
+    assert clean["icontrait2"] == 0
+    keeper = next(target for target in session.targets if target.is_gk)
+    clean = sanitize_patch(all_plus, recipe=session.recipe, target=keeper, current={})
+    assert len(plus_names(clean)) == 6
+    assert clean["icontrait1"] == 0
     assert FIELD_SPECS["icontrait2"].coerce(clean["icontrait2"]) == 63
 
 
@@ -220,7 +228,7 @@ def test_apply_button_explains_incomplete_proposal_and_unblocks_after_rebuild(mo
     monkeypatch.setattr(planner, "set_disabled", lambda button, reason: seen.append(reason))
     state = {"apply_btn": object(), "plan": incomplete, "phase": "review"}
     planner._sync_session_apply(state)
-    assert "Rebuild" in seen[-1]
+    assert "Repair the affected players" in seen[-1]
     patches = {pid: encode_names(DEFENDER_PLUS, plus=True) for pid in plan.playerids}
     patches[85308] = encode_names(list(GOALKEEPER), plus=True)
     state["plan"] = stage_per_player_plan(plan, session, patches)

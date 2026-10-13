@@ -269,11 +269,43 @@ def test_no_limit_keeps_every_playstyle_plus_bit() -> None:
         session,
         {1: {"overallrating": 84, "icontrait1": 0b11111}},
     )
-    assert staged.overrides[1]["icontrait1"] == 0b11111
+    assert staged.overrides[1]["icontrait1"] & 0b11111 == 0b11111
+    assert staged.overrides[1]["icontrait1"].bit_count() >= 6
     from companion.domain.squad_session import propose_payload
 
     payload = propose_payload(plan, session)
     assert payload[0]["playstyle_plus_max"] is None
+
+
+def test_named_prompt_enforces_skills_and_required_playstyle_plus() -> None:
+    from companion.domain.playstyles import encode_names, plus_names, resolve_playstyle_name
+
+    prompt = "make these plater 5 star skill move and quick step as play style+"
+    recipe = parse_recipe(prompt)
+    assert recipe.forced_skill_stars == 5
+    assert recipe.forced_playstyle_plus == ("Quick Step",)
+    assert recipe.wants_skills and recipe.wants_playstyle_plus
+    assert resolve_playstyle_name("qucik step") == "Quick Step"
+    rows = [
+        _row(1, "Ronaldinho", "LW", 90, 90, **_fat(90)),
+        _row(2, "Gerrard", "CM", 88, 88, **_fat(88)),
+    ]
+    session = build_session(roster_from_rows(rows), recipe)
+    plan = plan_from_rows(rows)
+    ronaldinho = {"overallrating": 90, "skillmoves": 4}
+    ronaldinho.update(encode_names(["Quick Step"], plus=True))
+    gerrard = {"overallrating": 88, "skillmoves": 2}
+    gerrard.update(encode_names(["Anticipate"], plus=True))
+    staged = stage_per_player_plan(
+        plan,
+        session,
+        {1: ronaldinho, 2: gerrard},
+    )
+    assert staged.overrides[1]["skillmoves"] == 4
+    assert "Quick Step" in plus_names(staged.overrides[1])
+    assert staged.overrides[2]["skillmoves"] == 4
+    assert "Anticipate" in plus_names(staged.overrides[2])
+    assert "Quick Step" in plus_names(staged.overrides[2])
 
 
 def test_playstyle_plus_capped_at_two_bits() -> None:
@@ -429,7 +461,8 @@ def test_propose_runs_player_chunks_together(monkeypatch) -> None:
     assert sorted(patches) == [1, 2, 3, 4, 5, 6]
     assert len(calls) == 2
     assert "tattoohead" not in sent[0]
-    assert "acceleration" in sent[0]
+    # A playstyle-only request deliberately omits attribute proposal fields.
+    assert "acceleration" not in sent[0]
 
 
 def test_pin_survives_grok_overall() -> None:
@@ -500,7 +533,8 @@ def test_club_and_planner_session_copy() -> None:
     assert 'mode="per_player"' in club
     assert "Same numbers on every selected player" in planner or "Same patch for all" in planner
     assert "Rebuild" in planner
-    assert "These players" in planner
+    review = (ROOT / "companion" / "ui" / "surfaces" / "planner_review.py").read_text(encoding="utf-8")
+    assert "These players" in review
     assert "Codex is still writing each build." in planner
     assert "_sync_session_apply" in planner
     assert "_draft_session" in planner
@@ -573,7 +607,7 @@ def test_draft_session_before_grok() -> None:
 def test_current_squad_plan_release_version() -> None:
     from companion import __version__
 
-    assert __version__ == "2.10.40"
+    assert __version__ == "2.10.51"
 
 
 def test_relative_pace_under_80() -> None:
@@ -803,7 +837,8 @@ def test_bad_field_on_one_player_keeps_the_other() -> None:
         },
     )
     assert 1 not in staged.overrides or "not_a_real_field" not in staged.overrides.get(1, {})
-    assert staged.overrides[2]["icontrait1"] == _plus_bits(4)
+    assert staged.overrides[2]["icontrait1"] & _plus_bits(4) == _plus_bits(4)
+    assert staged.overrides[2]["icontrait1"].bit_count() >= 6
     assert any("A:" in note or "not_a_real_field" in note for note in staged.warnings)
 
 

@@ -49,7 +49,7 @@
         "properties": {
           "op": {
             "enum": [
-              "diag.ping", "db.dump", "set_fields", "create_player",
+              "diag.ping", "assets.legacy", "db.dump", "set_fields", "create_player",
               "add_to_team", "repair_partial_add", "transfer", "budget", "bulk_edit",
               "export_squad", "snapshot", "growth_sync", "career.set",
               "injury.scan", "injury.cure"

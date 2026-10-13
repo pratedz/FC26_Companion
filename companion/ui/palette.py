@@ -25,7 +25,7 @@ def palette_commands() -> tuple[PaletteCommand, ...]:
         PaletteCommand("nav.player", "Go to Player", "navigate", "player"),
         PaletteCommand("nav.add_player", "Go to Sign", "navigate", "add_player"),
         PaletteCommand("nav.injury", "Go to Injuries", "navigate", "injury"),
-        PaletteCommand("nav.automations", "Go to Automations", "navigate", "automations"),
+        PaletteCommand("nav.automations", "Go to Matchday", "navigate", "automations"),
         PaletteCommand("nav.library", "Go to Library", "navigate", "library"),
         PaletteCommand(
             "nav.club.planner",

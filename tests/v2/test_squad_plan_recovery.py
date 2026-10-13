@@ -33,14 +33,16 @@ def selected_plan(count):
             "overallrating": 80, "potential": 84, "teamid": 10, "jerseynumber": i,
             "icontrait1": 0, "icontrait2": 0,
         }} for i in range(1, count + 1)
-    ])
+    ], source_save_uid="SAVE", source_teamid=10,
+       source_snapshot_revision=FakeClock().now().isoformat())
 
 
 def staged_plan(count, *, unlimited=True, bad_player=None):
     plan = selected_plan(count)
     recipe = replace(parse_recipe(PROMPT), unlimited_playstyles=unlimited)
     session = build_session(roster_from_members(plan.members), recipe)
-    patches = {i: {"jerseynumber": i % count + 1, "icontrait1": 255, "icontrait2": 15}
+    patches = {i: {"jerseynumber": i % count + 1,
+                   "icontrait1": 0 if i == 1 else 255, "icontrait2": 15 if i == 1 else 0}
                for i in plan.playerids}
     if bad_player is not None:
         patches[bad_player]["not_an_attribute"] = 1
@@ -54,11 +56,14 @@ def test_combined_shirts_and_no_ceiling_reach_every_selected_players_apply(count
     assert session.targets[0].is_gk
     assert len(staged.overrides) == count
     preview = staged.matrix_rows()
-    assert sum(r["field"] == "icontrait1" and r["after"] == 255 for r in preview) == count
+    assert sum(r["field"] == "icontrait1" and r["after"] == 255 for r in preview) == count - 1
+    assert sum(r["field"] == "icontrait2" and r["after"] == 15 for r in preview) == 1
     jobs = build_apply_jobs(staged)
     attrs = [op.to_wire() for job in jobs for op in job.ops if op.body["table"] == "players"]
     assert {op["key"]["value"] for op in attrs} == set(staged.playerids)
-    assert all(op["fields"]["icontrait1"] == 255 and op["fields"]["icontrait2"] == 15 for op in attrs)
+    assert all(op["fields"]["icontrait1"] == (0 if op["key"]["value"] == 1 else 255)
+               and op["fields"]["icontrait2"] == (15 if op["key"]["value"] == 1 else 0)
+               for op in attrs)
     worn = {i: i for i in staged.playerids}
     for job in jobs:
         job.validate()
@@ -105,10 +110,12 @@ def success(job):
                            "fields_requested": len(op.body.get("fields", {}))}} for op in job.ops]}
 
 
-def service(tmp_path, transport, clock):
+def service(tmp_path, transport, clock, *, count=20):
     paths = TempAppPaths(tmp_path)
     store = Store()
-    store.dispatch(E.SquadSynced(save_uid="SAVE", teamid=10, players=(), taken=clock.now()))
+    store.dispatch(E.SquadSynced(save_uid="SAVE", teamid=10,
+                                 players=tuple(member.base for member in selected_plan(count).members),
+                                 taken=clock.now()))
     return Services(paths=paths, store=store, clock=clock, transport=transport, executor=InlineExecutor())
 
 
@@ -119,6 +126,7 @@ def test_part_two_runs_after_premature_crash_is_replaced_by_applied(tmp_path, mo
     submitted, observed = [], []
 
     class Worker(FileTransport):
+        supports_plan_readback = False  # This fixture simulates delayed writes, not exports.
         def submit(self, job):
             if submitted:
                 assert self.result(submitted[-1].job_id).outcome is ApplyOutcome.APPLIED
@@ -167,7 +175,7 @@ def test_follow_timeout_keeps_chain_alive_and_preserves_45_second_boundary(tmp_p
         transport.complete(jid, success(transport.job(jid)))
         return transport.result(jid)
     transport.await_result = follow
-    svc = service(tmp_path, transport, clock)
+    svc = service(tmp_path, transport, clock, count=22)
     finished = []
     apply_squad_plan(svc, staged_plan(22)[0], confirm_token="APPLY", on_result=finished.append)
     assert len(transport.submitted) == len(build_apply_jobs(staged_plan(22)[0]))
@@ -220,6 +228,7 @@ def test_latest_runtime_delayed_first_part_and_legacy_path_do_not_abort_chain(tm
     paths, clock = TempAppPaths(tmp_path), FakeClock()
     submitted = []
     class DelayedWorker(FileTransport):
+        supports_plan_readback = False  # Read-back correctness has its own real-export simulator.
         def submit(self, job):
             if submitted:
                 assert self.result(submitted[-1].job_id).outcome is ApplyOutcome.APPLIED
@@ -230,7 +239,7 @@ def test_latest_runtime_delayed_first_part_and_legacy_path_do_not_abort_chain(tm
                 (paths.jobs / f"{jid}.json").unlink()
             return jid
     transport = DelayedWorker(paths, clock=clock)
-    svc = service(tmp_path, transport, clock)
+    svc = service(tmp_path, transport, clock, count=count)
     db = Database(paths.state_db)
     svc = replace(svc, db=db)
     released = False
@@ -334,7 +343,8 @@ def test_propose_keeps_failed_group_warning_when_library_hints_are_returned(monk
     session = build_session(roster_from_members(plan.members), parse_recipe(PROMPT))
     def propose(**kwargs):
         kwargs["problems"].append("Group 2 failed: provider unavailable")
-        return ({pid: {"icontrait1": 255, "icontrait2": 15} for pid in plan.playerids},
+        return ({pid: {"icontrait1": 0 if pid == 1 else 255,
+                       "icontrait2": 15 if pid == 1 else 0} for pid in plan.playerids},
                 {}, {1: "Actual Library hint"})
     monkeypatch.setattr("companion.integrations.grok.propose_squad_players", propose)
     finished = []

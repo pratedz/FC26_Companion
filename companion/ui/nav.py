@@ -86,8 +86,8 @@ SURFACES: tuple[Surface, ...] = (
             order=3, glyph="+", purpose="Review and sign a Library card for my current team."),
     Surface("injury", "Injuries", "companion.ui.surfaces.injury",
             order=4, glyph="✚", purpose="Scan and clear squad injuries."),
-    Surface("automations", "Automations", "companion.ui.surfaces.automations",
-            order=5, glyph="⟳", purpose="Run a scripted operation on many players."),
+    Surface("automations", "Matchday", "companion.ui.surfaces.automations",
+            order=5, glyph="⟳", purpose="Prepare my Career squad before a match."),
     Surface("library", "Library", "companion.ui.surfaces.library", order=6,
             glyph="▤", purpose="Find a card, a player, or more data."),
 )
@@ -428,9 +428,12 @@ def segmented_rail(
     *,
     active: str,
     on_select: Callable[[str], None],
+    compact: bool = False,
 ) -> Any:
     """Token-styled source switcher — underline, not CTkTabview chrome."""
     ensure_ctk()
+    if compact:
+        return _compact_rail(parent, items, active=active, on_select=on_select)
     frame = ctk.CTkFrame(
         parent,
         fg_color=theme.PANEL,
@@ -480,5 +483,30 @@ def segmented_rail(
                 pass
 
     frame.set_active = set_active  # type: ignore[attr-defined]
+    set_active(active)
+    return frame
+
+
+def _compact_rail(parent: Any, items: Sequence[tuple[str, str]], *,
+                  active: str, on_select: Callable[[str], None]) -> Any:
+    """Equal columns keep all Activity sections reachable in its 360px drawer."""
+    frame = ctk.CTkFrame(parent, fg_color=theme.PANEL, corner_radius=theme.R_MD, height=40)
+    frame.grid_propagate(False)
+    tabs = {}
+    for index, (key, title) in enumerate(items):
+        frame.grid_columnconfigure(index, weight=1, uniform="activity-tabs")
+        widget = ctk.CTkButton(frame, text=title, width=1, height=theme.BTN_SM,
+            font=ctk.CTkFont(family=theme.FONT, size=12),
+            fg_color="transparent", hover_color=theme.CARD_HOVER,
+            text_color=theme.MUTED, corner_radius=theme.R_SM,
+            command=lambda k=key: on_select(k))
+        widget.grid(row=0, column=index, sticky="ew", padx=2, pady=theme.SP1)
+        tabs[key] = widget
+
+    def set_active(key: str) -> None:
+        for name, widget in tabs.items():
+            widget.configure(fg_color=theme.CARD if name == key else "transparent",
+                             text_color=theme.TEXT if name == key else theme.MUTED)
+    frame.set_active = set_active
     set_active(active)
     return frame

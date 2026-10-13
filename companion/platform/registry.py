@@ -36,6 +36,7 @@ views are queried explicitly rather than trusting the interpreter's bitness.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -354,7 +355,14 @@ def resolve_install_root(hint: Path | None = None) -> Resolution:
         if path is not None and looks_like_install_root(path):
             return Resolution(path, source, f'{name}="{raw}"')
 
-    start = hint if hint is not None else Path(__file__).resolve().parents[2]
+    if hint is not None:
+        start = hint
+    elif getattr(sys, "frozen", False):
+        # The writable app lives beside its EXE. A PyInstaller resources path
+        # can be a temporary extraction directory unrelated to the LE install.
+        start = Path(sys.executable).resolve().parent
+    else:
+        start = Path(__file__).resolve().parents[2]
     probed = _probe_install_root(Path(start))
     if probed is not None:
         return Resolution(probed, Source.PROBE, f"walked up from {start}")

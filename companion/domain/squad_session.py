@@ -50,6 +50,12 @@ CONTRACT_FIELDS = frozenset(
     {"contractvaliduntil", "isretiring", "iscustomized", "playerid"}
 )
 PLAYSTYLE_PLUS_FIELDS = ("icontrait1", "icontrait2")
+ATTRIBUTE_CATEGORIES = frozenset(
+    {
+        "Ratings", "Pace", "Shooting", "Passing", "Dribbling",
+        "Defending", "Physical", "Goalkeeping", "Composites",
+    }
+)
 DEFENDER_FINISHING = frozenset(
     {"finishing", "volleys", "shotpower", "longshots", "penalties", "positioning"}
 )
@@ -123,21 +129,64 @@ _JERSEY_NUM_FIRST = re.compile(
 )
 # Well-known squad shirts. Used only when the ask is "arrange / recommend
 # jersey numbers" and the user did not type a number for that player.
-_FAMOUS_SHIRTS: tuple[tuple[tuple[str, ...], int], ...] = (
-    (("salah",), 11),
-    (("gerrard",), 8),
-    (("torres",), 9),
-    (("dijk",), 4),
-    (("robertson",), 26),
-    (("trent",), 66),
-    (("arnold",), 66),
-    (("messi",), 10),
-    (("maldini",), 3),
-    (("ronaldinho",), 10),
-    (("buffon",), 1),
-    (("pele",), 10),
-    (("maradona",), 10),
+_FAMOUS_SHIRTS: tuple[tuple[tuple[str, ...], tuple[int, ...]], ...] = (
+    # Earlier entries win shared signature numbers. Alternatives are familiar
+    # shirts, rather than whichever arbitrary number a new signing received.
+    (("messi",), (10, 30, 19)),
+    (("cristiano", "ronaldo"), (7, 9, 17)),
+    (("ronaldinho",), (10, 80, 21)),
+    (("pele",), (10, 9)),
+    (("maradona",), (10, 16)),
+    (("salah",), (11,)),
+    (("gerrard",), (8, 17)),
+    (("fernando", "torres"), (9,)),
+    (("dijk",), (4,)),
+    (("maldini",), (3,)),
+    (("buffon",), (1, 77)),
+    (("robertson",), (26,)),
+    (("trent",), (66,)),
+    (("arnold",), (66,)),
+    (("zidane",), (10, 5, 21)),
+    (("cruyff",), (14, 9)),
+    (("cafu",), (2,)),
+    (("roberto", "carlos"), (3, 6)),
+    (("beckham",), (7, 23, 32)),
+    (("rooney",), (10, 8)),
+    (("kaka",), (22, 8, 10)),
+    (("thierry", "henry"), (14, 12)),
+    (("iniesta",), (8, 6, 24)),
+    (("xavi",), (6, 8)),
+    (("pirlo",), (21,)),
+    (("casillas",), (1,)),
+    (("schmeichel",), (1,)),
+    (("neuer",), (1,)),
+    (("sergio", "ramos"), (4, 15)),
+    (("baresi",), (6,)),
+    (("nesta",), (13,)),
+    (("cannavaro",), (5,)),
+    (("vieira",), (4, 24)),
+    (("roy", "keane"), (16,)),
+    (("lampard",), (8,)),
+    (("drogba",), (11,)),
+    (("ronaldo",), (9, 11, 99)),
 )
+_POSITION_SHIRTS: dict[str, tuple[int, ...]] = {
+    "gk": (1, 13, 12, 22, 23, 25),
+    "def": (2, 3, 4, 5, 6, 12, 15, 16, 21, 24),
+    "mid": (6, 8, 10, 7, 14, 16, 18, 20, 21, 23),
+    "fwd": (9, 10, 7, 11, 14, 17, 19, 20, 21, 27),
+    "rb": (2, 12, 22, 4, 15),
+    "rwb": (2, 12, 22, 4, 15),
+    "lb": (3, 13, 23, 6, 21),
+    "lwb": (3, 13, 23, 6, 21),
+    "cb": (4, 5, 6, 15, 16, 24),
+    "cdm": (6, 4, 8, 16, 18, 21),
+    "cm": (8, 6, 16, 18, 20, 21, 23),
+    "cam": (10, 8, 21, 20, 18, 14),
+    "rw": (7, 11, 17, 19, 20, 27),
+    "lw": (11, 7, 17, 19, 20, 27),
+    "st": (9, 19, 14, 20, 21, 27),
+}
 _NAME_FILLER = frozenset(
     {
         "make", "set", "give", "put", "bump", "raise", "get", "turn", "change",
@@ -211,6 +260,17 @@ class SquadRecipe:
     named_overalls: tuple[tuple[str, int], ...] = ()
     # Explicit "messi jersey 10" pairs. Python assigns these and moves clashes.
     named_jerseys: tuple[tuple[str, int], ...] = ()
+    # "5 star skill move" — display stars, written as skillmoves 0–4.
+    forced_skill_stars: int | None = None
+    # "quick step as play style+" — stamped on every player who can have it.
+    forced_playstyle_plus: tuple[str, ...] = ()
+    excluded_families: tuple[str, ...] = ()
+    excluded_positions: tuple[str, ...] = ()
+    excluded_names: tuple[str, ...] = ()
+    requested_age: int | None = None
+    starter_ids: tuple[int, ...] = ()
+    formation: str = ""
+    planning_roles: tuple[tuple[int, str], ...] = ()
 
     @property
     def wants_age(self) -> bool:
@@ -223,7 +283,7 @@ class SquadRecipe:
     @property
     def wants_playstyle_plus(self) -> bool:
         return self.wants_playstyles and bool(
-            self.unlimited_playstyles or self.allow_icon_traits
+            self.unlimited_playstyles or self.allow_icon_traits or self.forced_playstyle_plus
             or re.search(r"play\s*styles?\s*(?:\+|plus)", self.prompt, re.I)
         )
 
@@ -647,6 +707,41 @@ def plan_hint(
     return "Tick the players you want. Then type each overall in the box."
 
 
+def extract_skill_stars(prompt: str) -> int | None:
+    """Display stars from ``5 star skill move``. The save stores that as 4."""
+    text = str(prompt or "")
+    number = r"([1-5]|one|two|three|four|five)"
+    patterns = (
+        rf"\b{number}\s*(?:-?\s*stars?|\*)\s*skills?\s*moves?\b",
+        # The player's original ask: "5 skill star move".
+        rf"\b{number}\s*skills?\s*stars?\s*moves?\b",
+        rf"\bskills?\s*moves?\s*(?:of|to|at)?\s*{number}\b\s*(?:-?\s*stars?|\*)?",
+    )
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            raw = match.group(1).casefold()
+            return words[raw] if raw in words else int(raw)
+    return None
+
+
+def extract_playstyle_plus_names(prompt: str) -> tuple[str, ...]:
+    """Named PlayStyle+ from ``quick step as play style+`` or ``playstyles+ of quick step``."""
+    from .playstyles import GOALKEEPER, OUTFIELD
+
+    text = str(prompt or "").casefold()
+    mentions_plus = bool(re.search(r"play\s*styles?\s*(?:\+|plus)", text, re.I))
+    found: list[str] = []
+    for name in sorted((*OUTFIELD, *GOALKEEPER), key=len, reverse=True):
+        spelling = r"[\s_-]*".join(re.escape(word) for word in name.casefold().split())
+        pattern = rf"(?<!\w){spelling}(?!\w)"
+        match = re.search(pattern, text)
+        if match and (mentions_plus or re.match(r"\s*(?:\+|plus\b)", text[match.end():])):
+            found.append(name)
+    return tuple(dict.fromkeys(found))
+
+
 def parse_recipe(prompt: str, club_name: str = "") -> SquadRecipe:
     text = (prompt or "").strip()
     folded = text.casefold()
@@ -703,7 +798,31 @@ def parse_recipe(prompt: str, club_name: str = "") -> SquadRecipe:
 
     named_overalls = extract_named_overalls(text)
     named_jerseys = extract_named_jerseys(text)
-    families = ["attrs"]
+    skill_stars = extract_skill_stars(text)
+    named_plus = extract_playstyle_plus_names(text)
+    # Ratings are an opt-in family when a request names a concrete edit such
+    # as an overall, stat, or attribute. Feature-only requests (skills,
+    # PlayStyles, age, body, identity, and shirts) must not silently become
+    # squad-wide attribute rebuilds.
+    explicit_attribute_request = bool(
+        named_overalls
+        or intent in {"prime", "overstat", "lift_band", "relative"}
+        or target is not None
+        or ovr_min is not None
+        or ovr_max is not None
+        or re.search(
+            r"\b(?:overall|ovr|attributes?|stats?|ratings?|pace|shooting|passing|"
+            r"dribbling|defending|physical|goalkeeping|acceleration|sprint\s*speed|"
+            r"finishing|shot\s*power|long\s*shots|volleys|penalties|vision|crossing|"
+            r"free\s*kick\s*accuracy|short\s*passing|long\s*passing|curve|agility|"
+            r"balance|reactions|ball\s*control|composure|interceptions|heading\s*accuracy|"
+            r"defensive\s*awareness|standing\s*tackle|sliding\s*tackle|jumping|stamina|"
+            r"strength|aggression|gk\s*(?:diving|handling|kicking|positioning|reflexes)|"
+            r"form|fitness)\b",
+            folded,
+        )
+    )
+    families = ["attrs"] if explicit_attribute_request else []
     if named_overalls or any(
         word in folded for word in ("playstyle", "play style", "trait", "icon")
     ):
@@ -720,7 +839,7 @@ def parse_recipe(prompt: str, club_name: str = "") -> SquadRecipe:
         or _YEAR_RE.search(text)
     ):
         families.append("body")
-    if any(word in folded for word in ("skill move", "skillmoves", "weak foot", "5 star", "5*")):
+    if re.search(r"\bskills?\b", folded) or any(word in folded for word in ("skill move", "skills move", "skillmoves", "weak foot", "5 star", "5*")):
         families.append("skills")
     if any(word in folded for word in ("face", "identity", "rename", "nationality", "name him")):
         families.append("identity")
@@ -743,7 +862,8 @@ def parse_recipe(prompt: str, club_name: str = "") -> SquadRecipe:
     ))
     protect = bool(
         re.search(
-            r"don'?t touch (the )?starters|protect( the)? starters|leave (the )?starters",
+            r"\b(?:(?:don['’]?t|do\s+not|never)\s+touch|protect|leave|exclude|skip|keep)\s+"
+            r"(?:the\s+)?(?:starters|starting\s+(?:xi|11)|first\s+team)\b",
             folded,
         )
     )
@@ -761,6 +881,12 @@ def parse_recipe(prompt: str, club_name: str = "") -> SquadRecipe:
     )
     if unlimited_playstyles and "playstyles" not in families:
         families.append("playstyles")
+    if skill_stars is not None and "skills" not in families:
+        families.append("skills")
+    if named_plus and "playstyles" not in families:
+        families.append("playstyles")
+    if named_plus:
+        allow_icons = True
     allow_nerf = bool(re.search(r"\b(nerf|lower|downgrade|decrease)\b", folded))
 
     relative: list[RelativeOp] = []
@@ -778,6 +904,73 @@ def parse_recipe(prompt: str, club_name: str = "") -> SquadRecipe:
             relative.append(RelativeOp(fields=fields, delta=delta, below=under))
     if relative and intent == "custom":
         intent = "relative"
+    if relative and "attrs" not in families:
+        families.append("attrs")
+
+    # Keep the legacy general-build default for broad requests such as
+    # "improve the whole squad", while treating a request that names specific
+    # editable features as scoped to those features unless ratings were named.
+    feature_request = bool(
+        any(family in families for family in ("playstyles", "skills", "age", "body", "identity"))
+        or named_jerseys
+        or wants_recommended_shirts(text)
+    )
+    if not feature_request and "attrs" not in families:
+        families.insert(0, "attrs")
+
+    excluded_families = []
+    family_words = {
+        "attrs": r"(?:ratings?|attributes?|stats?|overall|ovr)",
+        "age": r"(?:ages?|birthdates?)", "body": r"(?:body|bodies|height|weight|physique)",
+        "skills": r"(?:skills?|skill\s*moves?|weak\s*foot)",
+        "playstyles": r"(?:play\s*styles?|traits?)", "identity": r"(?:identity|face|names?|nationality)",
+        "jerseys": r"(?:jerseys?|shirts?)",
+    }
+    negative_clauses = []
+    for match in re.finditer(r"\b(?:don['’]?t|do\s+not|never)\s+(?:change|edit|touch|alter|add|improve)\s+([^.;]+)", folded):
+        negative_clauses.append(re.split(r"\s+(?:and|but|then)\s+(?=make|improve|add|set|give|arrange|raise)", match.group(1))[0])
+    for family, words in family_words.items():
+        if any(re.search(rf"\b{words}\b", clause) for clause in negative_clauses) or re.search(
+            rf"\b(?:don['’]?t|do\s+not|never|without|no)\s+(?:(?:change|edit|touch|alter|add|improve)\s+)?"
+            rf"(?:(?:the|their|player|players)\s+)*{words}\b"
+            rf"|\b(?:keep|leave|preserve)\s+(?:(?:the|their|player|players)\s+)*{words}\s+(?:unchanged|same|as\s+is)\b",
+            folded,
+        ):
+            excluded_families.append(family)
+    # Negation clauses own scope, even if a positive keyword appeared earlier.
+    families = [family for family in families if family not in excluded_families]
+    if "skills" in excluded_families:
+        skill_stars = None
+    if "attrs" in excluded_families:
+        named_overalls = ()
+        target = band_lo = band_hi = None
+        relative = []
+    if "playstyles" in excluded_families:
+        named_plus = ()
+        unlimited_playstyles = False
+    if "jerseys" in excluded_families:
+        named_jerseys = ()
+    age_match = re.search(r"\bage\s*(?:to|of|at|=)?\s*(\d{1,2})\b|\b(\d{1,2})\s*(?:years?\s*old|year[- ]olds?)\b", folded)
+    requested_age = int(next(value for value in age_match.groups() if value)) if age_match else None
+    if requested_age is not None and not 16 <= requested_age <= 40:
+        raise JobValidationError("Requested age must be between 16 and 40.")
+    if "age" in excluded_families:
+        requested_age = None
+    elif requested_age is not None and "age" not in families:
+        families.append("age")
+    excluded_positions = []
+    for scope in ("gk", "def", "mid", "fwd", "st", "cf", "lw", "rw", "cm", "cam", "cdm", "cb", "lb", "rb"):
+        aliases = {"gk": "gks?|keepers?|goalkeepers?", "def": "defenders?|defence|defense", "mid": "midfielders?|midfield|mids?", "fwd": "forwards?|strikers?|attackers?"}
+        if re.search(rf"\b(?:exclude|skip|without|except|no)\s+(?:the\s+)?(?:{aliases.get(scope, scope + 's?')})\b", folded):
+            excluded_positions.append(scope)
+    positions = [position for position in positions if position not in excluded_positions]
+    excluded_names = []
+    for match in re.finditer(r"\b(?:exclude|skip|except|don['’]?t\s+touch|do\s+not\s+touch)\s+([^.;]+)", folded):
+        clause = re.split(r"\s+(?:and|but|then)\s+(?=make|improve|add|set|give|arrange|raise)", match.group(1))[0]
+        for label in re.split(r",|\s+and\s+", clause):
+            label = label.strip()
+            if label and not re.fullmatch(r"(?:the\s+)?(?:starters|gks?|keepers?|goalkeepers?|defenders?|midfielders?|forwards?|strikers?|(?:st|cf|lw|rw|cm|cam|cdm|cb|lb|rb)s?)", label):
+                excluded_names.append(label)
 
     return SquadRecipe(
         prompt=text,
@@ -799,6 +992,12 @@ def parse_recipe(prompt: str, club_name: str = "") -> SquadRecipe:
         relative_ops=tuple(relative),
         named_overalls=named_overalls,
         named_jerseys=named_jerseys,
+        forced_skill_stars=skill_stars,
+        forced_playstyle_plus=named_plus,
+        excluded_families=tuple(excluded_families),
+        excluded_positions=tuple(excluded_positions),
+        excluded_names=tuple(excluded_names),
+        requested_age=requested_age,
     )
 
 
@@ -860,6 +1059,8 @@ def lock_python_scope(original: SquadRecipe, merged: SquadRecipe) -> SquadRecipe
     # Python owns families. Grok must not add age/body/identity from "prime".
     updates["families"] = original.families
     updates["unlimited_playstyles"] = original.unlimited_playstyles
+    for name in ("excluded_families", "excluded_positions", "excluded_names", "requested_age", "starter_ids", "formation", "planning_roles"):
+        updates[name] = getattr(original, name)
     if not updates:
         return merged
     return replace(merged, **updates)
@@ -889,18 +1090,19 @@ def filter_roster(
         ]
     if not recipe.include_gk:
         kept = [p for p in kept if not p.is_gk]
+    if recipe.excluded_positions:
+        kept = [p for p in kept if p.pos_key not in recipe.excluded_positions and position_group(p.position) not in recipe.excluded_positions]
+    if recipe.excluded_names:
+        excluded, _unmatched = resolve_named_overalls(tuple((name, 1) for name in recipe.excluded_names), roster)
+        kept = [p for p in kept if p.playerid not in excluded]
 
     protected: list[int] = []
     if recipe.protect_top11:
-        ranked = sorted(roster, key=lambda p: (-(p.ovr or 0), p.name.casefold()))
-        protected = [p.playerid for p in ranked[:11]]
+        protected = [p.playerid for p in roster if p.playerid in recipe.starter_ids]
         block = set(protected)
         kept = [p for p in kept if p.playerid not in block]
 
     truncated = False
-    if len(kept) > MAX_PLAYERS:
-        kept = sorted(kept, key=lambda p: (-(p.ovr or 0), p.name.casefold()))[:MAX_PLAYERS]
-        truncated = True
     return tuple(kept), tuple(protected), truncated
 
 
@@ -947,7 +1149,7 @@ def build_session(
 ) -> SquadSession:
     named_map, unmatched = resolve_named_overalls(recipe.named_overalls, roster)
     if named_map:
-        families = tuple(dict.fromkeys((*recipe.families, "playstyles")))
+        families = tuple(dict.fromkeys((*recipe.families, "playstyles"))) if "playstyles" not in recipe.excluded_families else recipe.families
         lowered = any(
             (player.ovr or 0) > named_map[player.playerid]
             for player in roster
@@ -969,9 +1171,8 @@ def build_session(
                 or any(player.is_gk for player in roster if player.playerid in named_map)
             ),
         )
-        kept = tuple(player for player in roster if player.playerid in named_map)
-        protected: tuple[int, ...] = ()
-        truncated = False
+        scoped, protected, truncated = filter_roster(roster, recipe)
+        kept = tuple(player for player in scoped if player.playerid in named_map)
     else:
         kept, protected, truncated = filter_roster(roster, recipe)
     rungs = assign_rungs(kept)
@@ -1024,7 +1225,9 @@ def build_session(
     if truncated:
         warnings.append(f"Capped at {MAX_PLAYERS} players (highest overall first).")
     if protected:
-        warnings.append("Protected the highest-OVR 11 as a stand-in starting XI.")
+        warnings.append("Protected the actual or user-selected starters.")
+    elif recipe.protect_top11:
+        warnings.append("Starting XI is unknown. Choose your starters before protecting them.")
     return SquadSession(
         recipe=recipe,
         targets=tuple(targets),
@@ -1131,13 +1334,13 @@ def recipe_chips(
     if not recipe.include_gk:
         chips.append("GK skipped")
     families = [name for name in recipe.families if name != "attrs"]
-    chips.append("Attrs" + ((" + " + " + ".join(families)) if families else ""))
+    chips.append(("Attrs" if "attrs" in recipe.families else "Keep ratings") + ((" + " + " + ".join(families)) if families else ""))
     if "identity" not in recipe.families:
         chips.append("No identity")
     if recipe.club_name and recipe.club_name.casefold() not in {"squad", ""}:
         chips.append(f"{recipe.club_name} identity")
     if recipe.protect_top11 or protected:
-        chips.append("Protected: top 11 OVR")
+        chips.append("Protected: chosen starters" if protected else "Choose starters to protect")
     if truncated:
         chips.append(f"Capped at {MAX_PLAYERS}")
     if recipe.relative_ops:
@@ -1151,6 +1354,12 @@ def recipe_chips(
         chips.append(
             " · ".join(f"{name} {ovr}" for name, ovr in recipe.named_overalls[:6])
         )
+    if recipe.forced_skill_stars is not None:
+        chips.append(f"All players: {recipe.forced_skill_stars}★ skill moves")
+    if recipe.forced_playstyle_plus:
+        chips.append(
+            "Required where applicable: " + ", ".join(name + "+" for name in recipe.forced_playstyle_plus[:4])
+        )
     chips.append(f"Will edit {len(targets)}")
     chips.extend(item for item in extra if item)
     return chips
@@ -1162,8 +1371,19 @@ def sanitize_patch(
     recipe: SquadRecipe,
     target: SquadTarget,
     current: Mapping[str, Any],
+    complete_playstyles: bool = True,
 ) -> dict[str, int]:
     working = {str(k).lower(): v for k, v in dict(patch).items()}
+    wants_attrs = "attrs" in recipe.families
+    if not wants_attrs:
+        # This is the final local boundary before a proposed patch is staged.
+        # Discard every ratings/attribute field even if an AI reply includes
+        # one outside its contract.
+        for field_name, spec in FIELD_SPECS.items():
+            if spec.category in ATTRIBUTE_CATEGORIES:
+                working.pop(field_name, None)
+        for alias in ("overall", "ovr", "pot"):
+            working.pop(alias, None)
     if not recipe.wants_identity:
         for name in IDENTITY_FIELDS:
             working.pop(name, None)
@@ -1178,7 +1398,7 @@ def sanitize_patch(
             working.pop(name, None)
     if not recipe.wants_age:
         working.pop("birthdate", None)
-    if "internationalrep" in working and "rep" not in recipe.prompt.casefold():
+    if wants_attrs and "internationalrep" in working and "rep" not in recipe.prompt.casefold():
         working.pop("internationalrep", None)
     for name in CONTRACT_FIELDS:
         working.pop(name, None)
@@ -1200,13 +1420,14 @@ def sanitize_patch(
                 if value > cap:
                     working[name] = cap
 
-    working.setdefault("overallrating", target.target_ovr)
-    if target.pinned:
-        working["overallrating"] = target.target_ovr
-    else:
-        working["overallrating"] = _clamp_to_band(int(working["overallrating"]), recipe)
+    if wants_attrs:
+        working.setdefault("overallrating", target.target_ovr)
+        if target.pinned:
+            working["overallrating"] = target.target_ovr
+        else:
+            working["overallrating"] = _clamp_to_band(int(working["overallrating"]), recipe)
 
-    if is_ratings_only_patch(working) and current:
+    if wants_attrs and is_ratings_only_patch(working) and current:
         working = expand_overall_patch(current, working)
 
     if not recipe.allow_nerf:
@@ -1217,16 +1438,20 @@ def sanitize_patch(
             if name in FIELD_SPECS and FIELD_SPECS[name].maximum == 99 and int(value) < live:
                 working[name] = live
 
-    pot_live = _int_or_none(current.get("potential"))
-    ovr_new = _int_or_none(working.get("overallrating")) or target.target_ovr
-    pot_new = _int_or_none(working.get("potential")) or pot_live or ovr_new
-    if target.rung == "prospect" and pot_live is not None and pot_live > (target.ovr or 0):
-        pot_new = max(pot_new, ovr_new + 2, pot_live)
-    working["potential"] = max(ovr_new, min(99, pot_new))
-    working.setdefault("overallrating", target.target_ovr)
+    if wants_attrs:
+        pot_live = _int_or_none(current.get("potential"))
+        ovr_new = _int_or_none(working.get("overallrating")) or target.target_ovr
+        pot_new = _int_or_none(working.get("potential")) or pot_live or ovr_new
+        if target.rung == "prospect" and pot_live is not None and pot_live > (target.ovr or 0):
+            pot_new = max(pot_new, ovr_new + 2, pot_live)
+        working["potential"] = max(ovr_new, min(99, pot_new))
+        working.setdefault("overallrating", target.target_ovr)
 
     if recipe.wants_age:
-        working["birthdate"] = _peak_birthdate(target, current)
+        working["birthdate"] = (
+            forced_birthdate_for_age(recipe.requested_age) if recipe.requested_age is not None
+            else _peak_birthdate(target, current)
+        )
 
     if recipe.relative_ops:
         for op in recipe.relative_ops:
@@ -1238,22 +1463,84 @@ def sanitize_patch(
                     continue
                 working[name] = max(1, min(99, live + op.delta))
 
+    # Explicit requests are constraints, even when an AI omits a player/field
+    # or suggests a weaker value. Display stars are stored zero-based.
+    if recipe.forced_skill_stars is not None:
+        working["skillmoves"] = recipe.forced_skill_stars - 1
+    from .playstyles import GOALKEEPER, OUTFIELD, TRAIT_FIELDS, encode_names
+    applicable = GOALKEEPER if target.is_gk else OUTFIELD
+    for name in recipe.forced_playstyle_plus:
+        encoded = encode_names([name], plus=True)
+        for field_name, mask in encoded.items():
+            if not mask:
+                continue
+            if name in applicable:
+                proposed = FIELD_SPECS[field_name].coerce(working.get(field_name, 0))
+                live = FIELD_SPECS[field_name].coerce(current.get(field_name, 0) or 0)
+                working[field_name] = proposed | live | mask
+            elif field_name in working:
+                # An AI may blindly give Quick Step+ to a goalkeeper. Drop the
+                # inapplicable requested bit; staging explains the exception.
+                working[field_name] = FIELD_SPECS[field_name].coerce(working[field_name]) & ~mask
+
     # Validate before a count cap can accidentally hide invalid high bits.
-    from .playstyles import TRAIT_FIELDS
     for name in TRAIT_FIELDS:
         if name in working:
             working[name] = FIELD_SPECS[name].coerce(working[name])
-    if not recipe.allow_icon_traits and not recipe.unlimited_playstyles:
+    if recipe.wants_playstyles and complete_playstyles:
+        from .playstyles import complete_additive_styles, repair_style_compatibility
+
+        compatible_current, _removed = repair_style_compatibility(current, target.position)
+        for key in TRAIT_FIELDS:
+            if current.get(key) != compatible_current.get(key) and key not in working:
+                working[key] = compatible_current[key]
+
+        working, _added_styles = complete_additive_styles(
+            working, current=current, position=target.position,
+            target_ovr=target.target_ovr, prompt=recipe.prompt,
+            unlimited=recipe.unlimited_playstyles,
+        )
+        working, _removed = repair_style_compatibility(working, target.position)
+    if not recipe.allow_icon_traits and not recipe.unlimited_playstyles and not recipe.forced_playstyle_plus:
         working = cap_playstyle_plus(
             working, max_plus=playstyle_plus_cap(target.target_ovr)
         )
 
-    cleaned = normalize_patch(working)
+    if "attrs" in recipe.excluded_families:
+        from .player import ATTRIBUTE_GROUPS
+        for name in {name for _group, fields in ATTRIBUTE_GROUPS for name, _label in fields} | {"overallrating", "potential", "modifier", "internationalrep"}:
+            working.pop(name, None)
+    cleaned = normalize_patch(working) if working else {}
+    # Defense in depth: the patch crossing into the review is limited to
+    # fields belonging to families explicitly enabled by the parsed request.
+    allowed_fields: set[str] = set()
+    if wants_attrs:
+        allowed_fields.update(
+            name for name, spec in FIELD_SPECS.items()
+            if spec.category in ATTRIBUTE_CATEGORIES
+        )
+    if recipe.wants_skills:
+        allowed_fields.update(
+            name for name, spec in FIELD_SPECS.items()
+            if spec.category == "Skills & foot"
+        )
+    if recipe.wants_playstyles:
+        allowed_fields.update(("trait1", "trait2", "icontrait1", "icontrait2"))
+    if recipe.wants_body:
+        allowed_fields.update(("height", "weight", "bodytypecode", "muscularitycode", "runstylecode"))
+    if recipe.wants_age:
+        allowed_fields.add("birthdate")
+    if recipe.wants_identity:
+        allowed_fields.update(IDENTITY_FIELDS)
+    cleaned = {name: value for name, value in cleaned.items() if name in allowed_fields}
     if len(cleaned) > MAX_OVERRIDE_FIELDS:
         # Keep ratings + the largest attribute deltas so overall rebuilds still apply.
         preferred = ["overallrating", "potential", "modifier"]
+        if recipe.forced_skill_stars is not None:
+            preferred.append("skillmoves")
         if recipe.wants_playstyles:
             preferred.extend(["trait1", "trait2", "icontrait1", "icontrait2"])
+        preferred = [key for key in preferred if key in cleaned]
         rest = [k for k in cleaned if k not in preferred]
         rest.sort(key=lambda k: abs(int(cleaned[k]) - (_int_or_none(current.get(k)) or int(cleaned[k]))), reverse=True)
         keep = preferred + rest
@@ -1304,7 +1591,11 @@ def cohesion_clamp(
     """Stop a prospect jumping the Face of the squad on a prime/lift ask."""
     out = {int(pid): dict(patch) for pid, patch in overrides.items()}
     warnings: list[str] = []
-    if session.recipe.intent == "overstat":
+    if (
+        session.recipe.intent == "overstat"
+        or "attrs" not in session.recipe.families
+        or "attrs" in session.recipe.excluded_families
+    ):
         return out, tuple(warnings)
     face_targets = [item for item in session.targets if item.rung == "face"]
     face_ovr = 0
@@ -1349,6 +1640,8 @@ def stage_per_player_plan(
     overrides: dict[int, dict[str, int]] = {}
     warnings: list[str] = list(session.warnings)
     blocking_issues: list[str] = []
+    if session.recipe.protect_top11 and not session.recipe.starter_ids:
+        blocking_issues.append("Starting XI is unknown. Choose your starters before protecting them.")
     roster = roster_from_members(plan.members)
     current_shirts: dict[int, int | None] = dict(getattr(plan, "shirt_book", {}) or {})
     for member in plan.members:
@@ -1393,16 +1686,45 @@ def stage_per_player_plan(
                 f"#{number}" for number in list(jersey_changes.values())[:4]
             ),
             jersey_numbers=jersey_changes,
+            blocking_issues=blocking_issues,
         )
     for member in plan.members:
         target = session.target_for(member.playerid)
         if target is None:
             continue
+        from .playstyles import GOALKEEPER, OUTFIELD, plus_names, validate_ai_styles
+
+        applicable_styles = GOALKEEPER if target.is_gk else OUTFIELD
+        required_names = tuple(name for name in session.recipe.forced_playstyle_plus if name in applicable_styles)
+        excluded_names = tuple(name for name in session.recipe.forced_playstyle_plus if name not in applicable_styles)
+        if excluded_names:
+            warnings.append(
+                f"{member.name}: " + ", ".join(name + "+" for name in excluded_names)
+                + (" excluded for goalkeeper; only goalkeeper PlayStyle+ apply." if target.is_gk
+                   else " excluded for outfield player; only outfield PlayStyle+ apply.")
+            )
+        # A request for only Quick Step+ cannot apply to a keeper. A general
+        # improvement request still requires a real goalkeeper Plus build.
+        general_plus_request = not session.recipe.forced_playstyle_plus or bool(re.search(
+            r"\b(?:add(?:ing)?|improv\w*|boost\w*|enhanc\w*)\b.*?\bplay\s*styles?",
+            session.recipe.prompt, re.I | re.S,
+        ))
+        requires_plus = session.recipe.wants_playstyle_plus and bool(required_names or general_plus_request)
         raw = dict(grok_patches.get(member.playerid) or {})
         # Shirt proposals are already validated/resolved as squad-link writes.
         # They are not player attributes and must not reject the whole patch.
         raw.pop("jerseynumber", None)
-        if not raw:
+        proposal_error = ""
+        if requires_plus and general_plus_request:
+            # Validate the AI's actual proposal before enriching a sparse,
+            # valid build. Mandatory local values do not excuse a missing or
+            # rejected general improvement proposal for one selected player.
+            try:
+                validate_ai_styles(raw, require_plus=True, position=target.position)
+            except ValueError as exc:
+                proposal_error = str(exc)
+                blocking_issues.append(f"{member.name}: {exc} Rebuild this plan.")
+        if not raw and "attrs" in session.recipe.families:
             raw = {"overallrating": target.target_ovr, "potential": max(target.target_ovr, target.pot or target.target_ovr)}
         try:
             cleaned = sanitize_patch(
@@ -1410,22 +1732,40 @@ def stage_per_player_plan(
                 recipe=session.recipe,
                 target=target,
                 current=member.base,
+                complete_playstyles=not bool(proposal_error),
             )
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"{member.name}: {exc}")
-            if session.recipe.wants_playstyle_plus:
-                blocking_issues.append(f"{member.name}: rebuild the rejected PlayStyle+ proposal ({exc}).")
+            if requires_plus or session.recipe.forced_skill_stars is not None:
+                blocking_issues.append(
+                    f"{member.name}: rebuild the rejected required player changes ({exc})."
+                )
             continue
         overrides[member.playerid] = cleaned
-        if session.recipe.wants_playstyle_plus:
-            from .playstyles import plus_names
-            if not plus_names(cleaned):
-                blocking_issues.append(f"{member.name}: no PlayStyle+ proposed. Rebuild this plan.")
+        if session.recipe.wants_playstyles and not proposal_error:
+            from .playstyles import repair_style_compatibility
+            compatible, removed = repair_style_compatibility(member.base, target.position)
+            if removed and all(cleaned.get(key) == compatible.get(key)
+                               for key in ("icontrait1", "icontrait2")
+                               if member.base.get(key) != compatible.get(key)):
+                warnings.append(f"{member.name}: removed incompatible existing styles: " + ", ".join(removed) + ".")
+        if requires_plus and not proposal_error:
+            try:
+                validate_ai_styles(cleaned, require_plus=True, position=target.position)
+                if target.is_gk and int(cleaned.get("icontrait1") or 0):
+                    raise ValueError("Goalkeeper PlayStyle+ cannot include outfield bits.")
+                missing = set(required_names) - set(plus_names(cleaned))
+                if missing:
+                    raise ValueError("Missing required " + ", ".join(sorted(missing)) + "+.")
+            except ValueError as exc:
+                blocking_issues.append(
+                    f"{member.name}: {exc} Rebuild this plan."
+                )
         if session.recipe.wants_playstyles and not any(
             key in cleaned for key in ("trait1", "trait2", "icontrait1", "icontrait2")
         ):
             warnings.append(
-                f"{member.name}: attributes updated; Codex did not return playstyles."
+                f"{member.name}: no applicable PlayStyles were staged."
             )
     overrides, cohesion_notes = cohesion_clamp(
         overrides, session, current_by_id=current_by_id
@@ -1490,8 +1830,29 @@ def club_identity_note(club_name: str) -> str:
     )
 
 
-def needs_live_base(member: SquadMember) -> bool:
-    return len(member.base) < LIVE_VALUE_FLOOR
+def needs_live_base(member: SquadMember, recipe: SquadRecipe | None = None) -> bool:
+    """Check the values this edit needs, rather than counting roster metadata."""
+    if recipe is not None and jersey_only(recipe):
+        return False
+    required = {"overallrating", "potential"}
+    if recipe is not None and relative_only(recipe):
+        required.update(name for op in recipe.relative_ops for name in op.fields)
+    elif position_group(member.position) == "gk":
+        required.update({"gkdiving", "gkhandling", "gkkicking", "gkpositioning", "gkreflexes"})
+    else:
+        from .builds import outfield_attribute_names
+
+        required.update(outfield_attribute_names())
+    if recipe is not None:
+        if recipe.wants_playstyles:
+            required.update({"trait1", "trait2", "icontrait1", "icontrait2"})
+        if recipe.wants_skills:
+            required.add("skillmoves")
+        if recipe.wants_age:
+            required.add("birthdate")
+        if recipe.wants_body:
+            required.update({"height", "weight"})
+    return any(member.base.get(name) in (None, "") for name in required)
 
 
 def relative_only(recipe: SquadRecipe) -> bool:
@@ -1501,7 +1862,7 @@ def relative_only(recipe: SquadRecipe) -> bool:
 def jersey_only(recipe: SquadRecipe) -> bool:
     """A shirt-number ask should not invent overalls for the rest of the squad."""
     return (
-        bool(recipe.named_jerseys)
+        (bool(recipe.named_jerseys) or wants_recommended_shirts(recipe.prompt))
         and not recipe.wants_playstyles
         and not recipe.wants_age
         and not recipe.wants_body
@@ -1511,6 +1872,10 @@ def jersey_only(recipe: SquadRecipe) -> bool:
         and not recipe.named_overalls
         and recipe.effective_band is None
         and not recipe.relative_ops
+        and ("attrs" in recipe.excluded_families or not re.search(
+            r"\b(overall|ovr|attributes?|ratings?|pace|speed|shooting|passing|dribbling|defending|physical|stats?)\b",
+            recipe.prompt, re.IGNORECASE,
+        ))
     )
 
 
@@ -1525,19 +1890,78 @@ def wants_recommended_shirts(prompt: str) -> bool:
 def recommended_shirt_requests(
     roster: Sequence[RosterPlayer],
     locked: set[int],
+    *,
+    current: Mapping[int, int | None] | None = None,
+    reserved: Mapping[int, int] | None = None,
+    notes: list[str] | None = None,
 ) -> list[tuple[int, int]]:
-    """Famous squad shirts for selected players who were not given an explicit number."""
-    requests: list[tuple[int, int]] = []
-    for needles, number in _FAMOUS_SHIRTS:
-        hits = [
-            player for player in roster
-            if player.playerid not in locked
-            and all(_needle_hits(needle, _fold_name(player.name).split()) for needle in needles)
-        ]
-        if len(hits) != 1:
+    """Unique familiar or positional shirts for every selected, unpinned player.
+
+    Reserve signature shirts before assigning alternatives, so a substitute
+    number cannot accidentally steal another player's signature. The allocation
+    is stable across roster sorting and ignores arbitrary AI shirt suggestions.
+    """
+    current = current or {}
+    used = dict(reserved or {})  # shirt -> player; typed requests take priority
+    by_id = {player.playerid: player for player in roster}
+    for pid in locked:
+        number = _int_or_none(current.get(pid))
+        if number is not None and 1 <= number <= 99 and pid not in used.values():
+            used.setdefault(number, pid)
+
+    candidates: list[tuple[int, RosterPlayer, tuple[int, ...]]] = []
+    for player in by_id.values():
+        if player.playerid in locked:
             continue
-        requests.append((hits[0].playerid, number))
-        locked.add(hits[0].playerid)
+        tokens = _fold_name(player.name).split()
+        matches = [
+            (index, needles, shirts)
+            for index, (needles, shirts) in enumerate(_FAMOUS_SHIRTS)
+            if all(_needle_hits(needle, tokens) for needle in needles)
+        ]
+        if matches:
+            index, _needles, shirts = min(matches, key=lambda item: (-len(item[1]), item[0]))
+        else:
+            index, shirts = len(_FAMOUS_SHIRTS), ()
+        candidates.append((index, player, shirts))
+    candidates.sort(key=lambda item: (item[0], _fold_name(item[1].name), item[1].playerid))
+
+    assigned: dict[int, int] = {}
+    for _index, player, shirts in candidates:
+        if shirts and shirts[0] not in used:
+            assigned[player.playerid] = shirts[0]
+            used[shirts[0]] = player.playerid
+
+    for _index, player, shirts in candidates:
+        if player.playerid in assigned:
+            continue
+        group = position_group(player.position)
+        positional = _POSITION_SHIRTS.get(player.pos_key, _POSITION_SHIRTS.get(group, ()))
+        existing = _int_or_none(current.get(player.playerid, player.jersey))
+        suitable = (*positional, *_POSITION_SHIRTS.get(group, ()))
+        keep = (existing,) if not shirts and existing in suitable else ()
+        low_shirts = range(1 if group == "gk" else 2, 31)
+        choices = (*shirts[1:], *keep, *positional, *low_shirts, *range(31, 100))
+        number = next((number for number in choices if number not in used), None)
+        if number is None:
+            if notes is not None:
+                notes.append(f"No free recommended shirt for {player.name}.")
+            continue
+        assigned[player.playerid] = number
+        used[number] = player.playerid
+        if shirts and notes is not None:
+            occupant = by_id.get(used[shirts[0]])
+            holder_name = occupant.name if occupant else str(used[shirts[0]])
+            explanation = "a familiar alternative" if number in shirts[1:] else "a positional alternative"
+            notes.append(
+                f"#{shirts[0]} is reserved for {holder_name}; {player.name} gets #{number}, {explanation}."
+            )
+    requests = [
+        (player.playerid, assigned[player.playerid])
+        for _index, player, _shirts in candidates
+        if player.playerid in assigned
+    ]
+    locked.update(pid for pid, _number in requests)
     return requests
 
 
@@ -1549,19 +1973,28 @@ def plan_jersey_changes(
     names: Mapping[int, str] | None = None,
     extra_requests: Sequence[tuple[int, int]] = (),
 ) -> tuple[dict[int, int], tuple[str, ...]]:
-    """Resolve typed shirt requests, then any extra requests that do not override them."""
+    """Typed shirts win; recommendation mode allocates the rest deterministically."""
     chosen, unmatched = resolve_named_overalls(recipe.named_jerseys, roster)
     warnings = [f"Couldn't match shirt for {label}." for label in unmatched]
     labels = {player.playerid: player.name for player in roster}
     labels.update(dict(names or {}))
     requests = list(chosen.items())
+    if "jerseys" in recipe.excluded_families:
+        return {}, tuple(warnings)
     locked = {pid for pid, _number in requests}
-    for pid, number in extra_requests:
-        if pid not in locked and 1 <= int(number) <= 99:
-            requests.append((int(pid), int(number)))
-            locked.add(int(pid))
     if wants_recommended_shirts(recipe.prompt):
-        requests.extend(recommended_shirt_requests(roster, locked))
+        reserved: dict[int, int] = {}
+        for pid, number in requests:
+            reserved.setdefault(number, pid)
+        requests.extend(recommended_shirt_requests(
+            roster, locked, current=current, reserved=reserved, notes=warnings,
+        ))
+    else:
+        selected = {player.playerid for player in roster}
+        for pid, number in extra_requests:
+            if int(pid) in selected and int(pid) not in locked and 1 <= int(number) <= 99:
+                requests.append((int(pid), int(number)))
+                locked.add(int(pid))
     changes, moved = assign_jersey_numbers(current, requests, names=labels)
     return changes, tuple(warnings) + moved
 
@@ -1581,6 +2014,8 @@ def propose_payload(
                 "name": member.name,
                 "position": member.position,
                 "rung": target.rung,
+                "formation": session.recipe.formation,
+                "planning_role": dict(session.recipe.planning_roles).get(member.playerid),
                 "target_ovr": target.target_ovr,
                 "pinned": target.pinned,
                 "playstyle_plus_max": (

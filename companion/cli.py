@@ -181,7 +181,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"install failed: {e}", file=sys.stderr)
         return 71
     _print(report if isinstance(report, dict) else {"result": str(report)})
-    return 0
+    return 0 if isinstance(report, dict) and report.get("ok") is True else 71
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -200,6 +200,38 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     }
     _print(report)
     return 0 if report["healthy"] else 1
+
+
+def cmd_assets(args: argparse.Namespace) -> int:
+    from .app.commands import legacy_assets
+    from .app.commands.apply import _persist_result
+    from .domain.legacy_assets import DATABASE_ASSET, portrait_paths
+
+    svc = build_services(args.root, inline=True)
+    if args.asset_action == "reports":
+        _print({"reports": legacy_assets.recent_reports(svc)})
+        return 0
+    export = args.asset_action in {"export", "database", "portrait"}
+    reason = legacy_assets.availability(svc, export=export)
+    if reason:
+        _print({"ok": False, "error": reason})
+        return 69
+    try:
+        paths = ([DATABASE_ASSET] if args.asset_action == "database" else
+                 portrait_paths(args.playerid) if args.asset_action == "portrait" else args.paths)
+        job = legacy_assets.prepare_job(svc, paths, export=export,
+                                       required=args.asset_action != "portrait", origin="cli.assets")
+        job_id, result = _submit_and_maybe_wait(svc, job, timeout=args.timeout, no_wait=args.no_wait)
+        if result is None or not result.outcome.is_terminal:
+            _print({"job_id": job_id, "state": "queued", "note": "Waiting for a safe Career event."})
+            return 0
+        _persist_result(svc, result)
+        report = legacy_assets.process_result(svc, job, result)
+        _print(report)
+        return 0 if report["ok"] else 2
+    except (OSError, ValueError) as exc:
+        _print({"ok": False, "error": str(exc)})
+        return 64
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
@@ -399,6 +431,18 @@ def build_parser() -> argparse.ArgumentParser:
     add("version", cmd_version, "print versions")
     add("status", cmd_status, "bridge liveness (ARMED/LIVE/WAITING/STALLED/OFF)")
     add("doctor", cmd_doctor, "full health report")
+    assets = sub.add_parser("assets", help="check/export game assets and preview player portraits")
+    asset_sub = assets.add_subparsers(dest="asset_action", required=True)
+    for name in ("check", "export", "database", "portrait", "reports"):
+        sp = asset_sub.add_parser(name)
+        sp.set_defaults(func=cmd_assets)
+        if name in {"check", "export"}:
+            sp.add_argument("paths", nargs="+")
+        elif name == "portrait":
+            sp.add_argument("playerid", type=int)
+        if name != "reports":
+            sp.add_argument("--timeout", type=float, default=45.0)
+            sp.add_argument("--no-wait", action="store_true")
     add("queue", cmd_queue, "list pending and claimed jobs")
     add("sweep", cmd_sweep, "report jobs a dead session abandoned")
     add("force-drain", cmd_force_drain, "print the Lua Engine escape-hatch snippet")

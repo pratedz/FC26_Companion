@@ -144,6 +144,20 @@ def test_probe_gives_up_instead_of_guessing(
     assert resolved.source is reg.Source.UNSET
 
 
+def test_frozen_probe_uses_the_relocated_executable(tmp_path, monkeypatch):
+    monkeypatch.delenv(reg.ENV_INSTALL_DIR, raising=False)
+    monkeypatch.setattr(reg, "read_value", lambda *args, **kwargs: None)
+    install = tmp_path / "New LE"
+    app = install / "FC26_Companion"
+    app.mkdir(parents=True)
+    (install / "FCLiveEditor.DLL").write_bytes(b"MZ")
+    monkeypatch.setattr(reg.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(reg.sys, "executable", str(app / "FC26_Companion.exe"))
+    resolved = reg.resolve_install_root()
+    assert resolved.path == install
+    assert resolved.source is reg.Source.PROBE
+
+
 def test_read_value_is_none_for_unknown_name() -> None:
     assert reg.read_value("Definitely Not A Value Name") is None
 

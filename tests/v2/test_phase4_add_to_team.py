@@ -517,6 +517,8 @@ def test_batch_builder_reserves_distinct_singleton_dummies(monkeypatch: pytest.M
     assert op["v"] == 4
     batch = op["batch"]
     assert len(batch) == 2
+    assert [member["player"]["source_playerid"] for member in batch] == [1, 2]
+    assert all("source_playerid" not in member["player"]["fields"] for member in batch)
     pools = [tuple(member["dummy_pool"]) for member in batch]
     assert [pool[0] for pool in pools] == [91234, 85308]
     assert set(pools[0]).isdisjoint(set(pools[1]))

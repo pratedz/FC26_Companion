@@ -10,6 +10,9 @@ from ...domain.outcome import ApplyOutcome, JobResult
 from .. import events as E
 from ..services import Services
 from .apply import submit_job
+from ... import core_at_least
+
+INJURY_CORE_MIN = "2.6.31"
 
 
 class InjuryError(RuntimeError):
@@ -119,6 +122,8 @@ def _require_armed(svc: Services) -> None:
         raise InjuryError(
             state.bridge.liveness.message or "Live Editor is not armed."
         )
+    if not core_at_least(liveness.core_version, INJURY_CORE_MIN):
+        raise InjuryError("The running game still has the older injury worker. Save your Career, then restart FC 26 with Live Editor to load the update.")
 
 
 def scan_injuries(
@@ -132,6 +137,8 @@ def scan_injuries(
         label="Scan squad injuries",
         origin="ui.injury.scan",
         require_cm=True,
+        requires={"core_version": INJURY_CORE_MIN},
+        budget_ms=5000,
     )
     return submit_job(svc, job, on_result=on_result)
 
@@ -149,5 +156,7 @@ def cure_injuries(
         label="Cure injured players" if not ids else f"Cure {len(ids)} injured",
         origin="ui.injury.cure",
         require_cm=True,
+        requires={"core_version": INJURY_CORE_MIN},
+        budget_ms=5000,
     )
     return submit_job(svc, job, on_result=on_result)

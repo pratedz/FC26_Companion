@@ -1,4 +1,4 @@
--- FC26 injury records, matched to Live Editor v26.3.5's native implementation.
+-- FC26 injury records, matched to LE v26.3.5 and v26.3.6 native implementations.
 -- Evidence and version fingerprint: docs/INJURY_LAYOUT.md.
 -- Never search memory or follow arbitrary pointer candidates.
 local M = {}
@@ -73,7 +73,8 @@ local function same(a, b)
 end
 
 function M.supported()
-    return tostring(rawget(_G, "LE_VERSION")) == "v26.3.5"
+    local version = tostring(rawget(_G, "LE_VERSION"))
+    return (version == "v26.3.5" or version == "v26.3.6")
         and type(rawget(_G, "LE_GAME_MODULE_BASE")) == "number"
         and type(rawget(_G, "GetManagerObjByTypeId")) == "function"
         and can_read()
@@ -179,7 +180,7 @@ function M.scan(pids)
         end
         -- The native editor defaults an absent record to fit / no injury.
         return { players = players, covered = #pids, squad_records = matched,
-            records = snap.fit.count, scan_api = "FC26 fitness records (LE 26.3.5)" }
+            records = snap.fit.count, scan_api = "FC26 fitness records (LE " .. tostring(LE_VERSION) .. ")" }
     end)
     if not ok then return nil, tostring(result) end
     return result

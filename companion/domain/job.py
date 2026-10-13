@@ -64,6 +64,7 @@ PLAYERID_HARD_MAX = 499999
 KNOWN_OPS: frozenset[str] = frozenset(
     {
         "diag.ping",
+        "assets.legacy",
         "db.dump",
         "set_fields",
         "create_player",
@@ -230,6 +231,18 @@ class Job:
                 )
         # SI-5 enforced structurally, not by convention.
         for op in self.ops:
+            if op.op == "assets.legacy":
+                from .legacy_assets import asset_paths
+
+                if op.body.get("action") not in {"check", "export"}:
+                    raise JobValidationError("assets.legacy action must be check or export")
+                paths = op.body.get("paths")
+                if not isinstance(paths, (list, tuple)):
+                    raise JobValidationError("assets.legacy paths must be an array")
+                try:
+                    asset_paths(paths, export=op.body["action"] == "export")
+                except ValueError as exc:
+                    raise JobValidationError(str(exc)) from exc
             if op.op == "create_player":
                 pid = op.body.get("playerid")
                 if pid is not None and int(pid) > PLAYERID_HARD_MAX:
@@ -298,6 +311,17 @@ def op_ping(op_id: str = "ping", note: str = "") -> Op:
     return Op("diag.ping", op_id, {"note": note} if note else {})
 
 
+def op_legacy_assets(paths: Sequence[str], *, export: bool = False,
+                     required: bool = False) -> Op:
+    from .legacy_assets import asset_paths
+
+    return Op("assets.legacy", "assets", {
+        "action": "export" if export else "check",
+        "paths": list(asset_paths(paths, export=export)),
+        "required": required,
+    })
+
+
 def op_db_dump(
     op_id: str,
     table: str,
@@ -355,8 +379,8 @@ def op_set_fields(
         body["upsert"] = True
     if teamid is not None:
         body["teamid"] = int(teamid)
-    if displace:
-        body["displace"] = True
+    if displace or table == "teamplayerlinks":
+        body["displace"] = bool(displace)
     return Op("set_fields", op_id, body)
 
 

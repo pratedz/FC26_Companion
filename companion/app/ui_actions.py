@@ -7,7 +7,7 @@ surface request navigation without importing or reaching into the window.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 
 @dataclass(slots=True)
@@ -20,6 +20,32 @@ class UiActions:
     _open_player_card: Callable[[dict[str, Any]], None] | None = None
     _pending_player_card: dict[str, Any] | None = None
     _open_settings: Callable[[], None] | None = None
+    _open_club: Callable[[dict[str, Any]], None] | None = None
+    _pending_club_selection: dict[str, Any] | None = None
+    _signing_receipt_cache: tuple[Any, ...] | None = None
+
+    def bind_club(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        self._open_club = callback
+
+    def open_club(self, playerids: Sequence[int] = (), save_uid: str = "",
+                  teamid: int | None = None, *, recently_added: bool = False) -> bool:
+        """Return to a scoped set of actual Career players after verification."""
+        ids = tuple(dict.fromkeys(int(pid) for pid in playerids))
+        payload = {"playerids": ids, "save_uid": str(save_uid or ""),
+                   "teamid": teamid, "recently_added": recently_added}
+        self._pending_club_selection = payload
+        if self._open_club is not None:
+            self._open_club(dict(payload))
+            return True
+        if self.navigate("club"):
+            return True
+        self._pending_club_selection = None
+        return False
+
+    def take_club_selection(self) -> dict[str, Any] | None:
+        payload = self._pending_club_selection
+        self._pending_club_selection = None
+        return dict(payload) if payload is not None else None
 
     def bind_navigation(self, callback: Callable[[str], None]) -> None:
         self._navigate = callback

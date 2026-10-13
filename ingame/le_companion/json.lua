@@ -237,7 +237,8 @@ local function encode_object(t, opts, stack, depth, nl, pad, pad_in)
     table.sort(ks, function(a, b) return tostring(a) < tostring(b) end)
     local parts = {}
     local sep = opts.indent and ": " or ":"
-    for _, k in ipairs(ks) do
+    for i = 1, #ks do
+        local k = ks[i]
         local v = t[k]
         if v ~= nil then
             parts[#parts + 1] = encode_string(tostring(k), opts.ascii) .. sep

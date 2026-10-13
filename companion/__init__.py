@@ -16,12 +16,12 @@ Layering (strict downward dependency):
 
 from __future__ import annotations
 
-__version__ = "2.10.40"
+__version__ = "2.10.51"
 PROTOCOL_V = 3
 # Must match ingame/le_companion/version.lua. A Companion build older than the
 # installed worker refuses the live session, so the app looks disconnected
 # even after a script copy or an FC restart.
-CORE_VERSION = "2.6.26"  # the resident Lua core semver this build ships/expects
+CORE_VERSION = "2.6.31"  # the resident Lua core semver this build ships/expects
 # add_to_team v4 is unchanged from this core. Injury-only bumps of CORE_VERSION
 # must not refuse Checkout while that worker is still the one Live Editor loaded.
 SIGN_CORE_MIN = "2.6.25"

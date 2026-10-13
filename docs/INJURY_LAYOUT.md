@@ -44,6 +44,11 @@ A future game/Live Editor update requires a newly verified profile. The DLL
 hash above records the inspected artifact; the Lua guard uses the version and
 manager vtable fingerprint rather than computing the DLL hash in-game.
 
+LE v26.3.6 was independently inspected on 2 October 2026 and is supported by
+core 2.6.31. Its getters and status comparison use the same record layout, and
+its healing resets are byte-identical. See SIGNED_PORTRAITS_INJURIES_2_10_50.md
+and tools/verify_injury_26_3_6.py for the new DLL hash and routine locations.
+
 ## Live validation
 
 The read-only probe found 396 records and 42 current squad players. Fourteen

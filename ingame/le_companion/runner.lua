@@ -10,6 +10,7 @@ local json = require("json")
 local version = require("version")
 local status = require("status")
 local ops = require("ops")
+local events = require("events")
 
 local runner = {}
 runner._cfg = nil
@@ -18,6 +19,9 @@ runner.last_pump_at = 0
 runner._busy = false
 runner._fast_read_timer = nil
 runner._career_seen = false
+runner._simulating = false
+runner._timer_gave_up = false
+runner._cache_dirty = true
 
 local FAST_READ_WAKE = "_fast_read"
 local FAST_READ_MS = 200
@@ -69,6 +73,7 @@ local function is_bootstrap_read(job_id)
         local op = job.ops[i]
         local name = type(op) == "table" and op.op or ""
         local safe = name == "diag.ping" or name == "db.dump"
+            or (name == "assets.legacy" and op.action == "check")
             or name == "export_squad" or name == "snapshot"
             or (name == "budget" and (op.action or "get") == "get")
         if not safe then return false end
@@ -368,7 +373,13 @@ local function execute_job(job, context)
     local any_written = false
     local any_effect = false
 
-    local snap_ok, snap = ops.capture_envelope_snapshot(job, ctx)
+    local snap_ok, snap
+    if runner._simulating or not runner._hub_ready then
+        snap_ok = false
+        snap = { reason = "career_hub_required", detail = "Open Team Management before running Companion actions" }
+    else
+        snap_ok, snap = ops.capture_envelope_snapshot(job, ctx)
+    end
     if not snap_ok then
         return {
             schema = version.RESULT_SCHEMA,
@@ -401,6 +412,15 @@ local function execute_job(job, context)
     end
 
     for i = 1, #job.ops do
+        if runner._simulating or not runner._hub_ready then
+            all_ok = false
+            failures[#failures + 1] = {
+                reason = "career_event_interrupted",
+                detail = "Career state changed; remaining operations were skipped; review before retrying",
+                phase = "execute",
+            }
+            break
+        end
         if util.expired(hard) then
             all_ok = false
             failures[#failures + 1] = {
@@ -415,7 +435,8 @@ local function execute_job(job, context)
         -- Chunked Phase 4 steps use the remaining per-job budget, but the
         -- transfer step always requests a real career event before verify.
         while op.op == "add_to_team" and res.deferred
-            and not res.awaiting_event and not util.expired(hard) do
+            and not res.awaiting_event and not util.expired(hard)
+            and not runner._simulating and runner._hub_ready do
             ctx.resume_state = res.progress or ((res.data or {}).progress)
             res = ops.dispatch(op, job, ctx)
         end
@@ -749,6 +770,12 @@ local function pump_inner(reason, deadline, read_only_only)
     end
 
     for i = 1, #queue do
+        -- A native operation can emit a nested career event. Stop the batch
+        -- if that event revoked hub readiness; never start the next job there.
+        if runner._simulating or not runner._hub_ready then
+            deferred = deferred + (#queue - i + 1)
+            break
+        end
         if util.expired(hard) or seen >= max_jobs then
             deferred = #queue - seen
             break
@@ -796,6 +823,10 @@ local function pump_inner(reason, deadline, read_only_only)
 end
 
 function runner.pump(reason, deadline, read_only_only)
+    -- Calendar simulate and match entry run on this same thread. A squad sync
+    -- here blocks the game for the whole job (often 2-5s) on every day.
+    if runner._simulating then return "sim_paused" end
+    if not runner._hub_ready then return "hub_required" end
     if runner._busy then return "busy" end
     if not cfg().queue_dir or cfg().queue_dir == "" then return "no_queue" end
     runner._busy = true
@@ -825,6 +856,11 @@ function runner.force_drain()
 end
 
 function runner.on_init_done()
+    runner._hub_ready = false
+    runner._career_seen = false
+    runner._simulating = true
+    runner._cache_dirty = true
+    _G.LEC_CAREER_SEEN = false
     -- File markers only. Do not start the read timer or touch the database:
     -- LEInitDone fires on the main menu, before Career Mode.
     status.write_session({
@@ -834,50 +870,71 @@ function runner.on_init_done()
     runner.crash_sweep()
 end
 
-function runner.on_career(event_id, phase)
-    local events = require("events")
-    local post = (phase == "post" or phase == nil)
-    if post and events.is_hub(event_id) and probe_in_cm() then
-        runner._hub_ready = true
+local function publish_session(ready)
+    -- session.json is polled by the Companion app. Rewriting it on every
+    -- CareerModeEvent makes Windows serialise those two writers on the game
+    -- thread, which is enough to freeze a calendar simulate by itself.
+    local phase = ready and "career_hub" or "menu"
+    local now = util.now()
+    if runner._session_phase == phase and type(runner._session_at) == "number"
+        and (now - runner._session_at) < 5 then
+        return
     end
-    if not probe_in_cm() then
-        runner._hub_ready = false
-    end
-    local ready = career_save_ready()
-    runner._career_seen = ready
-    _G.LEC_CAREER_SEEN = ready
+    runner._session_phase = phase
+    runner._session_at = now
     pcall(function()
         status.write_session({
-            phase = ready and "career_hub" or "menu",
+            phase = phase,
             capabilities = { in_career = ready, save_ready = ready, hub_ready = ready },
         })
     end)
-    if not ready then return end
-    local kind = events.classify(event_id)
-    if kind == "blackout" then
-        -- Do not pump during this callback. Do not leave a sticky flag:
-        -- CE Lua is single-threaded, so a timer cannot interrupt us here.
-        emit("blackout " .. events.name(event_id) .. " (" .. tostring(phase) .. ")")
-        return
+end
+
+function runner.on_career(event_id, phase)
+    local post = (phase == "post" or phase == nil)
+    -- An allow-list is safer than guessing which simulation events are busy.
+    -- HOURS_PASSED and first-career setup happen before DAY_PASSED; native
+    -- TransferPlayer also emits nested events. No host calls, disk IO, cache
+    -- traversal or error logging are allowed in those callbacks.
+    if not post or not events.is_hub(event_id) then
+        runner._hub_ready = false
+        runner._career_seen = false
+        runner._simulating = true
+        runner._cache_dirty = true
+        _G.LEC_CAREER_SEEN = false
+        return "paused"
     end
-    local cache = events.cache_action(event_id)
-    if cache == "hard_reset" or cache == "invalidate_players" or cache == "invalidate_squads" then
-        pcall(function() require("db").reset() end)
-    end
-    -- Never touch the Career DB from a pre-event.  A settled front-end event
-    -- may run a normal job, while *any other non-blackout post-event* can only
-    -- release an explicitly allow-listed read.  The latter is important: a
-    -- player snapshot must not remain stranded just because the user is on a
-    -- Career hub which does not emit one of the three screen-navigation IDs.
-    if phase == "post" or phase == nil then
-        pcall(function() runner.start_fast_read_timer() end)
-        local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
-        if kind == "pump" or kind == "hard_reset" or kind == "invalidate_squads" then
-            runner.pump("event:" .. events.name(event_id), deadline)
-        elseif has_bootstrap_read() then
-            runner.pump("safe_read:" .. events.name(event_id), deadline, true)
+
+    -- Ignore a hub callback raised inside a job's native call as well.
+    if runner._busy or runner._handling_hub then return "busy" end
+    runner._handling_hub = true
+    local ok, result = util.capture(function()
+        local ready = probe_in_cm()
+        runner._hub_ready = ready
+        runner._career_seen = ready
+        runner._simulating = not ready
+        _G.LEC_CAREER_SEEN = ready
+        if ready and runner._cache_dirty then
+            require("db").reset()
+            runner._cache_dirty = false
         end
+        publish_session(ready)
+        if not ready then return "career_required" end
+        runner.start_fast_read_timer()
+        local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
+        return runner.pump("event:" .. events.name(event_id), deadline)
+    end)
+    runner._handling_hub = false
+    if not ok then
+        runner._hub_ready = false
+        runner._career_seen = false
+        runner._simulating = true
+        runner._cache_dirty = true
+        _G.LEC_CAREER_SEEN = false
+        emit("hub callback failed: " .. tostring(result.message or result))
+        return "failed"
     end
+    return result
 end
 
 function runner.tick_fast_read()
@@ -885,6 +942,7 @@ function runner.tick_fast_read()
     -- (or T3DB get) on a timer, not after a hub click. Companion already uses
     -- the same T3DB path in snapshot; this tick only removes the wait.
     -- pump(..., true) is read_only_only — writes never run here.
+    if runner._simulating then return "sim_paused" end
     if not in_career_mode() then return "idle" end
     if runner._busy then return "busy" end
     local wake = util.exists(qjoin(FAST_READ_WAKE))
@@ -922,6 +980,9 @@ local function advertise_timer(live)
 end
 
 function runner.start_fast_read_timer()
+    -- This Live Editor build has no createTimer/setTimer. Retrying on every
+    -- career event logged "timer unavailable" and rewrote session.json forever.
+    if runner._timer_gave_up then return false end
     if timer_is_live(runner._fast_read_timer) then return true end
     if runner._fast_read_timer then
         pcall(function() runner._fast_read_timer.Enabled = false end)
@@ -981,7 +1042,8 @@ function runner.start_fast_read_timer()
             return true
         end
     end
-    emit("fast_read timer unavailable — snapshot waits for Career events")
+    runner._timer_gave_up = true
+    emit("fast_read timer unavailable — snapshots wait for the career hub")
     advertise_timer(false)
     return false
 end

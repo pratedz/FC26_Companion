@@ -174,6 +174,6 @@ def test_automations_surface_wires_live_team_and_core_preflight():
     ).read_text(encoding="utf-8")
     assert "preflight_team_scope" in src
     assert "_automation_disabled_reason" in src
-    assert "Open Club" in src
+    assert "Open Club" in (Path(__file__).parents[2] / "companion/ui/surfaces/matchday.py").read_text(encoding="utf-8")
     assert "group_items" not in src
     assert "_native_chooser" not in src
