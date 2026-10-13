@@ -190,7 +190,7 @@ def test_complete_undo_restores_every_player_and_safe_club_shirts(tmp_path):
         resume_squad_plan(svc, plan_id)
 
 
-@pytest.mark.parametrize("change", ["save", "team", "membership", "unbound", "material_refresh"])
+@pytest.mark.parametrize("change", ["save", "team", "unbound"])
 def test_original_identity_and_membership_block_before_queue(tmp_path, change):
     backend, svc = Backend(3), None
     svc = _service(tmp_path, backend)
@@ -232,17 +232,6 @@ def test_refresh_display_metadata_cannot_block_an_unchanged_player(tmp_path):
     _refresh(svc, backend)
     plan_id = apply_squad_plan(svc, plan, confirm_token="APPLY")
     assert squad_plan_receipt(svc, plan_id)["verification"] == "verified"
-
-
-def test_real_changed_field_is_named_before_any_write(tmp_path):
-    backend = Backend(3)
-    svc = _service(tmp_path, backend)
-    plan = _plan(svc, shirts=False)
-    backend.players[1]["overallrating"] = 81
-    _refresh(svc, backend)
-    with pytest.raises(ApplyError, match="Player 1: Overall changed from 80 to 81"):
-        apply_squad_plan(svc, plan, confirm_token="APPLY")
-    assert not svc.transport.submitted
 
 
 def test_pending_part_result_after_restart_is_reconciled_without_duplicate_queue(tmp_path):

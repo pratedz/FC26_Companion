@@ -607,7 +607,7 @@ def test_draft_session_before_grok() -> None:
 def test_current_squad_plan_release_version() -> None:
     from companion import __version__
 
-    assert __version__ == "2.10.51"
+    assert __version__ == "2.10.52"
 
 
 def test_relative_pace_under_80() -> None:

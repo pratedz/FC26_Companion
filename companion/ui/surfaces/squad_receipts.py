@@ -138,6 +138,13 @@ def open_receipt(svc: Any, plan_id: str) -> None:
         anchor="w", padx=theme.SP3, pady=theme.SP3)
     scroll = ctk.CTkScrollableFrame(win, fg_color="transparent")
     scroll.pack(fill="both", expand=True, padx=theme.SP3)
+    live_changes = receipt.get("live_changes") or ()
+    if live_changes:
+        text_label(scroll, "Changed in Career since you built this plan", size=12, bold=True).pack(
+            anchor="w", pady=(0, theme.SP1))
+        for note in live_changes:
+            muted_label(scroll, str(note), size=11, wraplength=660).pack(anchor="w")
+        text_label(scroll, "Planned values", size=12, bold=True).pack(anchor="w", pady=(theme.SP3, 0))
     rows = receipt.get("rows") or ()
     for row in rows:
         from ...domain.player import FIELD_SPECS

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Mapping, Sequence
 
-from ...app.commands.squad_plan import apply_squad_plan, confirm_squad_apply
+from ...app.commands.squad_plan import apply_squad_plan
 from ...domain.builds import preset
 from ...domain.job import JobValidationError
 from ...domain.squad_plan import (
@@ -105,7 +105,7 @@ def _plan_progress(
     try:
         if label is not None:
             tone = theme.SUCCESS if mode == "ready" else theme.CODEX if mode in {"wait", "ratio"} else theme.MUTED
-            if any(word in text.casefold() for word in ("failed", "stopped", "need attention")):
+            if any(word in text.casefold() for word in ("failed", "stopped", "need attention", "couldn't")):
                 tone = theme.WARNING
             label.configure(text=text, text_color=tone)
     except Exception:
@@ -393,8 +393,8 @@ def _open_session_planner(
     action_row.pack(fill="x", padx=16, pady=(12, 12))
     progress = ctk.CTkFrame(action_row, fg_color="transparent")
     progress.pack(side="left", fill="x", expand=True, padx=(0, 16))
-    status_lbl = muted_label(progress, "Ready to build a plan", size=11, anchor="w",
-                              wraplength=440, justify="left")
+    status_lbl = muted_label(progress, "Ready to build a plan", size=12, anchor="w",
+                              wraplength=520, justify="left")
     status_lbl.pack(fill="x")
     progress_bar = ctk.CTkProgressBar(progress, height=4, progress_color=theme.CODEX,
                                       fg_color=theme.BORDER)
@@ -411,6 +411,9 @@ def _open_session_planner(
             open_receipt(svc, state["receipt_id"])
     receipt_btn = button(action_row, "View results", view_results, kind="ghost", height=38, width=95)
     state["receipt_btn"] = receipt_btn
+    # Packed next to Apply only when Apply could not finish (see _show_recovery).
+    state["recovery_btn"] = button(action_row, "Try again", lambda: None, kind="secondary",
+                                   height=38, width=170)
     propose_btn = button(action_row, "Build plan", lambda: _start_session_propose(
         svc, state, preview_host, matrix_host, status_lbl, subtitle, propose_btn),
         kind="secondary", height=38, width=120)
@@ -1580,22 +1583,106 @@ def _apply(svc: Any, state: dict, win: Any) -> None:
     if not plan.template and not plan.overrides and not plan.jersey_numbers:
         set_status(svc, "Stage a template or per-player review before Apply.")
         return
-    token = "APPLY"
+    if plan.player_count > 1 and not _confirm_apply(win, plan):
+        set_status(svc, "Squad plan Apply cancelled.")
+        return
+    _run_apply(svc, state, win)
+
+
+def _confirm_apply(win: Any, plan: SquadPlan) -> bool:
+    """One deliberate click instead of typing APPLY; Undo covers the rest."""
+    ensure_ctk()
+    chosen = {"ok": False}
+    dialog = ctk.CTkToplevel(win)
+    dialog.title("Apply squad plan")
+    dialog.configure(fg_color=theme.BG)
+    dialog.resizable(False, False)
+    try:
+        dialog.transient(win)
+    except Exception:
+        pass
+    body = ctk.CTkFrame(dialog, fg_color="transparent")
+    body.pack(fill="both", expand=True, padx=24, pady=(22, 8))
+    text_label(body, f"Apply changes to {plan.player_count} players?", size=18, bold=True).pack(anchor="w")
+    shirts = len(plan.jersey_numbers)
+    scope = f"{plan.field_count} player values"
+    if shirts:
+        scope += f" · {shirts} shirt number{'s' if shirts != 1 else ''}"
+    text_label(body, scope, size=13).pack(anchor="w", pady=(8, 0))
+    muted_label(
+        body,
+        "Keep Career Mode open while it writes. If anything changed in your save since "
+        "you built this plan, Companion re-reads the squad first. You can undo the whole "
+        "plan later from View results.",
+        size=12, wraplength=400, justify="left",
+    ).pack(anchor="w", pady=(10, 0))
+    actions = ctk.CTkFrame(dialog, fg_color="transparent")
+    actions.pack(fill="x", padx=24, pady=(14, 22))
+
+    def choose(ok: bool) -> None:
+        chosen["ok"] = ok
+        try:
+            dialog.grab_release()
+        except Exception:
+            pass
+        dialog.destroy()
+
+    confirm = button(actions, f"Apply to {plan.player_count} players", lambda: choose(True),
+                     kind="primary", height=38)
+    confirm.pack(side="right")
+    button(actions, "Cancel", lambda: choose(False), kind="ghost", height=38, width=90).pack(
+        side="right", padx=(0, 8))
+    dialog.bind("<Return>", lambda _event: choose(True))
+    dialog.bind("<Escape>", lambda _event: choose(False))
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+    try:
+        dialog.update_idletasks()
+        x = win.winfo_rootx() + (win.winfo_width() - dialog.winfo_reqwidth()) // 2
+        y = win.winfo_rooty() + (win.winfo_height() - dialog.winfo_reqheight()) // 3
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dialog.after(60, lambda: (dialog.grab_set(), confirm.focus_set()))
+    except Exception:
+        pass
+    win.wait_window(dialog)
+    return chosen["ok"]
+
+
+def _show_recovery(state: dict, label: str, action: Any) -> None:
+    """One obvious next step next to Apply whenever Apply could not finish."""
+    btn = state.get("recovery_btn")
+    if btn is None:
+        return
+    btn.configure(text=label, command=action)
+    if not btn.winfo_manager():
+        btn.pack(side="right", padx=(0, 8), after=state["apply_btn"])
+
+
+def _hide_recovery(state: dict) -> None:
+    btn = state.get("recovery_btn")
+    if btn is not None and btn.winfo_manager():
+        btn.pack_forget()
+
+
+def _apply_failed(svc: Any, state: dict, win: Any, message: str, *, retry_label: str = "") -> None:
+    """Say what stopped Apply. Offer a recovery button only when it differs from Apply."""
+    state["applying"] = False
+    _sync_session_apply(state)
+    _plan_progress(state, f"Couldn't apply: {message}", mode="idle")
+    set_status(svc, f"Squad plan apply failed: {message}")
+    if retry_label:
+        _show_recovery(state, retry_label, lambda: _refresh_then_apply(svc, state, win))
+
+
+def _run_apply(svc: Any, state: dict, win: Any, *, refreshed: bool = False) -> None:
+    """Queue the reviewed plan. A stale squad is re-read once, then Apply continues."""
+    from ...app.commands.apply import ApplyError
+    from ...app.commands.squad_plan_recovery import SquadRefreshNeeded
+
+    plan: SquadPlan = state["plan"]
     controller = state.get("controller")
     generation = controller.generation if controller is not None else None
-    if plan.player_count > 1:
-        kind = "per-player patches" if plan.overrides else "template"
-        dialog = ctk.CTkInputDialog(
-            text=(
-                f"Apply {kind} to {plan.player_count} players "
-                f"({plan.field_count} fields)? Type APPLY to confirm."
-            ),
-            title="Confirm squad plan",
-        )
-        token = dialog.get_input() or ""
-        if not confirm_squad_apply(token):
-            set_status(svc, "Squad plan Apply cancelled.")
-            return
+    _hide_recovery(state)
+
     def finished(result: Any) -> None:
         def ui() -> None:
             if controller is not None and not controller.accepts(generation):
@@ -1614,10 +1701,12 @@ def _apply(svc: Any, state: dict, win: Any) -> None:
                 return
             state["applying"] = False
             verified = receipt.get("verification") == "verified" if receipt else result.outcome.is_success
+            notes = list(receipt.get("live_changes") or ()) if receipt else []
             if result.outcome.is_success and verified:
                 state["phase"] = "applied"
-                _plan_progress(state, "Plan applied.", mode="ready")
-                if not state.get("review_root"):
+                text = _applied_text(receipt, notes)
+                _plan_progress(state, text, mode="ready")
+                if not state.get("review_root") and not notes:
                     try:
                         win.after(600, win.destroy)
                     except Exception:
@@ -1631,6 +1720,8 @@ def _apply(svc: Any, state: dict, win: Any) -> None:
                 else:
                     state["phase"] = "attention"
                     _plan_progress(state, text, mode="idle")
+                    if receipt.get("plan_id"):
+                        _show_recovery(state, "Resume plan", lambda: _resume_plan(svc, state, win, receipt["plan_id"]))
             _sync_session_apply(state)
             set_status(svc, text)
 
@@ -1643,21 +1734,85 @@ def _apply(svc: Any, state: dict, win: Any) -> None:
         if btn is not None:
             btn.configure(state="disabled")
         _plan_progress(state, "Applying the plan. Keep Career Mode open.", mode="wait")
-        jid = apply_squad_plan(
-            svc,
-            plan,
-            confirm_token=token if plan.player_count > 1 else "APPLY",
-            on_result=finished,
-        )
+        jid = apply_squad_plan(svc, plan, confirm_token="APPLY", on_result=finished)
         state["receipt_id"] = state.get("receipt_id") or jid
         if state.get("receipt_btn"):
             state["receipt_btn"].pack(side="right", padx=(0, 8))
-        set_status(
-            svc,
-            f"Squad plan queued ({jid[:8]}…) — {plan.blast_summary()}.",
-        )
+        set_status(svc, f"Squad plan queued ({jid[:8]}…) — {plan.blast_summary()}.")
+    except SquadRefreshNeeded as exc:
+        if refreshed:
+            _apply_failed(svc, state, win, str(exc), retry_label="Refresh squad & apply")
+        else:
+            _refresh_then_apply(svc, state, win)
+    except ApplyError as exc:
+        _apply_failed(svc, state, win, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _apply_failed(svc, state, win, str(exc))
+
+
+def _refresh_then_apply(svc: Any, state: dict, win: Any, timeout_s: float = 90.0) -> None:
+    """Read the squad from Career Mode, then Apply without asking again."""
+    import time
+
+    from ...app.commands.squad import sync_squad
+
+    _hide_recovery(state)
+    state["applying"] = True
+    _sync_session_apply(state)
+    before = svc.store.snapshot().squad.taken
+    try:
+        sync_squad(svc)
+    except Exception as exc:  # noqa: BLE001
+        _apply_failed(svc, state, win, f"Could not read the squad: {exc}", retry_label="Refresh squad & apply")
+        return
+    _plan_progress(state, "Reading your squad from Career Mode, then applying…", mode="wait")
+    set_status(svc, "Reading the live squad before applying the plan…")
+    deadline = time.monotonic() + timeout_s
+
+    def poll() -> None:
+        squad = svc.store.snapshot().squad
+        if squad.taken is not None and squad.taken != before and not squad.stale:
+            _run_apply(svc, state, win, refreshed=True)
+            return
+        if time.monotonic() > deadline:
+            _apply_failed(svc, state, win, "The squad read did not finish. Stay in the Career hub, then try again.",
+                          retry_label="Refresh squad & apply")
+            return
+        try:
+            win.after(500, poll)
+        except Exception:
+            state["applying"] = False
+
+    try:
+        win.after(500, poll)
+    except Exception:
+        state["applying"] = False
+
+
+def _resume_plan(svc: Any, state: dict, win: Any, plan_id: str) -> None:
+    from ...app.commands.squad_plan import resume_squad_plan
+
+    _hide_recovery(state)
+    try:
+        state["applying"] = True
+        _plan_progress(state, "Resuming the plan where it stopped…", mode="wait")
+        resume_squad_plan(svc, plan_id)
+        set_status(svc, "Squad plan resumed. Follow it in View results.")
     except Exception as exc:  # noqa: BLE001
         state["applying"] = False
+        _plan_progress(state, f"Could not resume: {exc}", mode="idle")
+        _show_recovery(state, "Resume plan", lambda: _resume_plan(svc, state, win, plan_id))
+    finally:
         _sync_session_apply(state)
-        _plan_progress(state, f"Squad plan apply failed: {exc}", mode="idle")
-        set_status(svc, f"Squad plan apply failed: {exc}")
+
+
+def _applied_text(receipt: Mapping[str, Any], notes: Sequence[str]) -> str:
+    players = receipt.get("players_applied") or receipt.get("players_requested") or ""
+    text = f"Plan applied to {players} players." if players else "Plan applied."
+    skipped = [note for note in notes if note.endswith("skipped")]
+    kept = [note for note in notes if note not in skipped]
+    if skipped:
+        text += f" Skipped {len(skipped)} who left the club."
+    if kept:
+        text += f" {len(kept)} value{'s' if len(kept) != 1 else ''} had changed in Career since the build; details in View results."
+    return text

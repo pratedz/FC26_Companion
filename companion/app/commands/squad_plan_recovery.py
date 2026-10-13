@@ -23,6 +23,10 @@ from .. import events as E
 from .apply import ApplyError, FOLLOW_SECONDS, _persist_result, _status_line
 
 
+class SquadRefreshNeeded(ApplyError):
+    """The squad export is stale; read it again, then Apply can continue."""
+
+
 def record_path(svc: Any, plan_id: str) -> Path:
     if not is_ulid(plan_id):
         raise ApplyError("Invalid squad plan identifier.")
@@ -166,6 +170,7 @@ def receipt(record: Mapping[str, Any]) -> dict[str, Any]:
             "fields_verified": int(verification.get("fields_verified", 0)),
             "verification_errors": list(verification.get("errors") or ()),
             "undo_plan_id": record.get("undo_plan_id", ""),
+            "live_changes": list(record.get("live_changes") or ()),
             "error": record.get("error", "")}
 
 
@@ -258,30 +263,80 @@ def _check_source(svc: Any, source: Mapping[str, Any], affected: Any, *, initial
         raise ApplyError("Club changed since this plan was built. Switch back or rebuild the plan.")
     if initial and live_known:
         if squad.stale or squad.taken is None:
-            raise ApplyError("Refresh the live squad before applying this plan.")
-        if str(source["snapshot_revision"]) != squad.taken.isoformat():
-            current = _roster_rows(svc)
-            if not baseline:
-                raise ApplyError("The squad export changed since this plan was built. Rebuild the plan from the refreshed squad.")
-            for pid, original in baseline.items():
-                live = current.get(int(pid), {})
-                for name, value in original.items():
-                    # Display labels and derived age are not database changes.
-                    # Snapshot and Club export metadata have different shapes.
-                    if name not in FIELD_SPECS and name != "jerseynumber":
-                        continue
-                    if name in live and not _same_value(live[name], value):
-                        label = FIELD_SPECS[name].label if name in FIELD_SPECS else "Shirt number"
-                        player = live.get("name") or f"Player {pid}"
-                        raise ApplyError(
-                            f"{player}: {label} changed from {value} to {live[name]} since this plan "
-                            "was built. Rebuild it from the refreshed squad."
-                        )
+            raise SquadRefreshNeeded("Refresh the live squad before applying this plan.")
+        if str(source["snapshot_revision"]) != squad.taken.isoformat() and not baseline:
+            raise ApplyError("The squad export changed since this plan was built. Rebuild the plan from the refreshed squad.")
     if live_known:
         missing = set(int(pid) for pid in affected) - set(_roster_rows(svc))
         if missing:
             raise ApplyError("These planned players are no longer in the original club: "
                              + ", ".join(str(pid) for pid in sorted(missing)) + ". Refresh and rebuild.")
+
+
+def rebase_on_live(svc: Any, plan: SquadPlan) -> tuple[SquadPlan, list[str]]:
+    """Carry a reviewed plan onto the current squad export.
+
+    Career Mode keeps developing players between Build and Apply. Values the
+    plan does not write simply follow the game; values it does write keep the
+    reviewed number. Each planned field that moved in Career is reported.
+    Players who left the club are skipped, and shirt moves are re-planned
+    from the shirts the club wears now.
+    """
+    squad = svc.store.snapshot().squad
+    if squad.taken is None or str(plan.source_snapshot_revision) == squad.taken.isoformat():
+        return plan, []
+    current = _roster_rows(svc)
+    notes: list[str] = []
+    gone = [member for member in plan.members if member.playerid not in current]
+    if len(gone) == len(plan.members):
+        raise ApplyError("No planned player is still at the club. Refresh the squad and pick players again.")
+    if gone:
+        notes.extend(f"{member.name} left the club; skipped" for member in gone)
+        plan = plan.keeping([member.playerid for member in plan.members if member.playerid in current])
+    shirts: dict[int, int] = {}
+    for pid, row in current.items():
+        try:
+            number = int(row.get("jerseynumber") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        shirts[pid] = number if 1 <= number <= 99 else 0
+    targets = {pid: number for pid, number in plan.jersey_numbers.items() if pid in current}
+    names = dict(plan.shirt_names)
+    for pid, number in list(targets.items()):
+        holder = next((other for other, worn in shirts.items()
+                       if worn == number and other != pid and other not in targets), None)
+        if holder is None:
+            continue
+        taken = set(shirts.values()) | set(targets.values())
+        spare = next((n for n in [*range(12, 100), *range(1, 12)] if n not in taken), None)
+        if spare is None:
+            raise ApplyError(f"Shirt #{number} is worn and no free number is left to move its wearer.")
+        targets[holder] = spare
+        name = str(current[holder].get("name") or f"Player {holder}")
+        names[holder] = name
+        notes.append(f"{name} moves from #{number} to #{spare} to free #{number}")
+    plan = replace(plan, shirt_book=shirts, shirt_names=names, jersey_numbers=targets)
+    live_bases: dict[int, dict[str, Any]] = {}
+    for member in plan.members:
+        live = current.get(member.playerid)
+        if live is None:
+            continue
+        patch = plan.patch_for(member.playerid)
+        moved: dict[str, Any] = {}
+        for name, value in member.base.items():
+            # Display labels and derived age are not database changes.
+            # Snapshot and Club export metadata have different shapes.
+            if name not in FIELD_SPECS and name != "jerseynumber":
+                continue
+            if name in live and not _same_value(live[name], value):
+                moved[name] = live[name]
+                if name in patch:
+                    label = FIELD_SPECS[name].label if name in FIELD_SPECS else "Shirt number"
+                    notes.append(f"{member.name}: {label} {value} → {live[name]} in Career, "
+                                 f"plan sets {patch[name]}")
+        if moved:
+            live_bases[member.playerid] = moved
+    return (plan.with_member_bases(live_bases) if live_bases else plan), notes
 
 
 def _snapshots(svc: Any, jobs: tuple[Job, ...], save_uid: str) -> tuple[Job, ...]:
@@ -301,8 +356,9 @@ def apply_squad_plan(svc: Any, plan: SquadPlan, *, dry_run: bool = False, follow
         raise ApplyError(f"Type APPLY to confirm a plan for {plan.player_count} players ({plan.field_count} fields).")
     source = {"save_uid": plan.source_save_uid, "teamid": plan.source_teamid,
               "snapshot_revision": plan.source_snapshot_revision}
-    _check_source(svc, source, set(plan.playerids) | set(plan.jersey_numbers), initial=True,
+    _check_source(svc, source, (), initial=True,
                   baseline={member.playerid: member.base for member in plan.members})
+    plan, live_changes = rebase_on_live(svc, plan)
     growth = "auto" if svc.store.snapshot().prefs.growth_mirror else "off"
     try:
         jobs = _snapshots(svc, build_apply_jobs(plan, growth_mirror=growth, dry_run=dry_run,
@@ -310,6 +366,7 @@ def apply_squad_plan(svc: Any, plan: SquadPlan, *, dry_run: bool = False, follow
     except Exception as exc:
         raise ApplyError(str(exc)) from exc
     record = make_record(svc, plan, jobs)
+    record["live_changes"] = live_changes
     save_record(svc, record)
     _start_record(svc, record["plan_id"], follow=follow, on_result=on_result)
     return str(record["plan_id"])
