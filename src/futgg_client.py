@@ -5,7 +5,8 @@ Futbin itself is Cloudflare-blocked. FUT.GG exposes a public JSON API at
 which returns the full FUT card catalog (including promos, Icons, Heroes, etc.)
 with detailed attributes — functionally the same job as \"pull every Futbin card\".
 
-API note: each game year endpoint caps at ~10_000 cards (200 pages x 50).
+The listing caps each query at 10,000 cards. Sync partitions rating ranges
+below that cap and verifies listing and definition counts before publishing.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ except ImportError:  # pragma: no cover
     crequests = None
 
 import urllib.request
+import urllib.error
+from urllib.parse import urlencode
 
 API_BASE = "https://www.fut.gg/api/fut"
 DEFAULT_HEADERS = {
@@ -100,12 +103,19 @@ def search_by_name(name: str) -> list[dict[str, Any]]:
     return list(data.get("data") or [])
 
 
-def list_page(year: str | int, page: int = 1, count: int = 50) -> dict[str, Any]:
+def list_page(
+    year: str | int, page: int = 1, count: int = 50,
+    *, overall_min: int | None = None, overall_max: int | None = None,
+    show_holographics: str = "true",
+) -> dict[str, Any]:
     year = str(year)
-    url = (
-        f"{API_BASE}/players/v2/{year}/"
-        f"?count={int(count)}&sorts=-overall_rating&page={int(page)}"
-    )
+    params = {"count": int(count), "sorts": "-overall_rating", "page": int(page),
+              "show_holographics": show_holographics}
+    if overall_min is not None:
+        params["overall__gte"] = overall_min
+    if overall_max is not None:
+        params["overall__lte"] = overall_max
+    url = f"{API_BASE}/players/v2/{year}/?{urlencode(params)}"
     return _http_get_json(url)
 
 
@@ -252,6 +262,10 @@ def definition_to_le_row(item: dict[str, Any]) -> dict[str, Any]:
     nick = item.get("nickname") or item.get("commonName") or ""
     name = nick or f"{first} {last}".strip() or str(item.get("searchableName") or "")
     rarity = _rarity_name(item)
+    base_rarity = rarity
+    holographic = item.get("holographicType")
+    if holographic:
+        rarity += " (Pristine Holographic)" if holographic == "pristine" else " (Holographic)"
 
     club = item.get("club") or item.get("uniqueClub") or {}
     nation = item.get("nation") or {}
@@ -295,6 +309,7 @@ def definition_to_le_row(item: dict[str, Any]) -> dict[str, Any]:
             if item.get("skillMoves") is not None
             else item.get("skillmoves")
         ),
+        "_skillmoves_encoding": "raw",
         "weakfootabilitytypecode": item.get("weakFoot") if item.get("weakFoot") is not None else item.get("weakfootabilitytypecode"),
         "preferredfoot": foot,
         "playerid": item.get("basePlayerEaId") or item.get("eaId") or item.get("playerid"),
@@ -305,6 +320,7 @@ def definition_to_le_row(item: dict[str, Any]) -> dict[str, Any]:
         "revision": rarity,
         "origin": rarity,
         "rarity": rarity,
+        "base_rarity": base_rarity,
         "isHero": item.get("isHero"),
         "game": item.get("game"),
         "year": str(item.get("game") or item.get("year") or ""),
@@ -340,6 +356,19 @@ def definition_to_le_row(item: dict[str, Any]) -> dict[str, Any]:
         "playstyles": list(ps_ids) if isinstance(ps_ids, list) else [],
         "playstyles_plus": list(psp_ids) if isinstance(psp_ids, list) else [],
         "playstylesPlus": list(psp_ids) if isinstance(psp_ids, list) else [],
+        "rolesPlus": item.get("rolesPlus") or [],
+        "rolesPlusPlus": item.get("rolesPlusPlus") or [],
+        "rarityEaId": item.get("rarityEaId"),
+        "raritySquadId": item.get("raritySquadId"),
+        "createdAt": item.get("createdAt"),
+        "isSbcItem": item.get("isSbcItem"),
+        "isObjectiveItem": item.get("isObjectiveItem"),
+        "premiumSeasonPassLevel": item.get("premiumSeasonPassLevel"),
+        "standardSeasonPassLevel": item.get("standardSeasonPassLevel"),
+        "holographicType": item.get("holographicType"),
+        "standardItemEaId": item.get("standardItemEaId"),
+        "itemVariants": item.get("itemVariants") or [],
+        "isHidden": item.get("isHidden"),
     }
     # alt positions 2..n
     if isinstance(alt_pos, list):
@@ -388,82 +417,87 @@ def sync_year(
     out_path = year_jsonl_path(year)
     tmp_path = out_path.with_suffix(".jsonl.partial")
 
-    page = 1
-    listed: list[dict[str, Any]] = []
-    total_reported = None
+    if not enrich_definitions:
+        raise FutGGError("A complete sync requires enriched definitions")
+    partitions: list[dict[str, Any]] = []
 
-    while True:
-        if max_pages is not None and page > max_pages:
-            break
-        log(f"[{year}] list page {page}…")
-        try:
-            payload = list_page(year, page=page, count=page_size)
-        except FutGGError as e:
-            if page == 1:
-                raise
-            log(f"[{year}] stop at page {page}: {e}")
-            break
-        batch = list(payload.get("data") or [])
-        total_reported = payload.get("total")
-        if not batch:
-            break
-        listed.extend(batch)
-        nxt = payload.get("next")
-        log(f"[{year}] page {page}: +{len(batch)} (listed={len(listed)} / total~{total_reported})")
-        if not nxt:
-            break
-        page = int(nxt)
-        time.sleep(sleep_s)
+    def retry(call: Callable[[], Any]) -> Any:
+        for attempt in range(3):
+            try:
+                return call()
+            except (FutGGError, urllib.error.URLError, TimeoutError) as exc:
+                if attempt == 2:
+                    raise FutGGError(f"Sync failed after three attempts: {exc}") from exc
+                time.sleep(max(sleep_s, 0.2) * (attempt + 1))
 
-    # Deduplicate by slug
-    by_slug: dict[str, dict[str, Any]] = {}
-    for it in listed:
-        slug = str(it.get("slug") or "")
-        if slug:
-            by_slug[slug] = it
+    def collect(lo: int, hi: int) -> dict[str, dict[str, Any]]:
+        page, found, visited = 1, {}, set()
+        expected = None
+        while True:
+            if page in visited or (max_pages is not None and len(visited) >= max_pages):
+                raise FutGGError(f"Incomplete listing for ratings {lo}-{hi}, page {page}")
+            visited.add(page)
+            log(f"[{year}] ratings {lo}-{hi}, page {page}")
+            payload = retry(lambda: list_page(
+                year, page=page, count=page_size, overall_min=lo, overall_max=hi,
+            ))
+            total = payload.get("total")
+            if not isinstance(total, int) or total < 0:
+                raise FutGGError("Listing returned no valid total")
+            if total >= 10_000:
+                if lo == hi:
+                    raise FutGGError(f"Rating {lo} still reaches the API cap; cannot certify completeness")
+                mid = (lo + hi) // 2
+                return {**collect(lo, mid), **collect(mid + 1, hi)}
+            if expected is None:
+                expected = total
+            elif total != expected:
+                raise FutGGError("Listing changed during sync; retry the download")
+            for item in payload.get("data") or []:
+                slug = str(item.get("slug") or "")
+                if not slug or str(item.get("game")) != year or not lo <= int(item["overall"]) <= hi:
+                    raise FutGGError(f"Invalid card in rating partition {lo}-{hi}")
+                if slug in found:
+                    raise FutGGError(f"Repeated card {slug} in paginated listing")
+                found[slug] = item
+            nxt = payload.get("next")
+            if nxt is None:
+                break
+            page = int(nxt)
+            time.sleep(sleep_s)
+        if len(found) != expected:
+            raise FutGGError(f"Incomplete ratings {lo}-{hi}: {len(found)} of {expected}")
+        partitions.append({"overall_min": lo, "overall_max": hi, "total": expected})
+        return found
+
+    by_slug = collect(0, 99)
+    if not by_slug:
+        raise FutGGError("Empty catalog; existing cache retained")
+    total_reported = sum(p["total"] for p in partitions)
 
     rows_out: list[dict[str, Any]] = []
     slugs = list(by_slug.keys())
 
-    if enrich_definitions and slugs:
+    if slugs:
         for i in range(0, len(slugs), def_batch):
             chunk = slugs[i : i + def_batch]
             log(f"[{year}] definitions {i+1}-{i+len(chunk)} / {len(slugs)}")
-            try:
-                defs = fetch_definitions(chunk)
-            except FutGGError as e:
-                log(f"[{year}] def batch failed: {e} — using list stubs")
-                defs = []
-            if defs:
-                for d in defs:
-                    rows_out.append(definition_to_le_row(d))
-            else:
-                for s in chunk:
-                    stub = by_slug[s]
-                    rows_out.append(
-                        definition_to_le_row(
-                            {
-                                **stub,
-                                "overall": stub.get("overallRating") or stub.get("overall"),
-                                "game": year,
-                            }
-                        )
-                    )
+            defs = retry(lambda: fetch_definitions(chunk))
+            definitions = {d.get("slug"): d for d in defs}
+            if len(defs) != len(chunk) or set(definitions) != set(chunk):
+                raise FutGGError(f"Incomplete definitions for batch starting {i + 1}")
+            for slug in chunk:
+                d = definitions[slug]
+                if str(d.get("game")) != year or any(d.get(k) is None for k in ATTR_MAP):
+                    raise FutGGError(f"Incomplete attributes or wrong year for {slug}")
+                row = definition_to_le_row(d)
+                if not row.get("name") or not row.get("playerid") or not row.get("revision"):
+                    raise FutGGError(f"Incomplete identity for {slug}")
+                rows_out.append(row)
             time.sleep(sleep_s)
-    else:
-        for s, stub in by_slug.items():
-            rows_out.append(
-                definition_to_le_row(
-                    {
-                        **stub,
-                        "overall": stub.get("overallRating") or stub.get("overall"),
-                        "game": year,
-                    }
-                )
-            )
 
     with tmp_path.open("w", encoding="utf-8") as f:
-        for row in rows_out:
+        for row in sorted(rows_out, key=lambda r: (int(r["playerid"]), int(r["eaId"]))):
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     tmp_path.replace(out_path)
 
@@ -479,9 +513,11 @@ def sync_year(
         "listed": len(by_slug),
         "written": len(rows_out),
         "total_reported": total_reported,
+        "partitions": partitions,
+        "complete": True,
         "path": str(out_path),
     }
-    log(f"[{year}] done → {out_path} ({stats['written']} cards)")
+    log(f"[{year}] done: {out_path} ({stats['written']} cards)")
     return stats
 
 

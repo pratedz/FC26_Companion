@@ -1220,13 +1220,23 @@ class Builder:
                     "height": to_int(card.get("height")),
                     "weight": to_int(card.get("weight")),
                     "preferredfoot": parse_foot(card.get("preferredfoot")),
-                    "skillmoves": to_int(card.get("skillmoves")),
+                    # Universe stores external display stars; normalized caches
+                    # explicitly mark the raw LE encoding to avoid double conversion.
+                    "skillmoves": (
+                        to_int(card.get("skillmoves")) + 1
+                        if card.get("_skillmoves_encoding") == "raw"
+                        and to_int(card.get("skillmoves")) is not None
+                        else to_int(card.get("skillmoves"))
+                    ),
                     "weakfoot": to_int(card.get("weakfootabilitytypecode")),
                     "trait1": to_int(card.get("trait1")),
                     "trait2": to_int(card.get("trait2")),
                     "icontrait1": to_int(card.get("icontrait1")),
                     "icontrait2": to_int(card.get("icontrait2")),
-                    "roles": None,
+                    "roles": json.dumps({
+                        "rolesPlus": card.get("rolesPlus") or [],
+                        "rolesPlusPlus": card.get("rolesPlusPlus") or [],
+                    }, separators=(",", ":")),
                     "playstyles": json.dumps(playstyles, separators=(",", ":")),
                     "attrs": json.dumps(attrs, sort_keys=True, separators=(",", ":")),
                     "attr_fidelity": fidelity_of(len(attrs), 0),

@@ -1,0 +1,34 @@
+{
+  "year": "27",
+  "listed": 20425,
+  "written": 20425,
+  "total_reported": 20425,
+  "partitions": [
+    {
+      "overall_min": 0,
+      "overall_max": 49,
+      "total": 107
+    },
+    {
+      "overall_min": 50,
+      "overall_max": 62,
+      "total": 4915
+    },
+    {
+      "overall_min": 63,
+      "overall_max": 68,
+      "total": 7006
+    },
+    {
+      "overall_min": 69,
+      "overall_max": 74,
+      "total": 4985
+    },
+    {
+      "overall_min": 75,
+      "overall_max": 99,
+      "total": 3412
+    }
+  ],
+  "complete": true
+}

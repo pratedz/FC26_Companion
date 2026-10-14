@@ -37,6 +37,12 @@ queue/*
 !queue/.gitkeep
 card_db/*
 !card_db/MANIFEST.txt
+# The verified FC27 FUT.GG source and collection manifest are release data.
+!card_db/futgg/
+card_db/futgg/*
+!card_db/futgg/futgg_27.jsonl
+!card_db/futgg/fc27_collections.json
+!card_db/futgg/fc27_sync_stats.json
 generated/
 snapshots/
 
