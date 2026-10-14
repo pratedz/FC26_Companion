@@ -309,6 +309,8 @@ def test_sign_shows_collections_and_filters_in_the_results_toolbar(svc, size):
         root.update()
         assert [int(r["_raw"]["obs_id"]) for r in search.model.rows] == [11]
         search.filters._menu_changed(ANY_COLLECTION)
+        root.update()
+        assert not search.model.rows and search.filters.visible()
         search.query.insert(0, "bukayo saka")
         search.search()
         root.update()

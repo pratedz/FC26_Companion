@@ -570,6 +570,11 @@ class LibrarySearchPanel:
             self.search()
         elif key == "card_pick":
             self._reshow_catalog()
+        else:
+            # Back to "All cards" with nothing typed: the old collection's cards no longer apply.
+            self._catalog_hits = self.view["catalog_hits"] = ()
+            self.replace_rows((), mode="Search", empty_detail=(
+                "Type a player name, or choose a collection or FC/OVR filter."))
 
     def _repick_suggestions(self) -> None:
         # Start from the cards Codex's names first resolved to, so a player a

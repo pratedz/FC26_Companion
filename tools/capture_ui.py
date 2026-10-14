@@ -36,7 +36,7 @@ SURFACES = ("club", "player", "add_player", "injury", "automations", "library")
 EXTRAS = ("activity", "settings", "palette", "review")
 SCENARIOS = (
     "club_selected", "club_checked", "player_open", "player_edited", "review_edited",
-    "library_search", "sign_search", "sign_results", "planner",
+    "library_search", "sign_search", "sign_results", "sign_base", "sign_collection", "planner",
 )
 
 _user32 = ctypes.windll.user32
@@ -296,6 +296,23 @@ def _scenario(name: str, shell: Any, svc: Any) -> str:
             _settle(shell.root, 1.5)
             if search.model.rows:
                 search.select(search.model.rows[0])
+        return "add_player"
+    if name in ("sign_base", "sign_collection"):
+        # Sign's collection filter and Best/Base/All switch, driven like a click.
+        shell._show("add_player")
+        _settle(shell.root, 0.5)
+        page = shell._surfaces.get("add_player")
+        search = getattr(page, "sign_search", None)
+        if search is not None:
+            search.view["verified_only"] = False
+            search._sync_shop_toggles()
+            if name == "sign_base":
+                _type(search.query, "Maldini")
+                search.filters._pick_changed("base")
+            else:
+                _type(search.year, "26")
+                search.filters._menu_changed("Team of the Year")
+            _settle(shell.root, 1.5)
         return "add_player"
     if name in ("library_search", "sign_search"):
         key = "library" if name == "library_search" else "add_player"
