@@ -391,7 +391,7 @@ def test_add_player_tab_is_registered_and_contains_required_controls():
     for marker in (
         "Set new players to age",
         "Search players in your local Library",
-        "Search Library for a verified card",
+            "Search Library for a usable card",
         "Ask Codex",
         "Codex only suggests names",
         "Checkout",
@@ -746,7 +746,7 @@ def test_update_review_cta_requeries_active_jobs_and_does_not_freeze_the_lock():
     assert "_signing_progress_copy(svc)" in body
     assert "latest_signing_handoff(svc)" in body
     assert "if active else" not in body
-    assert "Add a verified card to your bag first." in body
+    assert "Add a usable card to your bag first." in body
 
 
 def test_review_cta_uses_sign_list_not_current_search_checks():

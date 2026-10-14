@@ -74,7 +74,9 @@ def test_catalog_filters_best_and_shared_favourites(svc):
     assert shop_cards(rows,position="ST") == ()
     unverified = svc.catalog.search("missing")[0]
     assert not shop_cards((unverified,))
-    assert not can_add(_card_row(unverified))
+    fallback = _card_row(unverified)
+    assert fallback["face"] == "Fallback"
+    assert can_add(fallback)
     card = rows[0]
     assert svc.catalog.toggle_favorite(card)
     library = LocalCatalog(universe_path=svc.catalog.universe_path,state_db=svc.db)
@@ -198,8 +200,10 @@ def test_sign_workspace_windowed_flow(svc,monkeypatch,size):
         surface.sign_bag.remove(str(card["person_id"]))
         assert not surface.sign_bag.items()
         search.replace_rows(svc.catalog.search("missing"))
+        assert search.model.rows[0]["face"] == "Fallback"
         search._activate_row(search.model.rows[0])
-        assert not surface.sign_bag.items()
+        assert len(surface.sign_bag.items()) == 1
+        surface.sign_bag.clear()
         surface.sign_discovery.select("Recommendations")
         from companion.integrations import grok, ai_provider
         monkeypatch.setattr(ai_provider,"block_reason",lambda: "")

@@ -48,16 +48,25 @@ def _looks_like_le_root(p: Path) -> bool:
 def le_root() -> Path:
     """FC 26 Live Editor install root (walk parents from app folder)."""
     start = app_root()
-    if _looks_like_le_root(start):
+    if (start / "FCLiveEditor.DLL").is_file() or (start / "Launcher.exe").is_file():
         return start
     cur = start
     for _ in range(6):
         parent = cur.parent
         if parent == cur:
             break
-        if _looks_like_le_root(parent):
+        if (parent / "FCLiveEditor.DLL").is_file() or (parent / "Launcher.exe").is_file():
             return parent
         cur = parent
+    # The registered installation is authoritative for source checkouts that
+    # live beside, rather than inside, LE. Never choose among sibling installs.
+    try:
+        from companion.platform.registry import resolve_install_root
+        registered = resolve_install_root(start)
+        if registered.trusted and registered.path is not None:
+            return registered.path
+    except (ImportError, OSError):
+        pass
     # Fallback: historical layout (companion sits one level under LE)
     return start.parent
 

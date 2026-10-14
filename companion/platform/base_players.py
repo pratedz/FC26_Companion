@@ -61,3 +61,23 @@ def _integer(value: Any) -> int | None:
     if not number.is_integer():
         return None
     return int(number)
+
+
+def generic_signing_appearance(
+    profile: BasePlayerProfile | None, *, gender: int = 0,
+) -> dict[str, int]:
+    """Copy native generic cosmetics or a same-gender template, then clear real assets."""
+    if profile is not None and not profile.face_verified:
+        appearance = dict(profile.appearance)
+    else:
+        from src import base_players
+        row = base_players.generic_template(gender)
+        if row is None:
+            return {}
+        appearance = {
+            key: value for key, spec in FIELD_SPECS.items()
+            if spec.category == "Appearance" and (value := _integer(row.get(key))) is not None
+        }
+    # The generic pipeline cannot reference an absent FUT/FC27 real-head asset.
+    appearance.update(headassetid=0, headclasscode=1, hashighqualityhead=0, headvariation=0)
+    return appearance

@@ -104,9 +104,9 @@ def shop_cards(
 ) -> tuple[dict[str, Any], ...]:
     """Narrow a Library hit list the way a shopper actually picks a card.
 
-    Verified faces are the only ones Checkout will accept. Best-card keeps the
-    highest overall for each person, then the newer year, so one name is not
-    twenty nearly identical rows.
+    A real face is preferred. Native generic appearances and generic fallbacks
+    remain signable. Best-card keeps the highest overall for each person, then
+    the newer year, so one name is not twenty nearly identical rows.
     """
     items = [dict(row) for row in rows if isinstance(row, Mapping)]
     if verified_only:
@@ -144,8 +144,7 @@ def shop_feedback(
         return "No cards match. Try another name, or clear the year and OVR."
     if shown <= 0:
         return (
-            "None of these matches has a verified FC 26 face. Show all faces to inspect them; "
-            "checkout still needs a verified face."
+            "No cards remain with these filters. Show all faces or clear the position filter."
         )
     if best_only and shown != total:
         lead = f"{shown} best card{'s' if shown != 1 else ''} from {total} matches"
@@ -156,7 +155,7 @@ def shop_feedback(
         notes.append("Showing the top matches — add a year or OVR to narrow it.")
     if best_only and shown != total:
         notes.append("All versions lists every year and promo.")
-    notes.append("Add a card to your bag, then Checkout.")
+    notes.append("Add a usable card to your bag, then Checkout.")
     return lead + ". " + " ".join(notes)
 
 
@@ -248,13 +247,13 @@ def _restore_grid_selection(
 
 
 def _card_face_status(card: Mapping[str, Any]) -> str:
-    """Cheap local CSV lookup: Verified, Missing, or unknown. Never reads FC26."""
+    """Local CSV lookup: Verified, Generic, Fallback, or unknown. No game reads."""
     stored = str(card.get("_face_status") or "")
-    if stored in {"Verified", "Missing", "—"}:
+    if stored in {"Verified", "Generic", "Fallback"}:
         return stored
     if card.get("_face_verified") is True:
         return "Verified"
-    if card.get("_face_verified") is False:
+    if card.get("_face_verified") is False and not any(card.get(key) for key in ("person_id", "playerid", "basePlayerEaId")):
         return "Missing"
     try:
         from ....platform.base_players import resolve_card_base_profile
@@ -263,8 +262,12 @@ def _card_face_status(card: Mapping[str, Any]) -> str:
     except Exception:
         return "—"
     if profile is None:
+        from ....domain.card_import import card_source_playerid
+        from src import base_players
+        if card_source_playerid(card) is not None and base_players.generic_template(0) and base_players.generic_template(1):
+            return "Fallback"
         return "—"
-    return "Verified" if profile.face_verified else "Missing"
+    return "Verified" if profile.face_verified else "Generic"
 
 
 def _annotate_card_face(card: Mapping[str, Any]) -> dict[str, Any]:
@@ -273,7 +276,7 @@ def _annotate_card_face(card: Mapping[str, Any]) -> dict[str, Any]:
     row["_face_status"] = status
     if status == "Verified":
         row["_face_verified"] = True
-    elif status == "Missing":
+    elif status in {"Generic", "Fallback", "Missing"}:
         row["_face_verified"] = False
     else:
         row.pop("_face_verified", None)
@@ -295,7 +298,7 @@ def _sign_columns() -> tuple[Column, ...]:
             tone=lambda row: (
                 "ok"
                 if row.get("face") == "Verified"
-                else "warn" if row.get("face") == "Missing" else "muted"
+                else "warn" if row.get("face") in {"Generic", "Fallback", "Missing"} else "muted"
             ),
         ),
         Column("reason", "WHY", width=160),
@@ -408,7 +411,7 @@ class LibrarySearchPanel:
         self.verified_button = button(self.shop_row, "Verified only", self.toggle_verified,
                                       kind="ghost", height=theme.BTN_MD, width=104)
         self.verified_button.pack(side="left", padx=(0, theme.SP2))
-        tooltip(self.verified_button, "Only cards with a verified FC 26 face. Checkout always requires one.")
+        tooltip(self.verified_button, "Only cards with a verified real FC26 face. Turn this off to include safe generic-face cards.")
         self.best_button = button(self.shop_row, "Best card", self.toggle_best,
                                   kind="ghost", height=theme.BTN_MD, width=96)
         self.best_button.pack(side="left", padx=(0, theme.SP2))
@@ -483,8 +486,8 @@ class LibrarySearchPanel:
         )
         self.empty_results = ctk.CTkFrame(self.root, fg_color="transparent")
         self._paint_empty(
-            "Search Library for a verified card",
-            "Type at least 3 letters and press Enter. Double-click a verified card to add it. Click a column heading to sort.",
+            "Search Library for a usable card",
+            "Type at least 3 letters and press Enter. Real faces are preferred; safe generic faces can also be signed.",
         )
 
     def toggle_refine(self) -> None:
@@ -508,11 +511,11 @@ class LibrarySearchPanel:
         self._reshow_catalog()
 
     def _sync_shop_toggles(self) -> None:
-        verified = bool(self.view.get("verified_only", True))
+        verified = bool(self.view.get("verified_only", False))
         best = bool(self.view.get("best_only", True))
         # One look for every active filter: tonal accent when on, ghost when off.
         try:
-            self.verified_button.configure(text="Verified only" if verified else "All faces")
+            self.verified_button.configure(text="Real faces only" if verified else "All faces")
             restyle_button(self.verified_button, "accent" if verified else "ghost")
             self.best_button.configure(text="Best card" if best else "All versions")
             restyle_button(self.best_button, "accent" if best else "ghost")
@@ -629,7 +632,7 @@ class LibrarySearchPanel:
         if not can_add(row):
             set_status(
                 self.svc,
-                "That card has no verified face, so Checkout would refuse it.",
+                "That card has no usable FC26 face profile, so Checkout would refuse it.",
             )
             return
         if self.on_add_row is not None:
@@ -643,12 +646,12 @@ class LibrarySearchPanel:
         blocked = [
             str(row.get("name") or "card")
             for row in rows
-            if str(row.get("face") or "") != "Verified"
+            if str(row.get("face") or "") not in {"Verified", "Generic", "Fallback"}
         ]
         if not blocked:
             return ""
         shown = ", ".join(blocked[:3])
-        return f"{shown} has no verified face, so Checkout would refuse it."
+        return f"{shown} has no usable FC26 face profile, so Checkout would refuse it."
 
     def sync_add_button(self) -> None:
         picked = self.picked_rows()

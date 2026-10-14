@@ -106,7 +106,10 @@ def bind(owner: Any, item: dict[str, Any], row: Any) -> None:
             item["rating"].grid(row=0, column=1, padx=(6, 0))
         year, pos = str(row.get("year") or ""), str(row.get("pos") or "")
         metadata = " · ".join(p for p in (f"FC {year}" if year not in {"", "-"} else "", pos.replace(", ", " / ")) if p and p != "-")
-        item["face"].configure(text="Verified face" if row.get("face") == "Verified" else "No verified face, can't sign",
+        item["face"].configure(text=("Verified face" if row.get("face") == "Verified" else
+                                      "Safe generic face" if row.get("face") == "Generic" else
+                                      "Generic fallback" if row.get("face") == "Fallback" else
+                                      "No usable face, can't sign"),
                                text_color=theme.SUCCESS if row.get("face") == "Verified" else theme.WARNING)
         item["face"].grid(row=1, column=1, sticky="e")
     item["subtitle"].configure(text=metadata)

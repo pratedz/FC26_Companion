@@ -105,14 +105,14 @@ class SignListPanel:
         # Checkout is the Sign page's one primary action.
         self.checkout_button = button(self.checkout_host, "Checkout", on_checkout, kind="primary",
                                       height=theme.BTN_LG, width=1,
-                                      disabled_reason="Add a verified card to your bag first.")
+                                      disabled_reason="Add a usable card to your bag first.")
         self.checkout_button.pack(fill="x")
         muted_label(self.checkout_host, "You review safe targets before anything is signed.",
                     size=theme.T_CAPTION).pack(pady=(theme.SP1, 0))
         self.empty_row = ctk.CTkFrame(self.host, fg_color="transparent")
         muted_label(
             self.empty_row,
-            "Your bag is empty. Double-click a verified card, or tick cards and choose Add to bag.",
+            "Your bag is empty. Double-click a usable card, or tick cards and choose Add to bag.",
             size=theme.T_SMALL,
             wraplength=220,
             justify="left",
@@ -193,7 +193,7 @@ class SignListPanel:
         n = len(items)
         update_pill(self.count_pill, str(n), tone="info" if n else "muted")
         self.checkout_button.configure(text=f"Checkout ({n} player{'s' if n != 1 else ''})" if n else "Checkout")
-        set_disabled(self.checkout_button, "" if n else "Add a verified card to your bag first.")
+        set_disabled(self.checkout_button, "" if n else "Add a usable card to your bag first.")
         for child in list(self.body.winfo_children()):
             try:
                 child.destroy()

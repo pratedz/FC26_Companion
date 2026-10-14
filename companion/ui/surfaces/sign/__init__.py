@@ -49,7 +49,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     root = surface_root(parent)
     view = vm if isinstance(vm, dict) else {}
     defaults = {"query": "", "year": "", "ovr_min": "", "ovr_max": "", "pos": "", "source": "",
-                "verified_only": True, "best_only": True, "formation": INDIVIDUAL_PLAYERS,
+                "verified_only": False, "best_only": True, "formation": INDIVIDUAL_PLAYERS,
                 "force_age": False, "age": "25", "grok_prompt": "", "grok_count": "3",
                 "results_generation": 0, "grok_generation": 0, "selected_key": "", "sign_list": (),
                 "discovery_mode": "Search", "discovery_cache": {}}
@@ -60,7 +60,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
             "rows": view["rows"], "selected_key": view.get("selected_key", ""),
             "checked_keys": view.get("checked_keys", ())}
     section_header(root, "Sign players", subtitle=
-                   "Search verified cards, add them to your bag, then check out once to review safe free-agent targets.")
+                   "Search cards with real or safe generic faces, add them to your bag, then review the free-agent targets.")
     readiness_host = ctk.CTkFrame(root, fg_color="transparent", height=1)
     readiness_host.pack(fill="x")
     _readiness(readiness_host, svc, svc.store.snapshot(), view)
@@ -125,13 +125,14 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
             if not lineup.valid:
                 _report_invalid_lineup(svc, lineup)
                 return
-            if preview.face_verified_count != preview.selected_count:
-                missing = ", ".join(
-                    entry.name for entry in preview.entries if not entry.face_verified
-                )
+            missing = ", ".join(
+                entry.name for entry in preview.entries
+                if getattr(entry.plan, "face_status", "Missing") == "Missing"
+            )
+            if missing:
                 raise RuntimeError(
-                    "Verified FC26 real face is unavailable for " + missing + ". "
-                    "Replace those card(s); this draft will not silently keep a dummy face."
+                    "No safe FC26 face template is available for " + missing + ". "
+                    "Repair the FC26 base-player data before checkout."
                 )
             save_view()
             _LOG.info(
@@ -177,7 +178,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         if bag is not None and refs.get("checkout_count") != n:
             refs["checkout_count"] = n
             bag.checkout_button.configure(text=f"Checkout ({n} player{'s' if n != 1 else ''})" if n else "Checkout")
-            set_disabled(bag.checkout_button, "" if n else "Add a verified card to your bag first.")
+            set_disabled(bag.checkout_button, "" if n else "Add a usable card to your bag first.")
         search.sync_add_button()
         details = refs.get("details")
         if details is not None:

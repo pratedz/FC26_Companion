@@ -12,7 +12,7 @@ from .._common import set_status
 
 
 def can_add(row: Mapping[str, Any]) -> bool:
-    return row.get("face") == "Verified" and not (row.get("_raw") or row).get("_history")
+    return row.get("face") in {"Verified", "Generic", "Fallback"} and not (row.get("_raw") or row).get("_history")
 
 
 class CardResults:

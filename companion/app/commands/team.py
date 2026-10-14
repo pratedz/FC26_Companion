@@ -15,7 +15,7 @@ import json
 from ... import SIGN_CORE_MIN, core_at_least
 from ...domain.card_import import forced_birthdate_for_age
 from ...domain.job import Grants, Job, JobValidationError, is_sign_job_label, op_add_to_team
-from ...platform.base_players import resolve_card_base_profile
+from ...platform.base_players import resolve_card_base_profile, generic_signing_appearance
 from ..services import Services
 from .apply import submit_job
 
@@ -53,6 +53,7 @@ class TeamCardPlan:
     # and hoping a custom row wins the next UI cache refresh.
     name_strategy: str = "custom"
     warnings: tuple[str, ...] = ()
+    face_status: str = "Verified"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +74,7 @@ class TeamAddEntry:
     def face_verified(self) -> bool:
         # ``prepare_card_for_team`` only fills this map from a verified FC26
         # base profile. A non-empty map is therefore an honest real-face check.
-        return bool(self.plan.face)
+        return bool(self.plan.face) and self.plan.face_status == "Verified"
 
 @dataclass(frozen=True, slots=True)
 class TeamAddPreview:
@@ -119,6 +120,10 @@ def prepare_card_for_team(
     fields.pop("usercaneditname", None)
     warnings = list(stats.warnings)
     base = resolve_card_base_profile(card)
+    metadata = dict(card)
+    lookup = getattr(svc.catalog, "signing_metadata", None)
+    if base is None and callable(lookup):
+        metadata.update(lookup(card))
     name_strategy = "custom"
     if base is not None:
         for field in ("nationality", "gender"):
@@ -136,6 +141,19 @@ def prepare_card_for_team(
             # leave the dummy's custom-name flag set when using them.
             fields["usercaneditname"] = 0
             name_strategy = "native_ids"
+    else:
+        gender = _as_int(metadata.get("gender"))
+        if gender in (0, 1):
+            fields["gender"] = gender
+        nationality = _as_int(metadata.get("nationality") or metadata.get("nationality_id"))
+        if nationality is not None and nationality > 0:
+            fields["nationality"] = nationality
+        if forced_age is None and metadata.get("dateOfBirth"):
+            from datetime import date
+            try:
+                fields["birthdate"] = (date.fromisoformat(str(metadata["dateOfBirth"])[:10]) - date(1582, 10, 14)).days
+            except ValueError:
+                pass
     if forced_age is not None:
         fields["birthdate"] = forced_birthdate_for_age(forced_age)
     elif "birthdate" not in fields:
@@ -164,18 +182,31 @@ def prepare_card_for_team(
     face: dict[str, Any] = {}
     if base is not None and base.face_verified:
         face.update(base.appearance)
+        face_status = "Verified"
+    elif base is not None:
+        face_status = "Generic"
+        face.update(generic_signing_appearance(base, gender=int(base.identity.get("gender", 0))))
+        warnings.append("No scanned FC26 face was found; this player's native generic appearance will be used.")
     else:
-        warnings.append("Verified FC26 real face unavailable; the dummy face is retained.")
+        face_status = "Fallback"
+        face.update(generic_signing_appearance(None, gender=int(fields.get("gender", 0))))
+        warnings.append("This player's real face is unavailable in FC26; a same-gender generic template will be used.")
+    if face_status != "Verified" and not face:
+        face_status = "Missing"
+        warnings.append("No safe generic appearance template is available; repair the FC26 base-player data.")
     return TeamCardPlan(
         fields=fields,
-        names=_names(card),
+        names=_names(metadata),
         face=face,
         name_strategy=name_strategy,
         warnings=tuple(dict.fromkeys(warnings)),
+        face_status=face_status,
     )
 
 
 def _player_payload(plan: TeamCardPlan) -> dict[str, Any]:
+    if plan.face_status == "Missing":
+        raise JobValidationError("No safe FC26 face template is available. Repair the FC26 base-player data before signing.")
     return {
         "fields": dict(plan.fields),
         "names": dict(plan.names),
@@ -488,6 +519,10 @@ def _preview_signature(preview: TeamAddPreview) -> tuple[tuple[Any, ...], ...]:
             entry.dummy_name,
             entry.dummy_overall,
             entry.face_verified,
+            entry.plan.face_status,
+            tuple(sorted(entry.plan.face.items())),
+            tuple(sorted(entry.plan.fields.items())),
+            tuple(sorted(entry.plan.names.items())),
             tuple(entry.plan.warnings),
         )
         for entry in preview.entries

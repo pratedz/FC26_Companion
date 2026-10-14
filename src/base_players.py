@@ -281,3 +281,15 @@ def resolve(playerid: Any) -> Dict[str, Any]:
 
 def clear_cache() -> None:
     _index.cache_clear()
+    generic_template.cache_clear()
+
+
+@lru_cache(maxsize=2)
+def generic_template(gender: int = 0) -> Optional[Dict[str, str]]:
+    """One native generic template of the requested EA gender, never a real head."""
+    for _pid, row in sorted(_index().items()):
+        if (_as_int(row.get("gender")) == gender
+                and _as_int(row.get("headclasscode")) == 1
+                and (_as_int(row.get("headtypecode"), 0) or 0) > 0):
+            return dict(row)
+    return None

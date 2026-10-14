@@ -162,6 +162,7 @@ class LocalCatalog:
         self.catalog_path = Path(catalog_path) if catalog_path else None
         self.universe_path = Path(universe_path) if universe_path else None
         self.state_db = state_db
+        self._signing_metadata_cache: dict[int, tuple[tuple[int, int], dict[tuple[str, str], dict[str, Any]]]] = {}
 
     @property
     def available(self) -> bool:
@@ -426,6 +427,39 @@ class LocalCatalog:
                  playerid=row.playerid, revision=row.revision, ovr=row.ovr)
             for row in self.state_db.favorites(limit=limit)
         )
+
+    def signing_metadata(self, card: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Exact source metadata omitted by Universe; match item, year and base person."""
+        from .card_import import card_source_playerid
+        person_id = card_source_playerid(card)
+        year = _year_number(str(card.get("year") or card.get("game") or ""))
+        item_id = str(card.get("variant_id") or card.get("eaId") or "")
+        slug = str(card.get("slug") or (f"{year}-{item_id}" if year and item_id else ""))
+        if person_id is None or year is None or not slug or not self.catalog_path or not self.catalog_path.is_file():
+            return {}
+        try:
+            stat = self.catalog_path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            cached = self._signing_metadata_cache.get(year)
+            if cached is None or cached[0] != stamp:
+                metadata = {}
+                conn = self._connect(self.catalog_path)
+                try:
+                    for found in conn.execute("SELECT slug,playerid,payload FROM cards WHERE year=?", (str(year),)):
+                        payload = json.loads(found["payload"])
+                        if not isinstance(payload, dict) or str(card_source_playerid(payload)) != found["playerid"]:
+                            continue
+                        metadata[(found["slug"], found["playerid"])] = {
+                            k: payload[k] for k in ("gender", "dateOfBirth", "nationality", "firstName", "lastName", "nickname") if k in payload
+                        }
+                finally:
+                    conn.close()
+                self._signing_metadata_cache[year] = (stamp, metadata)
+                cached = self._signing_metadata_cache[year]
+            return dict(cached[1].get((slug, str(person_id)), {}))
+        except (sqlite3.Error, ValueError, TypeError):
+            return {}
+
 
     @staticmethod
     def _favorite_identity(card: Mapping[str, Any]) -> tuple[str, str, str]:

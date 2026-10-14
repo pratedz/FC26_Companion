@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
 
 datas = [('ingame', 'ingame'), ('profiles.json', '.'), ('docs/schema', 'docs/schema'), ('C:/Users/prated/AppData/Local/Programs/Python/Python313/tcl/tcl8.6', '_tcl_data'), ('C:/Users/prated/AppData/Local/Programs/Python/Python313/tcl/tk8.6', '_tk_data'), ('C:/Users/prated/AppData/Local/Programs/Python/Python313/Lib/tkinter', 'tkinter'), ('assets', 'assets'), ('web', 'web')]
 binaries = [('C:/Users/prated/AppData/Local/Programs/Python/Python313/DLLs/tcl86t.dll', '.'), ('C:/Users/prated/AppData/Local/Programs/Python/Python313/DLLs/tk86t.dll', '.'), ('C:/Users/prated/AppData/Local/Programs/Python/Python313/DLLs/_tkinter.pyd', '.')]
@@ -17,8 +18,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['C:/Users/prated/Desktop/FC 26 LE v26.3.5/LE_Profile_Executor/app_entry_v2.py'],
-    pathex=['C:/Users/prated/Desktop/FC 26 LE v26.3.5/LE_Profile_Executor'],
+    [str(Path(SPECPATH) / 'app_entry_v2.py')],
+    pathex=[SPECPATH],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

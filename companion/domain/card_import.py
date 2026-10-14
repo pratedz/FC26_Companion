@@ -161,7 +161,7 @@ FORBIDDEN_SOURCE_FIELDS = frozenset(
 
 def card_source_playerid(card: Mapping[str, Any]) -> int | None:
     """Resolve the base person represented by a card, never its variant id."""
-    for key in ("person_id", "base_player_id", "baseid", "baseId", "playerid"):
+    for key in ("person_id", "basePlayerEaId", "base_id", "base_player_id", "baseid", "baseId", "playerid"):
         raw = card.get(key)
         if raw in (None, "") or isinstance(raw, bool):
             continue

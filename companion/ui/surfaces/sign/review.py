@@ -21,6 +21,20 @@ def _confirm_add_label(count: int) -> str:
     return "Apply 1 signing" if n == 1 else f"Apply {n} signings"
 
 
+def face_label(entry: Any) -> str:
+    status = getattr(getattr(entry, "plan", None), "face_status", "Verified")
+    return {"Verified": "Real face verified", "Generic": "Native generic face",
+            "Fallback": "Generic fallback"}.get(status, "Face unavailable")
+
+
+def face_summary(preview: Any) -> str:
+    real = sum(face_label(entry) == "Real face verified" for entry in preview.entries)
+    generic = preview.selected_count - real
+    if not generic:
+        return "Every selected player has a verified real FC26 face."
+    return f"{real} verified real face{'s' if real != 1 else ''}, {generic} generic face{'s' if generic != 1 else ''}. Generic faces do not reproduce the player's real likeness."
+
+
 def _open_review_window(
     root: Any,
     svc: Any,
@@ -99,9 +113,10 @@ def _open_review_window(
     ).pack(anchor="w", padx=theme.SP3, pady=(0, 2))
     muted_label(
         header,
-        "Only cards with a verified face are in this list.",
+        face_summary(preview),
         size=10,
-        color=theme.SUCCESS,
+        color=theme.SUCCESS if preview.face_verified_count == preview.selected_count else theme.WARNING,
+        wraplength=690,
     ).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP1))
     muted_label(
         header,
@@ -137,7 +152,9 @@ def _open_review_window(
             )
             text_label(row, name, size=12, width=205).pack(side="left", padx=(0, theme.SP1))
             muted_label(row, f"OVR {ovr} - {native}", size=10).pack(side="left")
-            muted_label(row, "real face verified", size=10, color=theme.SUCCESS).pack(
+            matched = next((entry for entry in preview.entries if entry.card == card), None)
+            label = face_label(matched) if matched is not None else "Face unavailable"
+            muted_label(row, label, size=10, color=theme.SUCCESS if label == "Real face verified" else theme.WARNING).pack(
                 side="right", padx=theme.SP2
             )
     else:
@@ -161,7 +178,8 @@ def _open_review_window(
                 size=10,
                 color=theme.WARNING,
             ).pack(side="left", padx=(theme.SP2, 0))
-            muted_label(row, "real face verified", size=10, color=theme.SUCCESS).pack(
+            label = face_label(entry)
+            muted_label(row, label, size=10, color=theme.SUCCESS if label == "Real face verified" else theme.WARNING).pack(
                 side="right", padx=theme.SP2
             )
 
