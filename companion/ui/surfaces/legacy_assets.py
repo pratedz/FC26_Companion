@@ -22,7 +22,7 @@ def _wrapped(parent: Any, text: str, *, size: int = 11, muted: bool = True, **kw
 def build(host: Any, svc: Any) -> Any:
     root = ctk.CTkScrollableFrame(host, fg_color="transparent")
     root.pack(fill="both", expand=True)
-    text_label(root, "Game assets", size=16, bold=True).pack(anchor="w", pady=(theme.SP2, theme.SP1))
+    text_label(root, "Game assets", size=theme.T_HEADING, bold=True).pack(anchor="w", pady=(theme.SP2, theme.SP1))
     _wrapped(root, "Check and export files from the running game. Exports stay inside Companion.").pack(fill="x", pady=(0, theme.SP2))
     readiness = _wrapped(root, "")
     readiness.pack(fill="x", pady=(0, theme.SP2))

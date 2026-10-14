@@ -35,7 +35,7 @@ from .. import theme
 from ..widgets.primitives import (
     button,
     ensure_ctk,
-    eyebrow,
+    section_title,
     muted_label,
     panel,
     pill,
@@ -196,7 +196,7 @@ def _open_template_planner(svc: Any, plan: SquadPlan) -> None:
 
     header = panel(win, level=1)
     header.pack(fill="x", padx=theme.SP3, pady=theme.SP3)
-    text_label(header, "SQUAD PLANNER", size=16, bold=True).pack(
+    text_label(header, "Squad Planner", size=theme.T_TITLE, display=True).pack(
         anchor="w", padx=theme.SP3, pady=(theme.SP2, 2)
     )
     subtitle = muted_label(header, plan.blast_summary(), size=12)
@@ -1426,28 +1426,6 @@ def _stage_manual(
         except Exception:
             pass
         set_status(svc, f"Manual template: {exc}")
-
-
-def _connect_grok(svc: Any, status_lbl: Any = None) -> None:
-    try:
-        from ...integrations.grok import use_build_session
-
-        st = use_build_session()
-        msg = st.message
-        if status_lbl is not None:
-            try:
-                status_lbl.configure(text=msg)
-            except Exception:
-                pass
-        set_status(svc, msg)
-    except Exception as exc:  # noqa: BLE001
-        msg = str(exc)
-        if status_lbl is not None:
-            try:
-                status_lbl.configure(text=msg)
-            except Exception:
-                pass
-        set_status(svc, msg)
 
 
 def _propose_grok(

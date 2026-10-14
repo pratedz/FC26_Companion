@@ -14,6 +14,7 @@ from ..widgets.primitives import (
     button,
     muted_label,
     panel,
+    restyle_button,
     set_disabled,
     soft_fill,
     text_label,
@@ -36,46 +37,28 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     view.setdefault("status", "")
     view.setdefault("scanned", False)
 
+    controls: dict[str, Any] = {"scan": None, "cure": None}
+
+    def header_actions(holder: Any) -> Any:
+        row = ctk.CTkFrame(holder, fg_color="transparent")
+        controls["scan"] = button(
+            row, "Scan squad", None, kind="primary", icon="search",
+            height=theme.BTN_MD, width=128,
+        )
+        controls["scan"].pack(side="right")
+        controls["cure"] = button(
+            row, "Heal injured", None, kind="secondary", icon="medical",
+            height=theme.BTN_MD, width=140,
+        )
+        controls["cure"].pack(side="right", padx=(0, theme.SP2))
+        return row
+
     section_header(
         root,
         "Injuries",
-        subtitle="Review squad injuries and help your players return to action.",
+        subtitle="Scan the open Career squad, then heal one player or everyone listed.",
+        trailing=header_actions,
     )
-
-    actions = panel(root, level=1)
-    actions.pack(fill="x", pady=(0, theme.SP3))
-    action_row = ctk.CTkFrame(actions, fg_color="transparent")
-    action_row.pack(fill="x", padx=theme.SP3, pady=theme.SP3)
-
-    controls: dict[str, Any] = {"scan": None, "cure": None}
-
-    btn_col = ctk.CTkFrame(action_row, fg_color="transparent")
-    btn_col.pack(side="left", fill="y")
-
-    controls["scan"] = button(
-        btn_col,
-        "Scan squad",
-        None,
-        kind="accent",
-        height=theme.BTN_LG,
-        width=132,
-    )
-    controls["scan"].pack(side="left")
-    controls["cure"] = button(
-        btn_col,
-        "Heal injured",
-        None,
-        kind="secondary",
-        height=theme.BTN_LG,
-        width=140,
-    )
-    controls["cure"].pack(side="left", padx=(theme.SP2, 0))
-
-    muted_label(
-        actions,
-        "Scan your squad, review the list, then heal one player or everyone listed.",
-        size=11, wraplength=480, justify="left",
-    ).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP2))
 
     body = ctk.CTkFrame(root, fg_color="transparent")
     body.pack(fill="both", expand=True)
@@ -87,7 +70,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
             except Exception:
                 pass
 
-    def _wrapped(host: Any, text: str, *, size: int = 12, color: str | None = None) -> Any:
+    def _wrapped(host: Any, text: str, *, size: int = theme.T_SMALL, color: str | None = None) -> Any:
         label = muted_label(host, text, size=size, color=color, wraplength=360, justify="left")
         label.pack(fill="x", anchor="w")
         def resize(event: Any) -> None:
@@ -109,7 +92,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         row.pack(fill="x", padx=theme.SP2, pady=(0, theme.SP1))
 
         inner = ctk.CTkFrame(row, fg_color="transparent")
-        inner.pack(fill="x", padx=theme.SP2, pady=theme.SP2)
+        inner.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
 
         mono = ctk.CTkFrame(
             inner,
@@ -120,22 +103,21 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
             border_width=1,
             border_color=theme.DANGER,
         )
-        mono.pack(side="left", padx=(0, theme.SP2))
+        mono.pack(side="left", padx=(0, theme.SP3))
         mono.pack_propagate(False)
-        text_label(mono, letters[:2], size=11, bold=True, color=theme.DANGER).pack(
-            expand=True
-        )
+        text_label(mono, letters[:2], size=theme.T_CAPTION, bold=True,
+                   color=theme.DANGER_TEXT).pack(expand=True)
 
         heal = button(inner, "Heal", lambda pid=player["playerid"]: do_cure([pid]),
-                      kind="secondary", width=72, height=theme.BTN_MD)
+                      kind="secondary", width=80, height=theme.BTN_MD)
         heal.pack(side="right", padx=(theme.SP2, 0))
         set_disabled(heal, "Working…" if view.get("busy") else "")
         names = ctk.CTkFrame(inner, fg_color="transparent")
         names.pack(side="left", fill="x", expand=True)
-        text_label(names, name, size=15, bold=True).pack(anchor="w")
+        text_label(names, name, size=theme.T_BODY, bold=True).pack(anchor="w")
         expected = injury_cmd.return_date_label(player.get("return_date"))
-        description = f"Expected return · {expected}" if expected else injury
-        _wrapped(names, description, size=12, color=theme.WARNING)
+        description = f"Expected return  ·  {expected}" if expected else injury
+        _wrapped(names, description, size=theme.T_SMALL, color=theme.WARNING)
 
     def refresh_list() -> None:
         _clear(body)
@@ -158,7 +140,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
             banner.pack(fill="x", padx=theme.SP3, pady=theme.SP3)
             text_label(
                 banner, "Could not heal all players" if view.get("operation") == "cure" else "Could not read injuries",
-                size=14, bold=True, color=theme.DANGER
+                size=theme.T_BODY, bold=True, color=theme.DANGER_TEXT
             ).pack(anchor="w", padx=theme.SP3, pady=(theme.SP2, 2))
             message = ctk.CTkFrame(banner, fg_color="transparent")
             message.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP3))
@@ -186,12 +168,26 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
                 title = "Check your squad for injuries"
                 helper = "Scan the squad to list injured players by name."
 
-            text_label(card, title, size=14, bold=True).pack(
-                anchor="w", padx=theme.SP3, pady=(theme.SP3, 2)
-            )
-            message = ctk.CTkFrame(card, fg_color="transparent")
-            message.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP3))
-            _wrapped(message, helper)
+            from ..icons import ctk_icon
+            from ..widgets.states import loading_row
+
+            empty = ctk.CTkFrame(card, fg_color="transparent")
+            empty.pack(fill="x", padx=theme.SP5, pady=theme.SP5)
+            if busy:
+                loading_row(empty, title).pack(anchor="w")
+            else:
+                image = ctk_icon("medical" if not view.get("scanned") else "success", 32,
+                                 tint=theme.ACCENT if not view.get("scanned") else theme.SUCCESS)
+                if image is not None:
+                    ctk.CTkLabel(empty, text="", image=image).pack(side="left", anchor="n",
+                                                                   padx=(0, theme.SP4))
+                words = ctk.CTkFrame(empty, fg_color="transparent")
+                words.pack(side="left", fill="x", expand=True)
+                text_label(words, title, size=theme.T_HEADLINE, display=True).pack(anchor="w")
+                message = ctk.CTkFrame(words, fg_color="transparent")
+                message.pack(fill="x", pady=(theme.SP1, 0))
+                _wrapped(message, helper if view.get("scanned") or status else
+                         "Scan squad reads injuries from the open Career save. Nothing is changed until you heal.")
             return
 
         n = len(players)
@@ -200,15 +196,15 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         text_label(
             header,
             f"{n} injured player{'s' if n != 1 else ''}",
-            size=18,
-            bold=True,
+            size=theme.T_HEADLINE,
+            display=True,
         ).pack(anchor="w")
         muted_label(
             header,
             f"Checked {view.get('covered', 'your')} squad players. Healing also restores full fitness."
             if not curing
             else "Clearing injuries for the listed players…",
-            size=12, wraplength=480, justify="left",
+            size=theme.T_SMALL, wraplength=480, justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
         scroll = themed_scroll(card, fill=theme.CARD, height=280)
@@ -224,12 +220,22 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
                 pass
 
         if status:
-            muted_label(card, status, size=10).pack(
+            muted_label(card, status, size=theme.T_CAPTION).pack(
                 anchor="w", padx=theme.SP3, pady=(theme.SP1, theme.SP3)
             )
 
     def set_busy(busy: bool, *, reason: str = "") -> None:
         view["busy"] = busy
+        # One primary: Scan until there is a list, then Heal.
+        listed = bool(view.get("players"))
+        if controls.get("scan") is not None and controls.get("cure") is not None:
+            restyle_button(controls["scan"], "secondary" if listed else "primary")
+            restyle_button(controls["cure"], "primary" if listed else "secondary")
+            try:
+                n = len(view.get("players") or [])
+                controls["cure"].configure(text=f"Heal all {n}" if n > 1 else "Heal injured")
+            except Exception:
+                pass
         for key in ("scan", "cure"):
             widget = controls.get(key)
             if widget is None:

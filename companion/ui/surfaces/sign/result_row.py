@@ -4,7 +4,8 @@ from typing import Any
 import customtkinter as ctk
 
 from ... import theme
-from ...widgets.primitives import button, muted_label, text_label
+from ...icons import ctk_icon
+from ...widgets.primitives import button, muted_label, shade, text_label
 from .._common import monogram
 
 
@@ -13,31 +14,34 @@ def mount(owner: Any) -> dict[str, Any]:
     frame = ctk.CTkFrame(owner.scroll.inner, fg_color=theme.CARD, border_width=1,
                          border_color=theme.BORDER, corner_radius=theme.R_SM)
     inner = ctk.CTkFrame(frame, fg_color="transparent")
-    inner.pack(fill="x", padx=9, pady=9)
+    inner.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
     check_var = ctk.BooleanVar(value=False)
     check = ctk.CTkCheckBox(inner, text="", width=18, variable=check_var,
-                           checkbox_width=16, checkbox_height=16, border_width=1,
-                           fg_color=theme.ACCENT, border_color=theme.MUTED_DIM,
+                           checkbox_width=16, checkbox_height=16, border_width=2,
                            command=lambda: owner._check(item["row"]))
-    mono = text_label(inner, "", width=32, height=32, size=11, bold=True,
-                      fg_color=theme.CARD_HOVER, corner_radius=16, color=theme.ACCENT)
-    mono.pack(side="left", padx=(0, 8))
+    # A tinted tile that stays visible on both the resting and selected row fill.
+    mono = text_label(inner, "", width=34, height=34, size=theme.T_CAPTION, bold=True,
+                      fg_color=shade(theme.ACCENT, 0.18), corner_radius=17, color=theme.ACCENT)
+    mono.pack(side="left", padx=(0, theme.SP3))
     actions = ctk.CTkFrame(inner, fg_color="transparent")
-    actions.pack(side="right", padx=(6, 0))
-    fav = button(actions, "☆", lambda: owner._favourite(item["row"]), kind="ghost", width=28, height=28)
-    add = button(actions, "+ Add", lambda: owner.on_row_activate(item["row"]), kind="secondary", width=64, height=28)
-    club = muted_label(inner, "", size=11, width=100)
+    actions.pack(side="right", padx=(theme.SP2, 0))
+    fav = button(actions, "", lambda: owner._favourite(item["row"]), kind="ghost", width=30,
+                 height=theme.BTN_SM, image=ctk_icon("star", 14, tint=theme.MUTED))
+    add = button(actions, "Add", lambda: owner.on_row_activate(item["row"]), kind="secondary",
+                 width=72, height=theme.BTN_SM, icon="add")
+    club = muted_label(inner, "", size=theme.T_CAPTION, width=110, anchor="w")
     copy = ctk.CTkFrame(inner, fg_color="transparent", width=80)
     copy.pack(side="left", fill="x", expand=True)
     copy.grid_columnconfigure(0, weight=1)
-    title = text_label(copy, "", size=13, bold=True, anchor="w", width=1, wraplength=180, justify="left")
+    title = text_label(copy, "", size=theme.T_BODY, bold=True, anchor="w", width=1, wraplength=180,
+                       justify="left")
     title.grid(row=0, column=0, sticky="ew")
-    rating = text_label(copy, "", width=28, height=22, size=11, bold=True,
+    rating = text_label(copy, "", width=34, height=24, size=theme.T_BODY, display=True,
                         corner_radius=4, anchor="center")
-    subtitle = muted_label(copy, "", size=10, anchor="w", width=1)
-    subtitle.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-    face = muted_label(copy, "", size=10)
-    reason = muted_label(copy, "", size=10, wraplength=220, justify="left")
+    subtitle = muted_label(copy, "", size=theme.T_CAPTION, anchor="w", width=1)
+    subtitle.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+    face = muted_label(copy, "", size=theme.T_CAPTION)
+    reason = muted_label(copy, "", size=theme.T_CAPTION, wraplength=220, justify="left")
 
     def resize(event: Any) -> None:
         width = max(60, event.width - 36)
@@ -88,7 +92,8 @@ def bind(owner: Any, item: dict[str, Any], row: Any) -> None:
             saved = owner.svc.catalog.is_favorite(card) if owner.svc.catalog else False
         except Exception:
             saved = False
-        item["fav"].configure(text="★" if saved else "☆", text_color=theme.ACCENT if saved else theme.MUTED)
+        item["fav"].configure(image=ctk_icon("star", 14, tint=theme.ACCENT if saved else theme.MUTED))
+        item["fav"].configure(fg_color=shade(theme.ACCENT, 0.16) if saved else "transparent")
         try:
             rating = int(row.get("ovr"))
         except (ValueError, TypeError):
@@ -101,7 +106,7 @@ def bind(owner: Any, item: dict[str, Any], row: Any) -> None:
             item["rating"].grid(row=0, column=1, padx=(6, 0))
         year, pos = str(row.get("year") or ""), str(row.get("pos") or "")
         metadata = " · ".join(p for p in (f"FC {year}" if year not in {"", "-"} else "", pos.replace(", ", " / ")) if p and p != "-")
-        item["face"].configure(text="✓" if row.get("face") == "Verified" else "No face",
+        item["face"].configure(text="Verified face" if row.get("face") == "Verified" else "No verified face, can't sign",
                                text_color=theme.SUCCESS if row.get("face") == "Verified" else theme.WARNING)
         item["face"].grid(row=1, column=1, sticky="e")
     item["subtitle"].configure(text=metadata)

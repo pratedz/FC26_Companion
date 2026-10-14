@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import theme
-from .primitives import ARROW, EM_DASH, ensure_ctk, mono_font, ui_font
+from .primitives import ARROW, EM_DASH, display_font, ensure_ctk, ui_font
 
 try:  # pragma: no cover
     import customtkinter as ctk
@@ -33,10 +33,10 @@ except ImportError:  # pragma: no cover
 
 #: (width, height, font size) per chip size.
 _SIZES: dict[str, tuple[int, int, int]] = {
-    "xs": (26, 20, 11),
-    "sm": (32, 24, 12),
-    "md": (40, 30, 15),
-    "lg": (56, 42, 22),
+    "xs": (28, 20, theme.T_SMALL),
+    "sm": (34, 24, theme.T_BODY),
+    "md": (44, 32, theme.T_HEADLINE),
+    "lg": (60, 44, theme.T_SCORE),
 }
 
 
@@ -166,7 +166,7 @@ def ovr_chip(parent: Any, value: Any, *, size: str = "md", caption: str = "") ->
     ctk.CTkLabel(
         frame,
         text=ovr_text(number),
-        font=mono_font(fs, bold=True),
+        font=display_font(fs),
         text_color=fg if number is not None else theme.MUTED_DIM,
     ).pack(expand=True)
     if caption:
@@ -196,7 +196,7 @@ def ovr_delta_chips(
     ctk.CTkLabel(
         row,
         text=ARROW,
-        font=ui_font(max(11, fs - 2), bold=True),
+        font=ui_font(theme.T_BODY, bold=True),
         text_color=theme.MUTED,
         width=22,
     ).pack(side="left", padx=theme.SP1)
@@ -206,7 +206,7 @@ def ovr_delta_chips(
         ctk.CTkLabel(
             row,
             text=delta.signed,
-            font=ui_font(max(10, fs - 4), bold=True),
+            font=display_font(theme.T_BODY if fs <= theme.T_HEADLINE else theme.T_HEADLINE),
             text_color=theme.tone_fg(delta.tone),
         ).pack(side="left", padx=(theme.SP2, 0))
 
@@ -229,7 +229,7 @@ def ovr_band_legend(parent: Any) -> Any:
         ctk.CTkLabel(
             cell,
             text=theme.ovr_band(ceiling),
-            font=ui_font(9),
-            text_color=theme.MUTED_DIM,
+            font=ui_font(theme.T_MICRO),
+            text_color=theme.MUTED,
         ).pack(pady=(2, 0))
     return frame

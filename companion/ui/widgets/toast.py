@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from .. import theme
-from .primitives import ensure_ctk, text_label, ui_font
+from .primitives import ensure_ctk, shade, text_label
 
 try:  # pragma: no cover
     import customtkinter as ctk
@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover
 _AUTO_DISMISS_MS = 4000
 _MAX_VISIBLE = 3
 _STICKY_TONES = frozenset({"error"})
+_TONE_ICONS = {"ok": "success", "warn": "warning", "error": "warning", "info": "info"}
 
 
 class ToastHost:
@@ -37,7 +38,8 @@ class ToastHost:
             corner_radius=0,
             border_width=0,
         )
-        self._bottom_offset = 70
+        # Above the page's own bottom action bar (Club, Sign), never on it.
+        self._bottom_offset = 96
         self._placed = False
         self._items: list[Any] = []
 
@@ -57,40 +59,43 @@ class ToastHost:
         while len(self._items) >= _MAX_VISIBLE:
             self._dismiss(self._items[0])
 
-        fill, fg = theme.tone_colors(tone)
+        from ..icons import ctk_icon
+
+        fill, _fg = theme.tone_colors(tone)
         card = ctk.CTkFrame(
             self._stack,
-            fg_color=theme.CARD,
-            corner_radius=theme.R_SM,
+            fg_color=theme.CARD_HOVER,
+            corner_radius=theme.R_MD,
             border_width=1,
-            border_color=fill,
+            border_color=shade(fill, 0.7) if tone != "muted" else theme.BORDER,
         )
-        card.pack(fill="x", pady=(theme.SP1, 0))
+        card.pack(fill="x", pady=(theme.SP2, 0))
         inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
+        inner.pack(fill="x", padx=theme.SP3, pady=theme.SP3)
 
-        accent = ctk.CTkFrame(inner, width=4, height=28, fg_color=fill, corner_radius=2)
-        accent.pack(side="left", padx=(0, theme.SP2))
-        accent.pack_propagate(False)
+        image = ctk_icon(_TONE_ICONS.get(tone, "info"), 18, tint=theme.tone_fg(tone))
+        if image is not None:
+            ctk.CTkLabel(inner, text="", image=image, width=20).pack(
+                side="left", anchor="n", padx=(0, theme.SP2)
+            )
 
-        label = text_label(inner, message, size=12, color=theme.TEXT)
+        label = text_label(inner, message, size=theme.T_SMALL, color=theme.TEXT)
         label.configure(wraplength=320, justify="left", anchor="w")
         label.pack(side="left", fill="x", expand=True)
 
         sticky = str(tone or "info") in _STICKY_TONES
-        if sticky:
-            close = ctk.CTkButton(
-                inner,
-                text="×",
-                width=28,
-                height=28,
-                fg_color="transparent",
-                hover_color=theme.CARD_HOVER,
-                text_color=theme.MUTED,
-                font=ui_font(14, bold=True),
-                command=lambda c=card: self._dismiss(c),
-            )
-            close.pack(side="right", padx=(theme.SP2, 0))
+        close = ctk.CTkButton(
+            inner,
+            text="",
+            image=ctk_icon("close", 12, tint=theme.MUTED),
+            width=24,
+            height=24,
+            fg_color="transparent",
+            hover_color=theme.CARD,
+            corner_radius=theme.R_XS,
+            command=lambda c=card: self._dismiss(c),
+        )
+        close.pack(side="right", anchor="n", padx=(theme.SP2, 0))
 
         self._items.append(card)
         self._place_stack()

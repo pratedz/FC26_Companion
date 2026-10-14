@@ -6,7 +6,7 @@ from typing import Any
 
 from ....domain.add_player import INDIVIDUAL_PLAYERS
 from ... import theme
-from ...widgets.primitives import button, eyebrow, muted_label, panel, text_label, themed_scroll
+from ...widgets.primitives import button, section_title, muted_label, panel, text_label, themed_scroll
 from .._common import set_status
 from .readiness import _active_add_count
 
@@ -120,7 +120,7 @@ def _open_review_window(
     scroll.pack(fill="both", expand=True, padx=theme.SP3, pady=(0, theme.SP2))
     body = scroll.inner
     if lineup.formation != INDIVIDUAL_PLAYERS:
-        eyebrow(body, f"Formation — {lineup.formation}").pack(anchor="w")
+        section_title(body, f"Formation — {lineup.formation}").pack(anchor="w")
         for reviewed in lineup.slots:
             card = reviewed.card or {}
             name = str(card.get("name") or card.get("playername") or "Missing")
@@ -141,7 +141,7 @@ def _open_review_window(
                 side="right", padx=theme.SP2
             )
     else:
-        eyebrow(body, "Selected players").pack(anchor="w")
+        section_title(body, "Selected players").pack(anchor="w")
         for entry in preview.entries:
             row = panel(body, level=1)
             row.pack(fill="x", pady=(theme.SP1, 0))
@@ -168,7 +168,7 @@ def _open_review_window(
     if preview.warnings:
         warning = panel(body, level=1)
         warning.pack(fill="x", pady=(theme.SP2, 0))
-        eyebrow(warning, "Card notes").pack(
+        section_title(warning, "Card notes").pack(
             anchor="w", padx=theme.SP2, pady=(theme.SP1, 0)
         )
         for note in preview.warnings:

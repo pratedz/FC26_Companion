@@ -161,6 +161,7 @@ def main() -> int:
         "--noconfirm", "--clean",
         "--name", APP_NAME,
         "--windowed", "--onedir",
+        "--icon", str(ROOT / "assets" / "app.ico"),
         # Separate from v1's _internal/ so both exes can live in the project root.
         "--contents-directory", "_internal_v2",
         "--paths", str(ROOT),

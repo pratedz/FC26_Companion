@@ -39,8 +39,9 @@ from .. import theme
 from .primitives import (
     EM_DASH,
     bind_pointer_wheel,
+    display_font,
     ensure_ctk,
-    mono_font,
+    num_font,
     provenance_color,
     register_wheel_region,
     release_wheel_region,
@@ -56,10 +57,12 @@ except ImportError:  # pragma: no cover
 
 Row = Mapping[str, Any]
 
-#: A6: rows are 26 px of content inside a 32 px click band.
-ROW_HEIGHT = 28
-HEADER_HEIGHT = 28
-CHECK_WIDTH = 30
+#: A6: rows are tall enough to aim at; the whole row is the click band.
+ROW_HEIGHT = 30
+HEADER_HEIGHT = 30
+CHECK_WIDTH = 32
+#: OVR cells render as a centred tier chip of this width, never column-wide.
+OVR_CHIP_WIDTH = 34
 #: Rows advanced per mouse-wheel notch (flushed once per idle cycle).
 WHEEL_ROWS = 3
 #: Opt-in ``fill_available`` pool: enough rows for a windowed panel, not a stadium.
@@ -128,11 +131,17 @@ class Column:
     stretch: bool = False     # absorbs leftover width (exactly one, usually NAME)
     format: Callable[[Row], str] | None = None
     tone: Callable[[Row], str] | None = None
-    kind: str = ""  # "" | "ovr" — ovr cells paint as colour chips
+    kind: str = ""  # "" | "ovr" (tier chip) | "pos" (position-group colour)
+    #: 0 = always shown. When the grid is too narrow, the highest priority
+    #: column is hidden first, so a name is never squeezed to make room for AGE.
+    priority: int = 0
+    #: Cap for a stretch column. On a wide window an uncapped NAME pushed the
+    #: ratings 900 px away from the names they belong to.
+    max_width: int = 0
 
     @property
     def anchor(self) -> str:
-        if self.align == "center":
+        if self.align == "center" or self.kind == "ovr":
             return "center"
         return "e" if (self.align == "e" or self.numeric) else "w"
 
@@ -456,9 +465,13 @@ class DataGrid:
         on_row_activate: Callable[[Row], None] | None = None,
         on_selection_change: Callable[[tuple[Row, ...]], None] | None = None,
         on_sort: Callable[[str, bool], None] | None = None,
+        empty_text: str = "",
     ) -> None:
         ensure_ctk()
         self.model = model
+        #: Shown in the row area when there are no rows, so an empty list says why.
+        self.empty_text = empty_text
+        self._empty_label: Any = None
         self.show_checkboxes = show_checkboxes and model.multi_select
         # Roster grids can opt into cursor-only clicks: checkbox/Space then
         # remains the sole owner of the checked bulk-selection set.
@@ -480,6 +493,10 @@ class DataGrid:
         )
         self._rows: list[dict[str, Any]] = []
         self._sel_fill = shade(theme.ACCENT, 0.22)
+        #: The row the detail panel and the keyboard are on, when not ticked.
+        self._cursor_fill = shade(theme.ACCENT, 0.12)
+        self._layout_cache: tuple[int, tuple[tuple[Column, int, int], ...]] | None = None
+        self._resize_job: Any = None
         # Incremental paint: last written (text, colour, width) per (slot, col).
         # On scroll we rotate this cache so only newly-visible rows miss.
         self._painted: dict[tuple[int, str], tuple[Any, ...]] = {}
@@ -509,6 +526,16 @@ class DataGrid:
             self.widget.bind("<Destroy>", lambda _e: self._cancel_wheel(), add="+")
         except Exception:
             pass
+        try:
+            import tkinter
+
+            # Columns must follow the grid's real width: the drawer opening, a
+            # resize or the detail panel collapsing all change it after paint.
+            # The row area is what _content_width measures, and it is resized
+            # after the outer frame, so it is the one whose event matters.
+            tkinter.Misc.bind(self.canvas_host, "<Configure>", self._on_resize, add="+")
+        except Exception:
+            pass
         self.refresh()
 
     # ---- geometry forwarding -----------------------------------------
@@ -528,19 +555,87 @@ class DataGrid:
 
     # ---- layout -------------------------------------------------------
 
-    def _offsets(self, total_width: int) -> list[tuple[int, int]]:
-        """(x, width) per column, giving leftover pixels to the stretch column."""
-        fixed = sum(c.width for c in self.model.columns)
+    def _layout(self, total_width: int) -> tuple[tuple[Column, int, int], ...]:
+        """``(column, x, width)`` for the columns that fit, in unscaled pixels.
+
+        Leftover width goes to the stretch column. When the grid is narrower
+        than the columns need, optional columns (``priority > 0``) drop out,
+        highest priority first, before anything is clipped.
+        """
+        if self._layout_cache is not None and self._layout_cache[0] == total_width:
+            return self._layout_cache[1]
         lead = CHECK_WIDTH if self.show_checkboxes else 0
-        slack = max(0, total_width - lead - fixed - theme.SP2)
-        stretch = next((c for c in self.model.columns if c.stretch), None)
-        out: list[tuple[int, int]] = []
+        shown = list(self.model.columns)
+
+        def needed(columns: list[Column]) -> int:
+            return lead + sum(c.width for c in columns) + theme.SP2
+
+        while needed(shown) > total_width:
+            optional = [c for c in shown if c.priority > 0]
+            if not optional:
+                break
+            shown.remove(max(optional, key=lambda c: c.priority))
+        slack = max(0, total_width - needed(shown))
+        stretch = next((c for c in shown if c.stretch), None)
+        extra = 0
+        if stretch is not None and stretch.max_width:
+            capped = min(slack, max(0, stretch.max_width - stretch.width))
+            # Width the capped name cannot use is shared by the other columns,
+            # so the grid still reaches its right edge without a dead gap.
+            others = [c for c in shown if c is not stretch]
+            extra = (slack - capped) // len(others) if others else 0
+            slack = capped
+        out: list[tuple[Column, int, int]] = []
         x = lead
-        for column in self.model.columns:
-            w = column.width + (slack if column is stretch else 0)
-            out.append((x, w))
+        for column in shown:
+            w = column.width + (slack if column is stretch else extra)
+            out.append((column, x, w))
             x += w
-        return out
+        layout = tuple(out)
+        self._layout_cache = (total_width, layout)
+        return layout
+
+    def _offsets(self, total_width: int) -> list[tuple[int, int]]:
+        """(x, width) per *shown* column. Kept for callers that only need geometry."""
+        return [(x, w) for _c, x, w in self._layout(total_width)]
+
+    def _content_width(self) -> int:
+        """Usable width in CTk units: the row area left of the scrollbar.
+
+        ``winfo_width`` is in device pixels while CTk scales ``place(x=)`` by
+        the UI scale, so the measurement is divided back before laying out.
+        """
+        try:
+            px = int(self.canvas_host.winfo_width())
+        except Exception:
+            px = 0
+        if px <= 1:
+            return sum(c.width for c in self.model.columns) + CHECK_WIDTH
+        try:
+            scale = float(self.widget._get_widget_scaling())
+        except Exception:
+            scale = 1.0
+        return int(px / max(scale, 0.5))
+
+    def _on_resize(self, _event: Any = None) -> None:
+        if self._resize_job is not None:
+            return
+
+        def run() -> None:
+            self._resize_job = None
+            try:
+                if not self.widget.winfo_exists():
+                    return
+            except Exception:
+                return
+            if self._content_width() != self._last_width:
+                self._geom_dirty = True
+                self._paint()
+
+        try:
+            self._resize_job = self.widget.after_idle(run)
+        except Exception:
+            self._resize_job = None
 
     def _build_header(self) -> None:
         self.header = ctk.CTkFrame(
@@ -552,8 +647,8 @@ class DataGrid:
 
         if self.show_checkboxes:
             self._all_box = ctk.CTkLabel(
-                self.header, text="☐", font=ui_font(12), text_color=theme.MUTED,
-                width=CHECK_WIDTH, height=HEADER_HEIGHT,
+                self.header, text="", image=self._check_image(False),
+                width=CHECK_WIDTH, height=HEADER_HEIGHT, cursor="hand2",
             )
             self._all_box.place(x=0, y=0)
             self._all_box.bind("<Button-1>", lambda _e: self._toggle_all())
@@ -563,7 +658,7 @@ class DataGrid:
             label = ctk.CTkLabel(
                 self.header,
                 text=column.title,
-                font=ui_font(10, bold=True),
+                font=ui_font(theme.T_MICRO, bold=True),
                 text_color=theme.MUTED,
                 anchor=column.anchor,
                 height=HEADER_HEIGHT,
@@ -655,22 +750,27 @@ class DataGrid:
         cells: dict[str, Any] = {}
         check = None
         if self.show_checkboxes:
-            check = ctk.CTkLabel(frame, text="☐", font=ui_font(12),
-                                 text_color=theme.MUTED,
-                                 width=CHECK_WIDTH, height=ROW_HEIGHT)
+            check = ctk.CTkLabel(frame, text="", image=self._check_image(False),
+                                 width=CHECK_WIDTH, height=ROW_HEIGHT, cursor="hand2")
             check.bind(
                 "<Button-1>",
                 lambda event, f=frame: self._on_check(self._slot_for_frame(f), event),
             )
             self._bind_wheel_widget(check)
         for column in self.model.columns:
+            if column.kind == "ovr":
+                font = display_font(theme.T_BODY)
+                height = ROW_HEIGHT - 8
+            else:
+                font = num_font(theme.T_SMALL) if column.numeric else ui_font(theme.T_SMALL)
+                height = ROW_HEIGHT
             cells[column.key] = ctk.CTkLabel(
                 frame,
                 text="",
-                font=mono_font(11) if column.numeric else ui_font(12),
+                font=font,
                 text_color=theme.TEXT,
                 anchor=column.anchor,
-                height=ROW_HEIGHT,
+                height=height,
             )
 
         row = {"frame": frame, "cells": cells, "check": check, "index": -1}
@@ -721,13 +821,32 @@ class DataGrid:
             "<Return>": lambda _e: self._key_activate(),
             "<Control-a>": lambda _e: self._key_select_all(),
         }
+        import tkinter
+
+        # CTkFrame.bind attaches to its inner canvas, but focus_set() focuses
+        # the frame itself, so keys bound through CTk never fired. Bind both.
         for seq, fn in bindings.items():
-            try:
-                w.bind(seq, fn, add="+")
-            except Exception:
-                pass
+            for target in (w, getattr(w, "_canvas", None)):
+                if target is None:
+                    continue
+                try:
+                    tkinter.Misc.bind(target, seq, fn, add="+")
+                except Exception:
+                    pass
         try:
             w.bind("<Button-1>", lambda _e: w.focus_set(), add="+")
+        except Exception:
+            pass
+
+        def _ring(on: bool) -> None:
+            try:
+                w.configure(border_color=theme.FOCUS if on else theme.BORDER)
+            except Exception:
+                pass
+
+        try:
+            tkinter.Misc.bind(w, "<FocusIn>", lambda _e: _ring(True), add="+")
+            tkinter.Misc.bind(w, "<FocusOut>", lambda _e: _ring(False), add="+")
         except Exception:
             pass
 
@@ -804,7 +923,7 @@ class DataGrid:
         model_row = self.model.row_at(row["index"])
         selected = model_row is not None and self.model.is_checked(model_row)
         fill = self._sel_fill if selected else (
-            theme.CARD_HOVER if on else self._zebra(row["index"])
+            theme.CARD_HOVER if on else self._rest_fill(row["index"])
         )
         if self._row_fill.get(slot) == fill:
             return
@@ -970,6 +1089,20 @@ class DataGrid:
     def _zebra(self, index: int) -> str:
         return theme.CARD if index % 2 == 0 else theme.ROW_ALT
 
+    def _rest_fill(self, index: int) -> str:
+        """Zebra, except the cursor row, which the detail panel is describing."""
+        if index == self.model.cursor and index >= 0:
+            return self._cursor_fill
+        return self._zebra(index)
+
+    @staticmethod
+    def _check_image(checked: bool) -> Any:
+        from ..icons import check_image
+
+        return check_image(
+            checked, size=16, box=theme.BORDER_STRONG, fill=theme.ACCENT, mark=theme.BG,
+        )
+
     def _max_first(self) -> int:
         return max(0, self.model.visible_count - self._pool_size)
 
@@ -1072,28 +1205,32 @@ class DataGrid:
 
     def _paint(self) -> None:
         self._paint_count += 1
-        try:
-            width = self.widget.winfo_width()
-        except Exception:
-            width = 0
-        if width <= 1:
-            width = sum(c.width for c in self.model.columns) + CHECK_WIDTH
+        width = self._content_width()
         if width != self._last_width:
             self._geom_dirty = True
             self._last_width = width
-        offsets = self._offsets(width)
+        layout = self._layout(width)
+        placed = {column.key: (x, w) for column, x, w in layout}
 
         for key, label in self._header_labels.items():
             column = self.model.column(key)
             if column is None:
                 continue
-            x, w = offsets[self.model.columns.index(column)]
-            # CTk forbids width/height in place(); they are widget properties.
+            if key not in placed:
+                if self._geom_dirty:
+                    label.place_forget()
+                    self._header_painted.pop(key, None)
+                continue
+            x, w = placed[key]
             caption = self.model.header_caption(key)
             cell_w = max(10, w - theme.SP2)
-            header_now = (caption, cell_w)
+            sorted_on = self.model.sort_key == key
+            header_now = (caption, cell_w, sorted_on)
             if self._header_painted.get(key) != header_now:
-                label.configure(text=caption, width=cell_w)
+                label.configure(
+                    text=caption, width=cell_w,
+                    text_color=theme.TEXT if sorted_on else theme.MUTED,
+                )
                 self._header_painted[key] = header_now
             if self._geom_dirty:
                 label.place(x=x + theme.SP1, y=0)
@@ -1105,7 +1242,7 @@ class DataGrid:
             )
             box_now = ("☑" if all_on else "☐", theme.ACCENT if all_on else theme.MUTED)
             if self._check_state.get(-1) != box_now:
-                self._all_box.configure(text=box_now[0], text_color=box_now[1])
+                self._all_box.configure(image=self._check_image(all_on))
                 self._check_state[-1] = box_now
 
         total = self.model.visible_count
@@ -1115,9 +1252,9 @@ class DataGrid:
             row["index"] = index if model_row is not None else -1
             frame = row["frame"]
             if model_row is None:
-                if self._row_fill.get(slot) != theme.BG:
-                    frame.configure(fg_color=theme.BG)
-                    self._row_fill[slot] = theme.BG
+                if self._row_fill.get(slot) != theme.PANEL:
+                    frame.configure(fg_color=theme.PANEL)
+                    self._row_fill[slot] = theme.PANEL
                 if row["check"] is not None:
                     row["check"].place_forget()
                     self._check_state.pop(slot, None)
@@ -1128,9 +1265,12 @@ class DataGrid:
                 continue
 
             selected = self.model.is_checked(model_row)
-            fill = self._sel_fill if selected else self._zebra(index)
+            fill = self._sel_fill if selected else self._rest_fill(index)
             if self._row_fill.get(slot) != fill:
-                frame.configure(fg_color=fill)
+                # A rotated frame often already wears this fill. Configuring it
+                # anyway makes CTk re-colour every cell label in the row.
+                if str(frame.cget("fg_color")) != fill:
+                    frame.configure(fg_color=fill)
                 self._row_fill[slot] = fill
             if row["check"] is not None:
                 check_now = (
@@ -1138,12 +1278,19 @@ class DataGrid:
                     theme.ACCENT if selected else theme.MUTED_DIM,
                 )
                 if self._check_state.get(slot) != check_now:
-                    row["check"].configure(text=check_now[0], text_color=check_now[1])
+                    row["check"].configure(image=self._check_image(selected))
                     self._check_state[slot] = check_now
                 row["check"].place(x=0, y=0)
-            for i, column in enumerate(self.model.columns):
-                x, w = offsets[i]
+            for column in self.model.columns:
                 cell = row["cells"][column.key]
+                cache_key = (slot, column.key)
+                if column.key not in placed:
+                    if cache_key in self._cell_placed:
+                        cell.place_forget()
+                        self._cell_placed.discard(cache_key)
+                        self._painted.pop(cache_key, None)
+                    continue
+                x, w = placed[column.key]
                 text = column.text(model_row)
                 colour = theme.TEXT
                 chip_fill = "transparent"
@@ -1159,15 +1306,24 @@ class DataGrid:
                     if number is None:
                         chip_fill = "transparent"
                         colour = provenance_color("unknown")
+                elif column.kind == "pos":
+                    colour = theme.pos_color(text)
                 elif column.tone is not None:
                     try:
                         colour = theme.tone_fg(column.tone(model_row))
                     except Exception:
                         colour = theme.TEXT
-                cell_w = max(10, w - theme.SP2)
-                shown = truncate(text, max(3, w // 7))
+                if column.kind == "ovr":
+                    cell_w = min(OVR_CHIP_WIDTH, max(10, w - theme.SP2))
+                    cell_x = x + max(0, (w - cell_w) // 2)
+                    cell_y = 4
+                    shown = text
+                else:
+                    cell_w = max(10, w - theme.SP2)
+                    cell_x = x + theme.SP1
+                    cell_y = 0
+                    shown = truncate(text, max(3, cell_w // 7))
                 now = (shown, colour, cell_w, chip_fill)
-                cache_key = (slot, column.key)
                 if self._painted.get(cache_key) != now:
                     cell.configure(
                         text=shown,
@@ -1178,16 +1334,39 @@ class DataGrid:
                     )
                     self._painted[cache_key] = now
                 if self._geom_dirty or cache_key not in self._cell_placed:
-                    cell.place(x=x + theme.SP1, y=0)
+                    cell.place(x=cell_x, y=cell_y)
                     self._cell_placed.add(cache_key)
 
         self._geom_dirty = False
+        self._paint_empty(total == 0)
 
         if total <= self._pool_size or total == 0:
             self.scrollbar.set(0.0, 1.0)
         else:
             top = self.first_index / total
             self.scrollbar.set(top, min(1.0, top + self._pool_size / total))
+
+    def _paint_empty(self, empty: bool) -> None:
+        if not self.empty_text:
+            return
+        if self._empty_label is None:
+            self._empty_label = ctk.CTkLabel(
+                self.canvas_host, text=self.empty_text, font=ui_font(theme.T_SMALL),
+                text_color=theme.MUTED, fg_color=theme.PANEL, wraplength=420, justify="center",
+            )
+        try:
+            if empty:
+                self._empty_label.configure(text=self.empty_text)
+                self._empty_label.place(relx=0.5, rely=0.4, anchor="center")
+                self._empty_label.lift()
+            else:
+                self._empty_label.place_forget()
+        except Exception:
+            pass
+
+    def set_empty_text(self, text: str) -> None:
+        self.empty_text = str(text or "")
+        self._paint_empty(self.model.visible_count == 0)
 
     # ---- convenience --------------------------------------------------
 

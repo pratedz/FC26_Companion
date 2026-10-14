@@ -18,7 +18,7 @@ from ....domain.job import is_sign_job_label
 
 from ... import theme
 
-from ...widgets.primitives import button, muted_label, panel, pill, text_label
+from ...widgets.primitives import button, muted_label, panel, pill, text_label, tooltip
 
 from .._common import set_status
 
@@ -62,7 +62,7 @@ def _readiness(root: Any, svc: Any, state: Any, view: dict[str, Any] | None = No
 
     row = ctk.CTkFrame(box, fg_color="transparent")
 
-    row.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
+    row.pack(fill="x", padx=theme.SP4, pady=theme.SP3)
 
     enabled = state.prefs.experimental_add_to_team
 
@@ -124,12 +124,17 @@ def _readiness(root: Any, svc: Any, state: Any, view: dict[str, Any] | None = No
     title_row.pack(anchor="w", fill="x")
     pill(title_row, "Ready" if ready else "Action needed", tone="ok" if ready else "warn").pack(side="left")
     slot_copy = f"{slots} safe free-agent slot{'s' if slots != 1 else ''}" if slots is not None else "Slots unavailable"
-    support_copy = "Sign support enabled" if enabled else "Sign support disabled"
-    text_label(title_row, slot_copy + " · " + support_copy, size=12, bold=True,
-               color=theme.TEXT, wraplength=490, justify="left").pack(side="left", padx=(theme.SP2, 0))
+    if not enabled:
+        support_copy = "Sign support off"
+    elif not capable:
+        support_copy = "Sign support on"  # the line below says what is missing
+    else:
+        support_copy = "Sign support ready"
+    text_label(title_row, slot_copy + "  ·  " + support_copy, size=theme.T_SMALL, bold=True,
+               color=theme.TEXT, wraplength=340, justify="left").pack(side="left", padx=(theme.SP2, 0))
     if reason:
-        muted_label(lead, reason, size=11, color=theme.WARNING, wraplength=480, justify="left").pack(
-            anchor="w", pady=(theme.SP1, 0))
+        muted_label(lead, reason, size=theme.T_SMALL, color=theme.WARNING, wraplength=420,
+                    justify="left").pack(anchor="w", pady=(theme.SP1, 0))
 
     actions = ctk.CTkFrame(row, fg_color="transparent")
 
@@ -205,6 +210,8 @@ def _readiness(root: Any, svc: Any, state: Any, view: dict[str, Any] | None = No
         )
 
         repair_button.pack(side="right", padx=(0, theme.SP2))
+        tooltip(repair_button, "Waits until FC 26 and Live Editor are closed, repairs the Companion "
+                               "worker files, and Sign loads on the next start.")
 
 
 

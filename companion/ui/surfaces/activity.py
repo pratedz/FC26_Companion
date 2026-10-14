@@ -13,7 +13,7 @@ from ...app.presenters import jobs_view, liveness_view
 from .. import theme
 from ..nav import segmented_rail
 from ..widgets import states
-from ..widgets.primitives import button, eyebrow, ensure_ctk, muted_label, panel, pill, text_label
+from ..widgets.primitives import button, section_title, ensure_ctk, muted_label, panel, pill, text_label
 from ..widgets.table import Column, DataGrid, TableModel
 from ._common import section_header, set_status, surface_root
 
@@ -41,18 +41,28 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     view_model = vm if isinstance(vm, dict) else {}
     view_model.setdefault("activity_segment", "queue")
 
+    def close_button(holder: Any) -> Any:
+        from ..widgets.primitives import icon_button
+
+        # The shell attaches close_drawer after build; resolve it on click.
+        return icon_button(
+            holder, "", lambda: getattr(root, "close_drawer", lambda: None)(),
+            icon="close", tooltip_text="Close Activity  (Esc)",
+        )
+
     section_header(
         root,
         "Activity",
-        subtitle="In-flight jobs and recent history.",
+        subtitle="Queued, running and finished jobs.",
+        trailing=close_button,
     )
 
     history_model = TableModel(
         columns=(
-            Column("status", "STATUS", width=72),
-            Column("label", "JOB", width=160, stretch=True),
-            Column("detail", "DETAIL", width=220),
-            Column("age", "WHEN", width=88),
+            Column("status", "STATUS", width=76, tone=lambda row: str(row.get("_tone") or "muted")),
+            Column("label", "JOB", width=140, stretch=True),
+            Column("detail", "DETAIL", width=200, priority=1),
+            Column("age", "WHEN", width=96, priority=2),
         ),
         rows=(),
         key_field="_key",
@@ -119,8 +129,8 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         on_select=show_segment,
         compact=True,
     )
-    rail.pack(fill="x", pady=(0, theme.SP2))
-    action_row.pack(fill="x", pady=(0, theme.SP2))
+    rail.pack(fill="x", pady=(0, theme.SP3))
+    action_row.pack(fill="x", pady=(0, theme.SP3))
     show_segment(str(view_model.get("activity_segment") or "queue"))
     _render_body(svc, view, history_model, slots)
     root.refresh_jobs = refresh_jobs  # type: ignore[attr-defined]
@@ -228,11 +238,11 @@ def _render_body(
         if slots.get("empty") is None:
             empty = states.empty_state(
                 queue_page,
-                headline="Nothing yet",
-                body="Apply a change or run an automation — jobs show up here.",
+                headline="Nothing queued",
+                body="Apply a change or prepare the squad; each job shows here until FC 26 runs it.",
                 action_label="Go to Club",
                 action=lambda: svc.ui.navigate("club"),
-                glyph="⧉",
+                icon="queue",
             )
             empty.pack(fill="both", expand=True)
             slots["empty"] = empty
@@ -250,13 +260,13 @@ def _render_body(
             slots["packed_inflight"] = True
         _clear_children(inflight_host)
         if active:
-            eyebrow(inflight_host, "In flight").pack(
+            section_title(inflight_host, "In flight").pack(
                 anchor="w", pady=(theme.SP2, theme.SP1)
             )
             for job in active:
                 _job_card(inflight_host, svc, job, live=True)
         else:
-            muted_label(inflight_host, "Nothing in flight.", size=12).pack(
+            muted_label(inflight_host, "Nothing waiting or running.", size=theme.T_SMALL).pack(
                 anchor="w", pady=theme.SP2
             )
 
@@ -266,7 +276,7 @@ def _render_body(
     if history:
         if slots.get("history_label") is None or slots.get("history_grid") is None:
             _clear_children(history_host)
-            slots["history_label"] = eyebrow(history_host, "Recent")
+            slots["history_label"] = section_title(history_host, "Recent")
             slots["history_label"].pack(anchor="w", pady=(theme.SP1, theme.SP1))
             slots["history_grid"] = DataGrid(
                 history_host,
@@ -294,7 +304,7 @@ def _render_body(
             body="Completed jobs land here after they run in Career Mode.",
             action_label="Go to Club",
             action=lambda: svc.ui.navigate("club"),
-            glyph="⧉",
+            icon="queue",
         ).pack(fill="both", expand=True)
 
 
@@ -314,14 +324,15 @@ def _job_card(parent: Any, svc: Any, job: dict, *, live: bool) -> None:
 
     row = ctk.CTkFrame(card, fg_color="transparent")
     row.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
-    text_label(row, outcome.get("label") or "—", size=11, bold=True, color=color, width=80).pack(
-        side="left"
-    )
+    text_label(row, outcome.get("label") or "—", size=theme.T_CAPTION, bold=True, color=color,
+               width=80).pack(side="left", anchor="n")
     mid = ctk.CTkFrame(row, fg_color="transparent")
     mid.pack(side="left", fill="x", expand=True)
-    text_label(mid, job.get("label") or job.get("job_id") or "job", size=12).pack(anchor="w")
-    muted_label(mid, job.get("job_id") or "", size=10).pack(anchor="w")
-    muted_label(mid, job.get("detail") or "", size=10, wraplength=280, justify="left").pack(anchor="w")
+    text_label(mid, job.get("label") or job.get("job_id") or "job", size=theme.T_SMALL,
+               bold=True).pack(anchor="w")
+    muted_label(mid, job.get("detail") or "", size=theme.T_CAPTION, wraplength=240,
+                justify="left").pack(anchor="w")
+    muted_label(mid, job.get("job_id") or "", size=theme.T_MICRO).pack(anchor="w")
     if live:
         chip = str((job.get("stage") or {}).get("chip") or "Queued")
         try:
@@ -330,7 +341,7 @@ def _job_card(parent: Any, svc: Any, job: dict, *, live: bool) -> None:
             claimed = False
         if claimed:
             chip = "In Live Editor"
-        muted_label(row, chip, size=10, color=theme.ACCENT).pack(side="right")
+        muted_label(row, chip, size=theme.T_CAPTION, color=theme.ACCENT).pack(side="right", anchor="n")
     elif job.get("retry_suggested"):
         try:
             from .automations import automation_retryable, retry_recorded_automation

@@ -111,18 +111,60 @@ def _auth_file_state() -> str:
         return "unreadable"
     if not isinstance(raw, Mapping):
         return "unusable"
-    return "unusable" if _build_entry() is None else "available"
+    if _build_entry() is not None:
+        return "available"
+    # A logged-out CLI leaves a stub such as {"auth_mode": "none"} with no tokens.
+    return "signed_out" if not isinstance(raw.get("tokens"), Mapping) else "unusable"
+
+
+def _token_expired(token: str) -> bool:
+    """True when a JWT access token carries an ``exp`` in the past. Unknown means usable."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    try:
+        import base64
+        import time
+
+        pad = "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+        expiry = float(claims.get("exp"))
+    except (ValueError, TypeError):
+        return False
+    return expiry < time.time() + 30
+
+
+def start_codex_login() -> str:
+    """Open a visible console running ``codex login``. Returns a short status line."""
+    exe = shutil.which("codex")
+    if not exe:
+        raise RuntimeError(
+            "Codex CLI was not found on PATH. Install Codex, then run `codex login`."
+        )
+    import subprocess
+
+    flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    subprocess.Popen([exe, "login"], creationflags=flags, close_fds=True)
+    return "Codex sign-in opened in a new window. Finish it there, then choose Check again."
 
 
 def _login_hint() -> str:
     """Give an actionable instruction without launching an opaque terminal."""
     if shutil.which("codex"):
-        return "Codex is installed. Run `codex login` if needed, then check again."
-    return "Open Codex CLI, run `codex login`, then return here and choose Check Codex login."
+        return "Use Sign in with Codex, or run `codex login`, then check again."
+    return "Install Codex CLI, run `codex login`, then return here and choose Check again."
 
 
 def status() -> SessionStatus:
     entry = _build_entry()
+    if entry and _token_expired(str(entry.get("key") or "")):
+        return SessionStatus(
+            False,
+            "Codex login has expired on this Windows account.",
+            auth_path(),
+            "expired",
+            "Run `codex login` to sign in again, then check again.",
+        )
     if entry:
         return SessionStatus(
             True, "Codex CLI login found and ready to propose.", auth_path(), "connected"
@@ -162,7 +204,7 @@ def _session() -> Mapping[str, str]:
     if not token:
         raise RuntimeError(
             "Codex is not connected. Run `codex login` in Codex CLI, then choose "
-            "“Check Codex login” here."
+            "Check again in Settings, or switch to an OpenAI API key."
         )
     return {"token": token, "account_id": account}
 
@@ -382,7 +424,7 @@ def _codex_request(
         if exc.code == 401:
             raise RuntimeError(
                 "Codex login expired. Run `codex login` again, then choose "
-                "“Check Codex login”."
+                "Check again in Settings."
             ) from exc
         if exc.code == 429 or "usage_limit" in detail:
             raise RuntimeError(

@@ -7,9 +7,21 @@ from typing import Any
 from ....domain.card_import import changed_fields_by_category
 from ... import theme
 from ...widgets.ovr import ovr_delta_chips
-from ...widgets.primitives import EM_DASH, button, eyebrow, muted_label, panel, text_label, themed_scroll
+from ...widgets.primitives import (
+    EM_DASH,
+    button,
+    entry,
+    muted_label,
+    panel,
+    search_box,
+    section_title,
+    set_disabled,
+    text_label,
+    themed_scroll,
+    ui_font,
+)
 from ...widgets.table import HEADER_HEIGHT, ROW_HEIGHT, Column, DataGrid, TableModel
-from .._common import set_status
+from .._common import position_text, set_status
 
 try:  # pragma: no cover
     import customtkinter as ctk
@@ -28,16 +40,15 @@ def _build_card_picker(
     host.pack(fill="x", pady=(0, theme.SP2))
 
     heading = ctk.CTkFrame(host, fg_color="transparent")
-    heading.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP1))
-    eyebrow(heading, "Card library").pack(side="left")
+    heading.pack(fill="x", padx=theme.SP4, pady=(theme.SP3, theme.SP2))
     target = svc.store.snapshot().target
-    muted_label(
-        heading,
-        f"Copy onto {target.name or target.playerid}; Review -> Apply remains required.",
-        size=11,
-    ).pack(side="left", padx=(theme.SP3, 0))
+    section_title(
+        heading, "Card library",
+        detail=f"Copy a card onto {target.name or target.playerid}. Staging opens Review; nothing is applied until you confirm.",
+    ).pack(side="left")
     options = ctk.CTkFrame(host, fg_color="transparent")
-    options.pack(fill="x", padx=theme.SP3, pady=theme.SP1)
+    options.pack(fill="x", padx=theme.SP4, pady=(theme.SP2, 0))
+    muted_label(options, "Copy", size=theme.T_SMALL).pack(side="left", padx=(0, theme.SP3))
     choices = {
         "stats": ctk.BooleanVar(value=True),
         "kit": ctk.BooleanVar(value=False),
@@ -63,21 +74,10 @@ def _build_card_picker(
             height=24,
             checkbox_width=18,
             checkbox_height=18,
-            fg_color=theme.ACCENT,
-            hover_color=theme.CARD_HOVER,
-            border_color=theme.BORDER,
-            text_color=theme.TEXT,
+            font=ui_font(theme.T_SMALL),
             command=lambda: render_card_preview(),
         ).pack(side="left", padx=(0, theme.SP2))
-    force_age = ctk.CTkEntry(
-        options,
-        width=46,
-        height=28,
-        justify="center",
-        fg_color=theme.CARD,
-        border_color=theme.BORDER,
-        text_color=theme.TEXT,
-    )
+    force_age = entry(options, width=46, height=28, justify="center")
     force_age.insert(0, "25")
     ctk.CTkCheckBox(
         options,
@@ -89,34 +89,25 @@ def _build_card_picker(
         height=24,
         checkbox_width=18,
         checkbox_height=18,
-        fg_color=theme.ACCENT,
-        hover_color=theme.CARD_HOVER,
-        border_color=theme.BORDER,
-        text_color=theme.TEXT,
+        font=ui_font(theme.T_SMALL),
         command=lambda: render_card_preview(),
     ).pack(side="left", padx=(theme.SP1, 2))
     force_age.pack(side="left", padx=(0, theme.SP2))
     force_age.bind("<KeyRelease>", lambda _event: render_card_preview())
     muted_label(
         host,
-        "Card build includes body and run style; Kit is boots, socks, and jersey fit. "
-        "Force age overrides the card birthdate (use 25 for Legends). Name, exact birthdate and face use verified FC26 base-player data only.",
-        size=10,
-    ).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP1))
+        "Card build includes body and run style. Kit is boots, socks and jersey fit. "
+        "Force age replaces the card birthdate (25 suits legends). Name, birthdate and face use verified FC 26 base-player data only.",
+        size=theme.T_CAPTION, wraplength=760, justify="left",
+    ).pack(anchor="w", padx=theme.SP4, pady=(theme.SP1, theme.SP2))
 
     search_row = ctk.CTkFrame(host, fg_color="transparent")
     # Finding a card is the first action. Keep search above import options so
     # it is visible immediately when this mode opens in a windowed Companion.
-    search_row.pack(fill="x", padx=theme.SP3, pady=theme.SP1, before=options)
-    query = ctk.CTkEntry(
-        search_row,
-        height=theme.BTN_MD,
-        placeholder_text="Search a player or card variant...",
-        fg_color=theme.CARD,
-        border_color=theme.BORDER,
-        text_color=theme.TEXT,
-    )
-    query.pack(side="left", fill="x", expand=True)
+    search_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP1), before=options)
+    query_box = search_box(search_row, placeholder="Search a player or card variant")
+    query_box.pack(side="left", fill="x", expand=True)
+    query = query_box.entry
     if view is not None and view.get("card_query"):
         query.insert(0, str(view["card_query"]))
 
@@ -134,7 +125,7 @@ def _build_card_picker(
             Column("name", "CARD", width=190, stretch=True),
             Column("year", "GAME", width=52),
             Column("ovr", "OVR", width=48, numeric=True, kind="ovr"),
-            Column("pos", "POS", width=48),
+            Column("pos", "POS", width=80, kind="pos"),
             Column("variant", "VARIANT", width=170),
         ),
         rows=(),
@@ -151,11 +142,12 @@ def _build_card_picker(
         """Show the selected card against the current target without staging it."""
         for child in list(preview_host.winfo_children()):
             child.destroy()
+        sync_stage_button()
         if not selected:
             muted_label(
                 preview_host,
                 "Select a card variant to preview its build against this player.",
-                size=11,
+                size=theme.T_SMALL,
             ).pack(anchor="w", padx=theme.SP3, pady=theme.SP2)
             return
         try:
@@ -175,8 +167,7 @@ def _build_card_picker(
         preview_header = ctk.CTkFrame(preview_host, fg_color="transparent")
         preview_header.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, 2))
         text_label(
-            preview_header, f"Preview · {card_name}", size=12, bold=True,
-            color=theme.ACCENT,
+            preview_header, f"Preview: {card_name}", size=theme.T_BODY, bold=True,
         ).pack(side="left")
         from ....app.commands.player import editor_has_live_values, player_read_pending
 
@@ -198,22 +189,23 @@ def _build_card_picker(
             )
         text_label(
             preview_host,
-            f"{len(changes)} value(s) will change · {len(proposed.fields)} selected card field(s)",
-            size=11,
+            f"{len(changes)} value{'s' if len(changes) != 1 else ''} will change  ·  "
+            f"{len(proposed.fields)} card field{'s' if len(proposed.fields) != 1 else ''} selected",
+            size=theme.T_SMALL,
             color=theme.MUTED,
         ).pack(anchor="w", padx=theme.SP3, pady=(2, theme.SP1))
         if reading and not live:
             muted_label(
                 preview_host,
                 "Reading live attributes from FC 26… current stats fill in when the read finishes.",
-                size=10,
+                size=theme.T_CAPTION,
                 color=theme.ACCENT,
             ).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP1))
         elif not live:
             muted_label(
                 preview_host,
                 "Squad cache has overall only. Live attributes are being requested from FC 26.",
-                size=10,
+                size=theme.T_CAPTION,
                 color=theme.MUTED,
             ).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP1))
         groups = [
@@ -232,7 +224,7 @@ def _build_card_picker(
                 if not visible:
                     continue
                 text_label(
-                    body, category, size=11, bold=True, color=theme.MUTED,
+                    body, category, size=theme.T_CAPTION, bold=True, color=theme.MUTED,
                 ).pack(anchor="w", padx=theme.SP1, pady=(theme.SP1, 0))
                 for _field, label, before, after in visible:
                     if before is None:
@@ -242,11 +234,11 @@ def _build_card_picker(
                     muted_label(
                         body,
                         f"{label}  {before_text}  →  {after}",
-                        size=10,
+                        size=theme.T_CAPTION,
                     ).pack(anchor="w", padx=theme.SP2)
         if proposed.warnings:
             muted_label(
-                preview_host, f"Note: {proposed.warnings[0]}", size=10, color=theme.WARNING,
+                preview_host, f"Note: {proposed.warnings[0]}", size=theme.T_CAPTION, color=theme.WARNING,
             ).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP2))
 
     def select_card(row: dict[str, Any]) -> None:
@@ -357,42 +349,49 @@ def _build_card_picker(
     # continue action. Staging is immediate; Review (with Apply) opens now.
     # A live read may still fill current stats in the background.
     actions = ctk.CTkFrame(host, fg_color="transparent")
-    actions.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP1))
-    back_button = button(
-        actions,
-        "← Back",
-        clear_card_selection,
-        kind="ghost",
-        height=36,
-        width=88,
-    )
-    back_button.pack(side="left")
+    actions.pack(fill="x", padx=theme.SP4, pady=(theme.SP2, theme.SP2))
     stage_button = button(
         actions,
         "Stage card & review now",
         stage_selected,
         # Draft Review remains the screen primary when changes exist.
         kind="accent",
-        height=theme.BTN_LG,
+        icon="card",
+        height=theme.BTN_MD,
+        disabled_reason="Choose a card variant first.",
     )
-    stage_button.pack(side="left", padx=(theme.SP2, 0))
+    stage_button.pack(side="left")
+    back_button = button(
+        actions,
+        "Back to results",
+        clear_card_selection,
+        kind="ghost",
+        icon="back",
+        height=theme.BTN_MD,
+    )
     selected_caption = muted_label(
         actions,
-        "Live attributes load in the background. Stage opens Review — Apply is in that sheet.",
-        size=12,
+        "Select a card variant to preview and stage it.",
+        size=theme.T_SMALL,
     )
     selected_caption.pack(side="left", padx=(theme.SP3, 0), fill="x", expand=True)
-    muted_label(
-        host,
-        "Copy selected card values to staged changes. Apply stays inside Review — never a page shortcut.",
-        size=10,
-    ).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP1))
+
+    def sync_stage_button() -> None:
+        set_disabled(stage_button, "" if selected else "Choose a card variant first.")
+        try:
+            if selected and not back_button.winfo_manager():
+                back_button.pack(side="left", padx=(theme.SP2, 0), after=stage_button)
+            elif not selected and back_button.winfo_manager():
+                back_button.pack_forget()
+        except Exception:
+            pass
 
     grid = DataGrid(
         host,
         model,
         show_checkboxes=False,
         visible_rows=6,
+        empty_text="Search above to list card variants, for example a player name or a promo such as TOTY.",
         on_row_click=select_card,
         on_row_activate=lambda row: (
             select_card(dict(row)), stage_selected()
@@ -409,7 +408,7 @@ def _build_card_picker(
             preview_host.pack_forget()
         except Exception:
             pass
-        grid.pack(fill="x", padx=theme.SP3, pady=theme.SP1)
+        grid.pack(fill="x", padx=theme.SP3, pady=(theme.SP1, theme.SP3))
 
     def show_card_preview() -> None:
         try:
@@ -417,7 +416,7 @@ def _build_card_picker(
         except Exception:
             pass
         preview_host.pack(
-            fill="x", padx=theme.SP3, pady=(theme.SP1, theme.SP2),
+            fill="x", padx=theme.SP3, pady=(theme.SP1, theme.SP3),
         )
 
     def _prefetch_live_values() -> None:
@@ -496,7 +495,7 @@ def _build_card_picker(
 
     query.bind("<Return>", lambda _event: search_cards())
     button(
-        search_row, "Search cards", search_cards, kind="secondary", height=32, width=104,
+        search_row, "Search cards", search_cards, kind="secondary", height=theme.BTN_MD, width=120,
     ).pack(side="left", padx=(theme.SP2, 0))
 
     pending = (view or {}).pop("pending_library_card", None)
@@ -517,7 +516,7 @@ def _player_card_row(card: dict[str, Any]) -> dict[str, Any]:
         "name": card.get("name") or card.get("playername") or "-",
         "year": card.get("year") or card.get("game_year") or "-",
         "ovr": card.get("overallrating") or card.get("ovr") or "-",
-        "pos": card.get("positions_text") or card.get("preferredposition1") or "-",
+        "pos": card.get("positions_text") or position_text(card.get("preferredposition1")),
         "variant": card.get("variant") or card.get("revision") or "Base",
         "_key": card.get("_card_key") or card.get("obs_id") or id(card),
         "_raw": card,

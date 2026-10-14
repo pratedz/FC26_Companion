@@ -88,7 +88,7 @@ class SignListPanel:
         self.header.pack(fill="x", padx=theme.SP3, pady=(theme.SP3, 0))
         title = ctk.CTkFrame(self.header, fg_color="transparent")
         title.pack(side="left", fill="x", expand=True)
-        text_label(title, "Signing Bag", size=16, bold=True, color=theme.ACCENT).pack(anchor="w")
+        text_label(title, "Signing bag", size=theme.T_HEADING, bold=True).pack(anchor="w")
 
         self.count_pill = pill(self.header, "0", tone="muted")
         self.count_pill.pack(side="right", padx=(theme.SP2, 0))
@@ -102,25 +102,21 @@ class SignListPanel:
         )
         self.checkout_host = ctk.CTkFrame(self.host, fg_color="transparent")
         self.checkout_host.pack(side="bottom", fill="x", padx=theme.SP3, pady=theme.SP3)
-        self.checkout_button = button(self.checkout_host, "Checkout", on_checkout, kind="accent", height=40, width=1,
+        # Checkout is the Sign page's one primary action.
+        self.checkout_button = button(self.checkout_host, "Checkout", on_checkout, kind="primary",
+                                      height=theme.BTN_LG, width=1,
                                       disabled_reason="Add a verified card to your bag first.")
         self.checkout_button.pack(fill="x")
-        muted_label(self.checkout_host, "Review safe targets before signing.", size=10).pack(pady=(4, 0))
+        muted_label(self.checkout_host, "You review safe targets before anything is signed.",
+                    size=theme.T_CAPTION).pack(pady=(theme.SP1, 0))
         self.empty_row = ctk.CTkFrame(self.host, fg_color="transparent")
         muted_label(
             self.empty_row,
-            "Your bag is empty — search a verified card, then double-click it.",
-            size=11,
+            "Your bag is empty. Double-click a verified card, or tick cards and choose Add to bag.",
+            size=theme.T_SMALL,
             wraplength=220,
             justify="left",
         ).pack(anchor="w", padx=theme.SP3)
-        button(
-            self.empty_row,
-            "Focus search",
-            self._focus_search,
-            kind="ghost",
-            height=theme.BTN_MD,
-        ).pack(anchor="w", padx=theme.SP3, pady=(theme.SP1, 0))
         self.scroll = themed_scroll(self.host, fill=theme.CARD, height=160)
         self.body = self.scroll.inner
         self.host.bind("<Configure>", self._on_host_configure, add="+")

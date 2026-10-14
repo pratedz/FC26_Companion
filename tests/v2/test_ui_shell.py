@@ -569,7 +569,7 @@ def test_changes_bar_is_the_single_apply_affordance(svc, shell_factory):
     shell = shell_factory()
     # Nothing staged: quiet strip, Apply explains why it is off (A9).
     shell._render()
-    assert shell.changes_title.cget("text") == "CHANGES"
+    assert shell.changes_title.cget("text") == "Changes"
     assert "No changes staged" in shell.changes_summary.cget("text")
     assert str(shell.apply_btn.cget("state")) == "disabled"
 
@@ -579,7 +579,7 @@ def test_changes_bar_is_the_single_apply_affordance(svc, shell_factory):
     shell._render()
     shell.root.update_idletasks()
 
-    assert shell.changes_title.cget("text") == "CHANGES (1)"
+    assert shell.changes_title.cget("text") == "Changes (1)"
     assert "Overall 86 → 91" in shell.changes_summary.cget("text")
     assert str(shell.apply_btn.cget("state")) == "normal"
 
@@ -607,10 +607,10 @@ def test_apply_is_blocked_with_a_reason_when_the_worker_is_off(svc, shell_factor
 def test_in_flight_count_badges_the_drawer_toggle(svc, shell_factory):
     shell = shell_factory()
     shell._render()
-    assert shell.drawer_btn.cget("text") == "⧉"
+    assert shell.drawer_btn.cget("text").strip() == "Activity"
     svc.store.dispatch(E.JobSubmitted(job_id="01J", label="Apply 1 field"))
     shell._render()
-    assert shell.drawer_btn.cget("text") == "⧉ 1"
+    assert shell.drawer_btn.cget("text").strip() == "Activity  1"
 
 
 @needs_tk
@@ -638,7 +638,12 @@ def test_switching_surfaces_never_raises(shell_factory):
 def test_palette_hook_is_callable_and_defaults_to_saying_so(svc, shell_factory):
     shell = shell_factory()
     shell.open_palette()
-    assert "palette" in svc.store.snapshot().status.lower()
+    import customtkinter as ctk
+
+    opened = [w for w in shell.root.winfo_children() if isinstance(w, ctk.CTkToplevel)]
+    assert any(w.title() == "Go to" for w in opened)
+    for window in opened:
+        window.destroy()
     seen: list[int] = []
     shell.on_palette = lambda: seen.append(1)
     shell.open_palette()

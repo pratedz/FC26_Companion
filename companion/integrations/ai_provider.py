@@ -57,12 +57,39 @@ class ConnectionTest:
     message: str = ""
 
 
+_LISTENERS: list[Any] = []
+
+
+def subscribe(callback: Any) -> Any:
+    """Call ``callback()`` after provider, model, or key changes. Returns an unsubscribe."""
+    _LISTENERS.append(callback)
+
+    def unsubscribe() -> None:
+        try:
+            _LISTENERS.remove(callback)
+        except ValueError:
+            pass
+
+    return unsubscribe
+
+
+def notify_changed() -> None:
+    for callback in list(_LISTENERS):
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 - a dead widget must not block the others
+            try:
+                _LISTENERS.remove(callback)
+            except ValueError:
+                pass
+
+
 def provider_id() -> str:
-    return _PROVIDER if _PROVIDER in PROVIDERS else PROVIDER_CODEX
+    return _PROVIDER if _PROVIDER in PROVIDERS else PROVIDER_API
 
 
 def provider_label(provider: str | None = None) -> str:
-    return PROVIDER_LABELS.get(provider or provider_id(), PROVIDER_LABELS[PROVIDER_CODEX])
+    return PROVIDER_LABELS.get(provider or provider_id(), PROVIDER_LABELS[PROVIDER_API])
 
 
 def model_id() -> str:
@@ -74,11 +101,14 @@ def model_id() -> str:
 
 def apply_settings(*, provider: str | None = None, model: str | None = None) -> None:
     global _PROVIDER, _MODEL
+    before = (_PROVIDER, _MODEL)
     if provider is not None:
         chosen = str(provider or "").strip()
-        _PROVIDER = chosen if chosen in PROVIDERS else PROVIDER_CODEX
+        _PROVIDER = chosen if chosen in PROVIDERS else PROVIDER_API
     if model is not None:
         _MODEL = str(model or "").strip()
+    if (_PROVIDER, _MODEL) != before:
+        notify_changed()
 
 
 def load_from_prefs(values: Mapping[str, Any] | None) -> None:
@@ -113,11 +143,13 @@ def scrub_pref_values(values: Mapping[str, Any]) -> dict[str, Any]:
 def set_session_key(secret: str) -> None:
     global _SESSION_KEY
     _SESSION_KEY = str(secret or "").strip()
+    notify_changed()
 
 
 def clear_session_key() -> None:
     global _SESSION_KEY
     _SESSION_KEY = ""
+    notify_changed()
 
 
 def resolve_api_key() -> tuple[str, str]:
@@ -147,10 +179,12 @@ def store_api_key(secret: str) -> None:
     if not text:
         raise AiError("Paste an API key first.", category="authentication")
     _write_stored_key(text)
+    notify_changed()
 
 
 def clear_stored_key() -> None:
     _delete_stored_key()
+    notify_changed()
 
 
 def redact(text: str) -> str:
@@ -163,8 +197,14 @@ def redact(text: str) -> str:
     return cleaned
 
 
-def readiness() -> ProviderStatus:
-    chosen = provider_id()
+def readiness_all() -> dict[str, ProviderStatus]:
+    """Status of both providers, so Settings can show where a switch would work."""
+    return {pid: readiness(pid) for pid in PROVIDERS}
+
+
+def readiness(provider: str | None = None) -> ProviderStatus:
+    """Status of ``provider`` (default: the selected one). The only readiness gate."""
+    chosen = provider if provider in PROVIDERS else provider_id()
     model = model_id()
     label = provider_label(chosen)
     if chosen == PROVIDER_API:
@@ -181,7 +221,9 @@ def readiness() -> ProviderStatus:
     if state.connected:
         return ProviderStatus(chosen, label, model, True, "Codex account ready")
     hint = str(state.login_hint or "").strip()
-    message = "Codex sign-in required"
+    message = (
+        state.message.rstrip(".") if state.state == "expired" else "Codex sign-in required"
+    )
     if hint:
         message = f"{message}. {hint}"
     return ProviderStatus(chosen, label, model, False, message, "authentication")
@@ -191,6 +233,9 @@ def block_reason() -> str:
     state = readiness()
     if state.ready:
         return ""
+    other = readiness(PROVIDER_CODEX if state.provider_id == PROVIDER_API else PROVIDER_API)
+    if other.ready:
+        return f"{state.message} {other.label} is ready: switch the provider in Settings."
     return state.message
 
 

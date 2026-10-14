@@ -160,17 +160,18 @@ def loading_row(parent: Any, text: str = "Loading…", *, detail: str = "") -> A
     percentage. ``detail`` is where the caller puts the elapsed seconds.
     """
     ensure_ctk()
+    from ..icons import ctk_icon
+
     row = ctk.CTkFrame(parent, fg_color="transparent")
-    ctk.CTkLabel(
-        row,
-        text="◌",
-        font=ui_font(13),
-        text_color=theme.ACCENT,
-        width=18,
-    ).pack(side="left")
-    text_label(row, text, size=12, color=theme.MUTED).pack(side="left", padx=(theme.SP1, 0))
+    image = ctk_icon("loading", 16, tint=theme.ACCENT)
+    ctk.CTkLabel(row, text="" if image is not None else "…", image=image, width=18).pack(
+        side="left"
+    )
+    text_label(row, text, size=theme.T_SMALL, color=theme.MUTED).pack(
+        side="left", padx=(theme.SP2, 0)
+    )
     if detail:
-        muted_label(row, detail, size=10).pack(side="left", padx=(theme.SP2, 0))
+        muted_label(row, detail, size=theme.T_CAPTION).pack(side="left", padx=(theme.SP2, 0))
     return row
 
 
@@ -186,9 +187,11 @@ def empty_state(
     body: str = "",
     action_label: str = "",
     action: Callable[[], None] | None = None,
-    glyph: str = "⬡",
+    glyph: str = "",
     secondary_label: str = "",
     secondary: Callable[[], None] | None = None,
+    icon: str = "info",
+    primary: bool = False,
 ) -> Any:
     """C19. Icon, headline, body, and a **required** named next action.
 
@@ -196,24 +199,30 @@ def empty_state(
     an empty state without an exit is the defect this widget exists to prevent,
     and letting it build would move the failure from a test to a user.
     """
-    primary = require_action(action_label, action)
+    cta = require_action(action_label, action)
     ensure_ctk()
+
+    from ..icons import ctk_icon
 
     frame = panel(parent, level=1)
     inner = ctk.CTkFrame(frame, fg_color="transparent")
     inner.place(relx=0.5, rely=0.46, anchor="center")
 
-    ctk.CTkLabel(
-        inner, text=glyph, font=ui_font(30), text_color=theme.ACCENT
-    ).pack(pady=(0, theme.SP3))
-    text_label(inner, headline, size=16, bold=True, anchor="center").pack(
+    image = ctk_icon(icon, 32, tint=theme.ACCENT)
+    if image is not None:
+        ctk.CTkLabel(inner, text="", image=image).pack(pady=(0, theme.SP3))
+    elif glyph:
+        ctk.CTkLabel(
+            inner, text=glyph, font=ui_font(theme.T_SCORE), text_color=theme.ACCENT
+        ).pack(pady=(0, theme.SP3))
+    text_label(inner, headline, size=theme.T_HEADING, bold=True, anchor="center").pack(
         pady=(0, theme.SP2)
     )
     if body:
         ctk.CTkLabel(
             inner,
             text=body,
-            font=ui_font(12),
+            font=ui_font(theme.T_SMALL),
             text_color=theme.MUTED,
             wraplength=420,
             justify="center",
@@ -221,11 +230,10 @@ def empty_state(
 
     actions = ctk.CTkFrame(inner, fg_color="transparent")
     actions.pack()
-    button(actions, primary[0], primary[1], kind="accent", width=180, height=32).pack(
-        side="left"
-    )
+    button(actions, cta[0], cta[1], kind="primary" if primary else "accent",
+           height=theme.BTN_MD).pack(side="left")
     if secondary_label and secondary is not None:
-        button(actions, secondary_label, secondary, kind="ghost", height=32).pack(
+        button(actions, secondary_label, secondary, kind="ghost", height=theme.BTN_MD).pack(
             side="left", padx=(theme.SP2, 0)
         )
     return frame
@@ -244,7 +252,7 @@ def error_state(
     action_label: str = "Retry",
     action: Callable[[], None] | None = None,
     extra_actions: Sequence[Action] = (),
-    glyph: str = "▲",
+    glyph: str = "",
 ) -> Any:
     """C21. An error that **stays** until it is resolved or dismissed (H4).
 
@@ -271,13 +279,17 @@ def error_state(
 
     head = ctk.CTkFrame(body, fg_color="transparent")
     head.pack(fill="x")
+    from ..icons import ctk_icon
+
+    image = ctk_icon("warning", 18, tint=theme.DANGER_TEXT)
     ctk.CTkLabel(
-        head, text=glyph, font=ui_font(13, bold=True), text_color=theme.DANGER, width=20
-    ).pack(side="left", anchor="n")
+        head, text="" if image is not None else (glyph or "!"), image=image,
+        font=ui_font(theme.T_BODY, bold=True), text_color=theme.DANGER_TEXT, width=22,
+    ).pack(side="left", anchor="n", padx=(0, theme.SP1))
     ctk.CTkLabel(
         head,
         text=copy.message,
-        font=ui_font(12, bold=True),
+        font=ui_font(theme.T_BODY, bold=True),
         text_color=theme.TEXT,
         wraplength=560,
         justify="left",
@@ -289,7 +301,7 @@ def error_state(
         ctk.CTkLabel(
             body,
             text=copy.cause,
-            font=ctk.CTkFont(family=theme.MONO, size=10),
+            font=ctk.CTkFont(family=theme.MONO, size=theme.T_CAPTION),
             text_color=theme.MUTED,
             wraplength=560,
             justify="left",
@@ -298,10 +310,10 @@ def error_state(
 
     row = ctk.CTkFrame(body, fg_color="transparent")
     row.pack(anchor="w", padx=(20, 0), pady=(theme.SP3, 0))
-    button(row, primary[0], primary[1], kind="secondary", height=28).pack(side="left")
+    button(row, primary[0], primary[1], kind="secondary", height=theme.BTN_SM).pack(side="left")
     for label, fn in extra_actions:
         if label and callable(fn):
-            button(row, label, fn, kind="ghost", height=28).pack(
+            button(row, label, fn, kind="ghost", height=theme.BTN_SM).pack(
                 side="left", padx=(theme.SP2, 0)
             )
     return frame

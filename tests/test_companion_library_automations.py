@@ -41,5 +41,5 @@ def test_automation_scopes_make_broad_and_non_mutating_actions_explicit() -> Non
 
 def test_library_unselected_target_uses_one_explicit_club_route() -> None:
     assert _target_route_copy() == (
-        "Lock a Club player to stage a card build, or Send to Sign with no lock."
+        "Choose a player to copy a card's build onto, or send the card to Sign."
     )

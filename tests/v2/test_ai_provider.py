@@ -98,3 +98,62 @@ def test_missing_pref_uses_the_api_key_and_shared_model():
     ai.load_from_prefs({})
     assert ai.provider_id() == ai.PROVIDER_API
     assert ai.model_id() == grok.DEFAULT_MODEL == "gpt-6-luna"
+
+
+def _signed_out_codex(monkeypatch, tmp_path):
+    auth = tmp_path / "auth.json"
+    auth.write_text('{"auth_mode": "none"}', encoding="utf-8")
+    monkeypatch.setattr(grok, "auth_path", lambda: auth)
+    monkeypatch.setattr(grok.shutil, "which", lambda _name: None)
+
+
+def test_api_provider_is_not_blocked_by_a_signed_out_codex(monkeypatch, tmp_path):
+    _signed_out_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    ai.apply_settings(provider=ai.PROVIDER_API)
+    assert ai.block_reason() == ""
+    assert ai.readiness(ai.PROVIDER_CODEX).ready is False
+
+
+def test_blocked_provider_points_at_the_ready_one(monkeypatch, tmp_path):
+    _signed_out_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    ai.apply_settings(provider=ai.PROVIDER_CODEX)
+    reason = ai.block_reason()
+    assert "sign-in required" in reason.lower()
+    assert "OpenAI API Key is ready" in reason
+
+
+def test_signed_out_codex_stub_reads_as_not_signed_in(monkeypatch, tmp_path):
+    _signed_out_codex(monkeypatch, tmp_path)
+    state = grok.status()
+    assert state.connected is False
+    assert "not signed in" in state.message
+
+
+def test_expired_codex_token_is_not_ready(monkeypatch, tmp_path):
+    import base64
+    import json
+
+    def part(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+
+    token = f"{part({'alg': 'none'})}.{part({'exp': 1})}.sig"
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"tokens": {"access_token": token}}), encoding="utf-8")
+    monkeypatch.setattr(grok, "auth_path", lambda: auth)
+    state = grok.status()
+    assert state.connected is False and state.state == "expired"
+    assert "expired" in ai.readiness(ai.PROVIDER_CODEX).message.lower()
+
+
+def test_listeners_fire_on_provider_model_and_key_changes():
+    calls: list[int] = []
+    unsubscribe = ai.subscribe(lambda: calls.append(1))
+    ai.apply_settings(provider=ai.PROVIDER_API)
+    ai.apply_settings(model="gpt-test")
+    ai.set_session_key("k")
+    ai.apply_settings(provider=ai.PROVIDER_API)  # unchanged: no event
+    unsubscribe()
+    ai.apply_settings(provider=ai.PROVIDER_CODEX)
+    assert len(calls) == 3

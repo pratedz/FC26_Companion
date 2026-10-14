@@ -169,14 +169,18 @@ def test_palette_squad_planner_copy_is_honest():
 
 
 def test_player_review_is_on_the_tab_and_library_stage_copy_is_one_line():
+    # Review is the Changes bar's single button (one verb, one control); the
+    # Player tab points at it instead of repeating it.
     workstation = (
         ROOT / "companion" / "ui" / "surfaces" / "player" / "workstation.py"
     ).read_text(encoding="utf-8")
-    assert '"Review changes"' in workstation or "'Review changes'" in workstation
+    shell = (ROOT / "companion" / "ui" / "shell.py").read_text(encoding="utf-8")
+    assert '"Review changes"' in shell
+    assert "Review changes below" in workstation
     library = (ROOT / "companion" / "ui" / "surfaces" / "library.py").read_text(
         encoding="utf-8"
     )
-    assert "Send to Sign with no lock" in library
+    assert "or send the card to Sign" in library
     automations = (ROOT / "companion" / "ui" / "surfaces" / "matchday.py").read_text(
         encoding="utf-8"
     )

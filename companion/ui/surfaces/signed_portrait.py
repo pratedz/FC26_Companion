@@ -15,7 +15,7 @@ def avatar(host: Any, svc: Any, pid: int, name: str, *, size: int = 56) -> None:
     """Replace the monogram when the verified source image becomes ready."""
     current = [""]
     timer: list[Any] = [None]
-    label = text_label(host, monogram(name, fallback="PL")[:2], size=16, bold=True)
+    label = text_label(host, monogram(name, fallback="PL")[:2], size=theme.T_HEADING, bold=True)
     label.pack(expand=True)
 
     def update() -> None:

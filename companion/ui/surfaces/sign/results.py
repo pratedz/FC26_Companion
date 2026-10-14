@@ -33,28 +33,26 @@ class CardResults:
         self.toolbar = ctk.CTkFrame(self.widget, fg_color="transparent")
         self.toolbar.pack(fill="x", pady=(0, theme.SP2))
         self.all_var = ctk.BooleanVar(value=False)
-        self.all_check = ctk.CTkCheckBox(self.toolbar, text="Select cards", variable=self.all_var,
-                                        command=self._all, width=100, font=(theme.FONT, 11),
-                                        checkbox_width=16, checkbox_height=16, fg_color=theme.ACCENT,
-                                        hover_color=theme.CARD_HOVER, border_color=theme.BORDER)
+        self.all_check = ctk.CTkCheckBox(self.toolbar, text="Select all on this page", variable=self.all_var,
+                                        command=self._all, width=100, font=(theme.FONT, -theme.T_SMALL),
+                                        checkbox_width=16, checkbox_height=16)
         self.all_check.pack(side="left", padx=theme.SP1)
         self.sort = ctk.CTkOptionMenu(self.toolbar, values=["Overall ↓", "Year ↓", "Name A–Z"],
-                                     command=self._sort, width=126, height=28,
-                                     fg_color=theme.CARD, button_color=theme.BORDER,
-                                     dropdown_fg_color=theme.CARD, dropdown_text_color=theme.TEXT,
-                                     text_color=theme.TEXT)
+                                     command=self._sort, width=130, height=theme.BTN_SM)
         self.sort.pack(side="right")
         self.scroll = themed_scroll(self.widget, fill=theme.PANEL, height=220, stable_children=True)
         self.scroll.pack(fill="both", expand=True)
         self.pager = ctk.CTkFrame(self.widget, fg_color="transparent")
         self.pager.pack(fill="x", pady=(theme.SP2, 0))
-        self.prev = button(self.pager, "‹", lambda: self._page(-1), kind="ghost", width=32, height=28)
+        self.prev = button(self.pager, "", lambda: self._page(-1), kind="ghost", width=32,
+                           height=theme.BTN_SM, icon="back")
         self.prev.pack(side="left")
-        self.page_label = muted_label(self.pager, "", size=10)
+        self.page_label = muted_label(self.pager, "", size=theme.T_CAPTION)
         self.page_label.pack(side="left", padx=theme.SP2)
-        self.next = button(self.pager, "›", lambda: self._page(1), kind="ghost", width=32, height=28)
+        self.next = button(self.pager, "", lambda: self._page(1), kind="ghost", width=32,
+                           height=theme.BTN_SM, icon="forward")
         self.next.pack(side="left")
-        muted_label(self.pager, "Double-click to add", size=10).pack(side="right")
+        muted_label(self.pager, "Double-click a card to add it", size=theme.T_CAPTION).pack(side="right")
         self._rows: list[dict[str, Any]] = []
         self._signature = None
         self._pool: list[dict[str, Any]] = []
@@ -171,7 +169,7 @@ class CardResults:
             if item["check_var"].get() != checked:
                 item["check_var"].set(checked)
             if previous is None or previous[2:] != state[2:]:
-                item["add"].configure(text="In bag" if in_bag else "+ Add")
+                item["add"].configure(text="In bag" if in_bag else "Add")
                 set_disabled(item["add"], "Already in your bag" if in_bag else
                              "" if can_add(row) else "A verified local card is required")
         chrome = (len(rows), page, self.view.get("discovery_mode"), self.view.get("result_sort"),

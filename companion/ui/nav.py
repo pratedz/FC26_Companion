@@ -74,29 +74,33 @@ class Surface:
     order: int = 0
     #: Answers "what is this for?" — §2.2's one-line job statement.
     purpose: str = ""
+    #: ``assets/icons/<icon>.png``, tinted by state in the sidebar.
+    icon: str = ""
 
 
-#: §2.2 — five primary surfaces, in tab order. Tabs are click-only (no number keys).
+#: §2.2 — the primary surfaces, in sidebar order. Ctrl+1…6 switch between them.
 SURFACES: tuple[Surface, ...] = (
-    Surface("club", "Club", "companion.ui.surfaces.club", order=1,
-            glyph="⌂", purpose="What is my squad, and is it ready?"),
-    Surface("player", "Player", "companion.ui.surfaces.player", order=2,
-            glyph="◉", purpose="Change this one player."),
-    Surface("add_player", "Sign", "companion.ui.surfaces.add_player",
-            order=3, glyph="+", purpose="Review and sign a Library card for my current team."),
-    Surface("injury", "Injuries", "companion.ui.surfaces.injury",
-            order=4, glyph="✚", purpose="Scan and clear squad injuries."),
-    Surface("automations", "Matchday", "companion.ui.surfaces.automations",
-            order=5, glyph="⟳", purpose="Prepare my Career squad before a match."),
-    Surface("library", "Library", "companion.ui.surfaces.library", order=6,
-            glyph="▤", purpose="Find a card, a player, or more data."),
+    Surface("club", "Club", "companion.ui.surfaces.club", order=1, hotkey="Ctrl+1",
+            icon="squad", purpose="Your squad, read from the open Career save."),
+    Surface("player", "Player", "companion.ui.surfaces.player", order=2, hotkey="Ctrl+2",
+            icon="player", purpose="Change one player with a card or with AI."),
+    Surface("add_player", "Sign", "companion.ui.surfaces.add_player", order=3,
+            hotkey="Ctrl+3", icon="contract",
+            purpose="Search cards, fill the signing bag, check out."),
+    Surface("injury", "Injuries", "companion.ui.surfaces.injury", order=4, hotkey="Ctrl+4",
+            icon="medical", purpose="Scan the squad and heal injuries."),
+    Surface("automations", "Matchday", "companion.ui.surfaces.automations", order=5,
+            hotkey="Ctrl+5", icon="whistle", purpose="Prepare the squad before a match."),
+    Surface("library", "Library", "companion.ui.surfaces.library", order=6, hotkey="Ctrl+6",
+            icon="card", purpose="Find any card from FIFA 18 to FC 26."),
 )
 
 #: The Activity drawer (§3.8) is registered the same way so the shell does not
 #: import it either — a broken drawer must not cost the user their window.
 DRAWER = Surface(
     "activity", "Activity", "companion.ui.surfaces.activity",
-    hotkey="Ctrl+J", order=99, purpose="What did I do, and can I take it back?",
+    hotkey="Ctrl+J", order=99, icon="queue",
+    purpose="Queued, running and finished jobs, plans, health and assets.",
 )
 
 
@@ -290,7 +294,7 @@ def tab_bar(
             fg_color="transparent",
             hover_color=theme.CARD_HOVER,
             text_color=theme.MUTED,
-            font=ctk.CTkFont(family=theme.FONT, size=13),
+            font=ctk.CTkFont(family=theme.FONT, size=theme.T_BODY),
             corner_radius=theme.R_SM,
             width=TAB_WIDTH,
             height=theme.BTN_MD,
@@ -317,7 +321,7 @@ def tab_bar(
             try:
                 label.configure(
                     text_color=theme.TEXT if on else theme.MUTED,
-                    font=ctk.CTkFont(family=theme.FONT, size=13,
+                    font=ctk.CTkFont(family=theme.FONT, size=theme.T_BODY,
                                      weight="bold" if on else "normal"),
                 )
                 rule.configure(fg_color=theme.ACCENT if on else "transparent")
@@ -329,7 +333,70 @@ def tab_bar(
     return frame
 
 
-SIDEBAR_WIDTH = 196
+SIDEBAR_WIDTH = 200
+
+
+def _logo_image(size: int) -> Any:
+    """The brand mark for the sidebar, or None if the asset is missing."""
+    try:
+        from PIL import Image
+
+        from .icons import icons_dir
+
+        path = icons_dir().parent / "logo.png"
+        if not path.is_file():
+            return None
+        return ctk.CTkImage(light_image=Image.open(path), size=(size, size))
+    except Exception:
+        return None
+
+
+def _nav_row(
+    parent: Any,
+    *,
+    icon: str,
+    title: str,
+    command: Callable[[], None],
+    tip: str = "",
+) -> dict[str, Any]:
+    """One sidebar destination: tinted icon + label, whole row clickable."""
+    from .icons import ctk_icon
+    from .widgets.primitives import tooltip
+
+    button = ctk.CTkButton(
+        parent,
+        text=title,
+        image=ctk_icon(icon, 18, tint=theme.MUTED),
+        compound="left",
+        anchor="w",
+        command=command,
+        fg_color="transparent",
+        hover_color=theme.CARD_HOVER,
+        text_color=theme.MUTED,
+        font=ctk.CTkFont(family=theme.FONT, size=theme.T_BODY),
+        corner_radius=theme.R_SM,
+        border_width=0,
+        height=38,
+    )
+    if tip:
+        tooltip(button, tip)
+    return {"button": button, "icon": icon}
+
+
+def _paint_nav_row(item: dict[str, Any], on: bool) -> None:
+    from .icons import ctk_icon
+
+    try:
+        item["button"].configure(
+            fg_color=theme.CARD if on else "transparent",
+            text_color=theme.TEXT if on else theme.MUTED,
+            image=ctk_icon(item["icon"], 18, tint=theme.ACCENT if on else theme.MUTED),
+            font=ctk.CTkFont(
+                family=theme.FONT, size=theme.T_BODY, weight="bold" if on else "normal",
+            ),
+        )
+    except Exception:
+        pass
 
 
 def side_nav(
@@ -339,9 +406,17 @@ def side_nav(
     active: str,
     on_select: Callable[[str], None],
     include: Sequence[str] = (),
+    on_settings: Callable[[], None] | None = None,
+    version: str = "",
 ) -> Any:
-    """Vertical page list. Same ``set_active`` contract as :func:`tab_bar`."""
+    """Vertical page list with Settings pinned to the bottom.
+
+    Same ``set_active`` contract as :func:`tab_bar`. The active page is marked by
+    its filled row, accent icon and weight, not by a coloured edge bar.
+    """
     ensure_ctk()
+    from .widgets.primitives import display_font
+
     keys = tuple(include) or tuple(
         s.key for s in registry.ordered() if s.key != DRAWER.key
     )
@@ -354,70 +429,59 @@ def side_nav(
     )
     frame.pack_propagate(False)
     brand = ctk.CTkFrame(frame, fg_color="transparent")
-    brand.pack(fill="x", padx=theme.SP3, pady=(theme.SP4, theme.SP3))
+    brand.pack(fill="x", padx=theme.SP4, pady=(theme.SP4, theme.SP5))
+    mark = _logo_image(40)
+    if mark is not None:
+        ctk.CTkLabel(brand, text="", image=mark).pack(side="left")
+    words = ctk.CTkFrame(brand, fg_color="transparent")
+    words.pack(side="left", padx=(theme.SP2, 0))
     ctk.CTkLabel(
-        brand,
-        text="FC26",
-        font=ctk.CTkFont(family=theme.FONT, size=18, weight="bold"),
-        text_color=theme.TEXT,
-        anchor="w",
+        words, text="FC26", font=display_font(theme.T_TITLE),
+        text_color=theme.TEXT, anchor="w", height=24,
     ).pack(anchor="w")
     ctk.CTkLabel(
-        brand,
-        text="Companion",
-        font=ctk.CTkFont(family=theme.FONT, size=12),
-        text_color=theme.MUTED,
-        anchor="w",
+        words, text="COMPANION",
+        font=ctk.CTkFont(family=theme.FONT, size=10, weight="bold"),
+        text_color=theme.ACCENT, anchor="w", height=14,
     ).pack(anchor="w")
 
-    tabs: dict[str, tuple[Any, Any]] = {}
+    tabs: dict[str, dict[str, Any]] = {}
     for key in keys:
         surface = registry.get(key)
         if surface is None:
             continue
-        row = ctk.CTkFrame(frame, fg_color="transparent", height=40)
-        row.pack(fill="x", padx=theme.SP2, pady=1)
-        row.pack_propagate(False)
-        mark = ctk.CTkFrame(row, width=3, fg_color="transparent", corner_radius=0)
-        mark.pack(side="left", fill="y")
-        caption = surface.title
-        if surface.glyph:
-            caption = f"{surface.glyph}   {surface.title}"
-        label = ctk.CTkButton(
-            row,
-            text=caption,
-            command=lambda k=key: on_select(k),
-            fg_color="transparent",
-            hover_color=theme.CARD_HOVER,
-            text_color=theme.MUTED,
-            font=ctk.CTkFont(family=theme.FONT, size=14),
-            anchor="w",
-            corner_radius=theme.R_SM,
-            height=36,
+        tip = surface.purpose
+        if surface.hotkey:
+            tip = f"{tip}  ({surface.hotkey})" if tip else surface.hotkey
+        item = _nav_row(
+            frame, icon=surface.icon, title=surface.title,
+            command=lambda k=key: on_select(k), tip=tip,
         )
-        label.pack(side="left", fill="both", expand=True, padx=(theme.SP1, 0))
-        if surface.purpose:
-            from .widgets.primitives import tooltip
+        item["button"].pack(fill="x", padx=theme.SP2, pady=1)
+        tabs[key] = item
 
-            tooltip(label, surface.purpose)
-        tabs[key] = (label, mark)
+    foot = ctk.CTkFrame(frame, fg_color="transparent")
+    foot.pack(side="bottom", fill="x", padx=theme.SP2, pady=(0, theme.SP3))
+    if on_settings is not None:
+        settings = _nav_row(
+            foot, icon="settings", title="Settings", command=on_settings,
+            tip="Display, AI, worker, paths and health  (Ctrl+,)",
+        )
+        settings["button"].pack(fill="x")
+        frame.settings_button = settings["button"]  # type: ignore[attr-defined]
+    if version:
+        ctk.CTkLabel(
+            foot, text=version, anchor="w",
+            font=ctk.CTkFont(family=theme.FONT, size=theme.T_CAPTION),
+            text_color=theme.MUTED_DIM,
+        ).pack(fill="x", padx=theme.SP3, pady=(theme.SP2, 0))
 
     def set_active(key: str) -> None:
-        for k, (label, mark) in tabs.items():
-            on = k == key
-            try:
-                label.configure(
-                    fg_color=theme.CARD if on else "transparent",
-                    text_color=theme.TEXT if on else theme.MUTED,
-                    font=ctk.CTkFont(
-                        family=theme.FONT, size=14, weight="bold" if on else "normal",
-                    ),
-                )
-                mark.configure(fg_color=theme.ACCENT if on else "transparent")
-            except Exception:
-                pass
+        for k, item in tabs.items():
+            _paint_nav_row(item, k == key)
 
     frame.set_active = set_active  # type: ignore[attr-defined]
+    frame.nav_buttons = {k: item["button"] for k, item in tabs.items()}  # type: ignore[attr-defined]
     set_active(active)
     return frame
 
@@ -430,83 +494,61 @@ def segmented_rail(
     on_select: Callable[[str], None],
     compact: bool = False,
 ) -> Any:
-    """Token-styled source switcher — underline, not CTkTabview chrome."""
+    """The one segmented control: a track with equal segments, the active one filled.
+
+    Used for every in-page mode switch (Sign tabs, Player source, Activity
+    sections) so a switch looks and behaves the same everywhere.
+    """
     ensure_ctk()
-    if compact:
-        return _compact_rail(parent, items, active=active, on_select=on_select)
+    height = theme.BTN_MD + 6 if not compact else theme.BTN_SM + 8
     frame = ctk.CTkFrame(
         parent,
         fg_color=theme.PANEL,
-        corner_radius=theme.R_MD,
+        corner_radius=theme.R_SM + 2,
         border_width=1,
         border_color=theme.BORDER,
-        height=44,
+        height=height,
     )
-    frame.pack_propagate(False)
-    inner = ctk.CTkFrame(frame, fg_color="transparent")
-    inner.pack(fill="both", expand=True, padx=theme.SP2, pady=theme.SP1)
-    tabs: dict[str, tuple[Any, Any]] = {}
-    for key, title in items:
-        column = ctk.CTkFrame(inner, fg_color="transparent")
-        column.pack(side="left", padx=(0, theme.SP1), fill="y")
-        label = ctk.CTkButton(
-            column,
-            text=title,
-            command=lambda k=key: on_select(k),
-            fg_color="transparent",
-            hover_color=theme.CARD_HOVER,
-            text_color=theme.MUTED,
-            font=ctk.CTkFont(family=theme.FONT, size=13),
-            corner_radius=theme.R_SM,
-            width=140,
-            height=theme.BTN_MD,
-        )
-        label.pack()
-        rule = ctk.CTkFrame(
-            column, height=2, width=140, fg_color="transparent", corner_radius=0,
-        )
-        rule.pack(fill="x", padx=theme.SP2)
-        tabs[key] = (label, rule)
-
-    def set_active(key: str) -> None:
-        for k, (label, rule) in tabs.items():
-            on = k == key
-            try:
-                label.configure(
-                    text_color=theme.TEXT if on else theme.MUTED,
-                    font=ctk.CTkFont(
-                        family=theme.FONT, size=13, weight="bold" if on else "normal",
-                    ),
-                )
-                rule.configure(fg_color=theme.ACCENT if on else "transparent")
-            except Exception:
-                pass
-
-    frame.set_active = set_active  # type: ignore[attr-defined]
-    set_active(active)
-    return frame
-
-
-def _compact_rail(parent: Any, items: Sequence[tuple[str, str]], *,
-                  active: str, on_select: Callable[[str], None]) -> Any:
-    """Equal columns keep all Activity sections reachable in its 360px drawer."""
-    frame = ctk.CTkFrame(parent, fg_color=theme.PANEL, corner_radius=theme.R_MD, height=40)
     frame.grid_propagate(False)
-    tabs = {}
+    frame.grid_rowconfigure(0, weight=1)
+    tabs: dict[str, Any] = {}
     for index, (key, title) in enumerate(items):
-        frame.grid_columnconfigure(index, weight=1, uniform="activity-tabs")
-        widget = ctk.CTkButton(frame, text=title, width=1, height=theme.BTN_SM,
-            font=ctk.CTkFont(family=theme.FONT, size=12),
-            fg_color="transparent", hover_color=theme.CARD_HOVER,
-            text_color=theme.MUTED, corner_radius=theme.R_SM,
-            command=lambda k=key: on_select(k))
-        widget.grid(row=0, column=index, sticky="ew", padx=2, pady=theme.SP1)
+        frame.grid_columnconfigure(index, weight=1, uniform="segments")
+        widget = ctk.CTkButton(
+            frame,
+            text=title,
+            width=1,
+            height=height - 8,
+            font=ctk.CTkFont(family=theme.FONT, size=theme.T_CAPTION if compact else theme.T_BODY),
+            fg_color="transparent",
+            hover_color=theme.CARD,
+            text_color=theme.MUTED,
+            # CTk pads text by the corner radius; a compact five-way switch in
+            # the 360 px drawer needs that width for the words.
+            corner_radius=2 if compact else theme.R_SM,
+            border_width=0,
+            command=lambda k=key: on_select(k),
+        )
+        widget.grid(row=0, column=index, sticky="nsew", padx=2 if compact else 3, pady=3)
         tabs[key] = widget
 
     def set_active(key: str) -> None:
         for name, widget in tabs.items():
-            widget.configure(fg_color=theme.CARD if name == key else "transparent",
-                             text_color=theme.TEXT if name == key else theme.MUTED)
-    frame.set_active = set_active
+            on = name == key
+            try:
+                widget.configure(
+                    fg_color=theme.CARD_HOVER if on else "transparent",
+                    text_color=theme.TEXT if on else theme.MUTED,
+                    font=ctk.CTkFont(
+                        family=theme.FONT,
+                        size=theme.T_CAPTION if compact else theme.T_BODY,
+                        weight="bold" if on else "normal",
+                    ),
+                )
+            except Exception:
+                pass
+
+    frame.set_active = set_active  # type: ignore[attr-defined]
+    frame.segments = tabs  # type: ignore[attr-defined]
     set_active(active)
     return frame

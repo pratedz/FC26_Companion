@@ -7,9 +7,11 @@ import customtkinter as ctk
 from ....domain.outcome import ApplyOutcome
 from ....domain.job import is_sign_job_label
 from ... import theme
-from ...widgets.primitives import button
+from ...nav import segmented_rail
 
 MODES = ("Search", "Recommendations", "Favourites", "Recently Added")
+#: Shorter visible labels so four segments fit at the minimum window.
+MODE_LABELS = {"Recommendations": "Suggestions", "Recently Added": "Recently added"}
 
 
 def signing_history(svc: Any, *, limit: int = 50) -> tuple[dict[str, Any], ...]:
@@ -91,15 +93,14 @@ class DiscoveryPanel:
                  *, search_host: Any, assistant_host: Any, assistant: Any) -> None:
         self.svc, self.view, self.search = svc, view, search
         self.search_host, self.assistant_host, self.assistant = search_host, assistant_host, assistant
-        self.tabs = ctk.CTkFrame(parent, fg_color="transparent")
-        self.tabs.pack(fill="x", before=search_host, pady=(0, theme.SP2))
-        self.buttons = {}
-        for index, mode in enumerate(MODES):
-            self.tabs.grid_columnconfigure(index, weight=1, uniform="discovery")
-            self.buttons[mode] = button(self.tabs, mode, lambda m=mode: self.select(m),
-                                        kind="ghost", width=1, height=36)
-            self.buttons[mode].grid(row=0, column=index, sticky="ew", padx=(0, 4))
         mode = view.get("discovery_mode", "Search")
+        self.tabs = segmented_rail(
+            parent, [(m, MODE_LABELS.get(m, m)) for m in MODES],
+            active=mode if mode in MODES else "Search",
+            on_select=lambda m: self.select(m),
+        )
+        self.tabs.pack(fill="x", before=search_host, pady=(0, theme.SP3))
+        self.buttons = self.tabs.segments
         self.select(mode if mode in MODES else "Search", initial=True)
 
     def receive_recommendations(self, rows: Any, **kwargs: Any) -> None:
@@ -153,16 +154,13 @@ class DiscoveryPanel:
             self.view.update(self.assistant.assistant_fields())
             self.search.cache_current_mode()
         self.view["discovery_mode"] = mode
-        for name, control in self.buttons.items():
-            control.configure(fg_color=theme.ACCENT if name == mode else theme.CARD,
-                              text_color=theme.BG if name == mode else theme.MUTED,
-                              border_color=theme.ACCENT if name == mode else theme.BORDER)
+        self.tabs.set_active(mode)
         self.search_host.pack_forget()
         self.assistant_host.pack_forget()
         if mode == "Search":
-            self.search_host.pack(fill="x", after=self.tabs, pady=(0, theme.SP2))
+            self.search_host.pack(fill="x", after=self.tabs, pady=(0, theme.SP3))
         elif mode == "Recommendations":
-            self.assistant_host.pack(fill="x", after=self.tabs, pady=(0, theme.SP2))
+            self.assistant_host.pack(fill="x", after=self.tabs, pady=(0, theme.SP3))
         cache = self.view.get("discovery_cache", {}).get(mode, {})
         self.view["selected_key"] = cache.get("selected_key", "")
         self.view["checked_keys"] = cache.get("checked_keys", ())
@@ -176,7 +174,7 @@ class DiscoveryPanel:
         elif mode == "Recently Added":
             self.refresh_recent()
         elif mode == "Search" and not cache.get("rows"):
-            self.search.show_empty_results("Find your next signing", "Search your local Library by player name. Verified cards can enter the bag; Checkout reviews the exact safe targets.")
+            self.search.show_empty_results("Find your next signing", "Type a player name above and press Enter. Verified cards can go in the bag; checkout reviews the exact safe targets before anything is signed.")
         elif mode == "Recommendations" and not cache.get("rows"):
             self.search.show_empty_results("Tell Codex what your squad needs", "Try a young backup striker, an experienced CM, or three realistic signings. Only cards resolved in your local Library can enter the bag.")
         self.search.sync_add_button()

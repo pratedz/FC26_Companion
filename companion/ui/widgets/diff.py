@@ -458,8 +458,8 @@ def _line_row(parent: Any, line: DiffLine) -> Any:
     ensure_ctk()
     row = ctk.CTkFrame(parent, fg_color="transparent")
     text_label(
-        row, line.label, size=12,
-        color=theme.MUTED if line.is_change else theme.MUTED_DIM, width=150,
+        row, line.label, size=theme.T_SMALL,
+        color=theme.MUTED if line.is_change else theme.MUTED_DIM, width=160,
     ).pack(side="left", anchor="n")
 
     col = ctk.CTkFrame(row, fg_color="transparent")
@@ -467,7 +467,7 @@ def _line_row(parent: Any, line: DiffLine) -> Any:
     value = ctk.CTkLabel(
         col,
         text=line.text,
-        font=ui_font(12, bold=line.is_change),
+        font=ui_font(theme.T_SMALL, bold=line.is_change),
         # P3: an unread "before" is dimmed to PROV_UNKNOWN, never TEXT.
         text_color=(
             theme.PROV_UNKNOWN if not line.before_known
@@ -495,7 +495,7 @@ def _line_row(parent: Any, line: DiffLine) -> Any:
     except Exception:
         pass
     if line.note:
-        muted_label(col, line.note, size=10).pack(anchor="w")
+        muted_label(col, line.note, size=theme.T_CAPTION).pack(anchor="w")
     return row
 
 
@@ -504,17 +504,24 @@ def diff_view(parent: Any, model: DiffModel, *, on_view_raw: Callable[[], None] 
     ensure_ctk()
     host = ctk.CTkFrame(parent, fg_color="transparent")
 
-    if model.subject_text:
-        text_label(host, model.subject_text.upper(), size=13, bold=True).pack(
-            anchor="w", pady=(0, theme.SP2)
+    if model.subject:
+        who = ctk.CTkFrame(host, fg_color="transparent")
+        who.pack(fill="x", pady=(0, theme.SP3))
+        text_label(who, model.subject, size=theme.T_HEADING, bold=True).pack(side="left")
+        if model.subject_id is not None:
+            muted_label(who, f"ID {model.subject_id}", size=theme.T_SMALL).pack(
+                side="left", padx=(theme.SP2, 0))
+    elif model.subject_text:
+        text_label(host, model.subject_text, size=theme.T_HEADING, bold=True).pack(
+            anchor="w", pady=(0, theme.SP3)
         )
 
     if model.headline is not None and model.headline_delta is not None:
         head = panel(host, level=2)
-        head.pack(fill="x", pady=(0, theme.SP3))
+        head.pack(fill="x", pady=(0, theme.SP4))
         inner = ctk.CTkFrame(head, fg_color="transparent")
         inner.pack(padx=theme.SP4, pady=theme.SP3, anchor="w")
-        muted_label(inner, model.headline.label.upper(), size=10).pack(anchor="w")
+        muted_label(inner, model.headline.label, size=theme.T_SMALL).pack(anchor="w")
         ovr_delta_chips(inner, model.headline.before, model.headline.after,
                         size="lg").pack(anchor="w", pady=(theme.SP1, 0))
         if model.headline_delta.band_changed:
@@ -522,19 +529,19 @@ def diff_view(parent: Any, model: DiffModel, *, on_view_raw: Callable[[], None] 
                 inner,
                 f"{model.headline_delta.band_before} {ARROW} "
                 f"{model.headline_delta.band_after}",
-                size=10,
+                size=theme.T_CAPTION,
             ).pack(anchor="w", pady=(theme.SP1, 0))
 
     for group in model.groups:
-        if not group.lines:
-            continue
+        shown = [line for line in group.lines if line is not model.headline]
+        if not shown:
+            continue  # a group whose only line is the headline adds an empty title
         block = ctk.CTkFrame(host, fg_color="transparent")
         block.pack(fill="x", pady=(0, theme.SP3))
-        muted_label(block, group.name.upper(), size=10).pack(anchor="w",
-                                                             pady=(0, theme.SP1))
-        for line in group.lines:
-            if line is model.headline:
-                continue  # already shown, prominently
+        text_label(block, group.name[:1].upper() + group.name[1:].lower(),
+                   size=theme.T_CAPTION, bold=True, color=theme.MUTED).pack(
+            anchor="w", pady=(0, theme.SP1))
+        for line in shown:
             _line_row(block, line).pack(fill="x", pady=1)
 
     if model.unread_note:
@@ -544,19 +551,18 @@ def diff_view(parent: Any, model: DiffModel, *, on_view_raw: Callable[[], None] 
         )
         warn.pack(fill="x", pady=(0, theme.SP3))
         ctk.CTkLabel(
-            warn, text=model.unread_note, font=ui_font(11),
+            warn, text=model.unread_note, font=ui_font(theme.T_SMALL),
             text_color=theme.WARNING, wraplength=560, justify="left", anchor="w",
         ).pack(fill="x", padx=theme.SP3, pady=theme.SP2)
 
     if model.blast_radius:
-        muted_label(host, f"⚠ {model.blast_radius}", size=11).pack(
-            anchor="w", pady=(0, theme.SP2)
-        )
-    if model.undo_note:
-        muted_label(host, f"↩ {model.undo_note}", size=11).pack(anchor="w")
+        muted_label(host, model.blast_radius, size=theme.T_SMALL, wraplength=560,
+                    justify="left").pack(anchor="w", pady=(0, theme.SP2))
+    if model.undo_note and model.has_changes:
+        muted_label(host, model.undo_note, size=theme.T_SMALL).pack(anchor="w")
     if on_view_raw is not None:
-        button(host, f"▸ {len(model.lines)} raw fields · view Lua", on_view_raw,
-               kind="ghost", height=26).pack(anchor="w", pady=(theme.SP3, 0))
+        button(host, f"View all {len(model.lines)} raw fields and the Lua", on_view_raw,
+               kind="ghost", height=theme.BTN_SM).pack(anchor="w", pady=(theme.SP3, 0))
     return host
 
 
@@ -594,8 +600,32 @@ def diff_sheet(
             on_cancel()
 
     header = ctk.CTkFrame(win, fg_color="transparent")
-    header.pack(fill="x", padx=theme.SP5, pady=(theme.SP5, theme.SP3))
-    text_label(header, model.title, size=18, bold=True).pack(anchor="w")
+    header.pack(fill="x", padx=theme.SP5, pady=(theme.SP5, theme.SP4))
+    if not model.has_changes:
+        # Nothing staged: say what to do instead of listing untouched fields
+        # next to an undo warning that could not apply.
+        text_label(header, "Nothing to review yet", size=theme.T_TITLE, display=True).pack(anchor="w")
+        muted_label(
+            header,
+            "Stage a change on Player, from a Library card or with AI, and it appears here "
+            "for review before anything is written to FC 26.",
+            size=theme.T_BODY, wraplength=520, justify="left",
+        ).pack(anchor="w", pady=(theme.SP2, 0))
+        footer = ctk.CTkFrame(win, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", padx=theme.SP5, pady=theme.SP4)
+        close_btn = button(footer, "Close", _close, kind="secondary", width=120,
+                           height=theme.BTN_LG)
+        close_btn.pack(side="right")
+        win.geometry("600x260")
+        win.protocol("WM_DELETE_WINDOW", _close)
+        win.bind("<Escape>", lambda _e: _close())
+        try:
+            win.after(50, win.grab_set)
+            win.after(60, close_btn.focus_set)
+        except Exception:
+            pass
+        return win
+    text_label(header, model.title, size=theme.T_TITLE, display=True).pack(anchor="w")
 
     scroll = themed_scroll(win, fill=theme.BG, height=320)
     scroll.pack(fill="x", padx=theme.SP5)
@@ -608,7 +638,7 @@ def diff_sheet(
         muted_label(
             footer,
             f"Can't apply yet: {blocked_reason}",
-            size=10,
+            size=theme.T_SMALL,
             color=theme.WARNING,
             wraplength=360,
         ).pack(side="left", fill="x", expand=True, padx=(0, theme.SP2))
@@ -625,9 +655,9 @@ def diff_sheet(
         on_apply()
 
     apply_btn = button(footer, model.apply_label, _apply, kind="primary", width=150,
-                       height=34, disabled_reason=blocked_reason)
+                       height=theme.BTN_LG, icon="apply", disabled_reason=blocked_reason)
     apply_btn.pack(side="right")
-    button(footer, "Cancel", _close, kind="ghost", height=34).pack(
+    button(footer, "Cancel", _close, kind="ghost", height=theme.BTN_LG, width=100).pack(
         side="right", padx=(0, theme.SP2)
     )
 

@@ -7,7 +7,7 @@ from typing import Any
 from ....app.presenters import editor_view
 from ....domain.player import ATTRIBUTE_GROUPS, CATEGORIES, FIELD_SPECS
 from ... import theme
-from ...widgets.primitives import button, eyebrow, muted_label, panel, text_label, themed_scroll
+from ...widgets.primitives import button, section_title, muted_label, panel, text_label, themed_scroll
 from .._common import set_status
 
 try:  # pragma: no cover
@@ -38,7 +38,7 @@ def _build_quick_editor(
 
     ratings = panel(host, level=2)
     ratings.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP1))
-    eyebrow(ratings, "Core ratings").pack(anchor="w", padx=theme.SP3, pady=(theme.SP2, 0))
+    section_title(ratings, "Core ratings").pack(anchor="w", padx=theme.SP3, pady=(theme.SP2, 0))
     quick = ctk.CTkFrame(ratings, fg_color="transparent")
     quick.pack(fill="x", padx=theme.SP3, pady=(theme.SP1, theme.SP2))
     left_quick = ctk.CTkFrame(quick, fg_color="transparent")
@@ -61,7 +61,7 @@ def _build_quick_editor(
 
     section_bar = ctk.CTkFrame(host, fg_color="transparent")
     section_bar.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP1))
-    eyebrow(section_bar, "Fine tune").pack(side="left", padx=(0, theme.SP3))
+    section_title(section_bar, "Fine tune").pack(side="left", padx=(0, theme.SP3))
     section_buttons: dict[str, Any] = {}
     detail = themed_scroll(host, fill=theme.CARD, height=220)
     detail.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP2))
@@ -381,7 +381,7 @@ def _stepper_field_row(
     if value is not None:
         entry.insert(0, str(value))
 
-    error = muted_label(row, "", size=9, color=theme.DANGER)
+    error = muted_label(row, "", size=theme.T_MICRO, color=theme.DANGER)
 
     def show_error(message: str) -> None:
         try:

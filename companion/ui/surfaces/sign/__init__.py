@@ -59,22 +59,24 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         view["discovery_cache"][view["discovery_mode"]] = {
             "rows": view["rows"], "selected_key": view.get("selected_key", ""),
             "checked_keys": view.get("checked_keys", ())}
-    section_header(root, "Sign Player", subtitle=
-                   "Search verified cards, add them to your bag, then Checkout once to review safe free-agent targets.")
+    section_header(root, "Sign players", subtitle=
+                   "Search verified cards, add them to your bag, then check out once to review safe free-agent targets.")
     readiness_host = ctk.CTkFrame(root, fg_color="transparent", height=1)
     readiness_host.pack(fill="x")
     _readiness(readiness_host, svc, svc.store.snapshot(), view)
     progress_row = panel(root, level=1)
     progress_inner = ctk.CTkFrame(progress_row, fg_color="transparent", height=1)
-    progress_inner.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
-    progress_label = muted_label(progress_inner, "", size=11, wraplength=520, justify="left")
+    progress_inner.pack(fill="x", padx=theme.SP4, pady=theme.SP3)
+    progress_label = muted_label(progress_inner, "", size=theme.T_SMALL, wraplength=520, justify="left")
     progress_label.pack(side="left", fill="x", expand=True)
-    activity_btn = button(progress_inner, "Activity", lambda: svc.ui.open_activity(), kind="ghost", height=28, width=70)
-    drain_btn = button(progress_inner, "Copy Lua drain", lambda: _copy_sign_lua_drain(svc), kind="ghost", height=28, width=100)
+    activity_btn = button(progress_inner, "Activity", lambda: svc.ui.open_activity(), kind="ghost",
+                          height=theme.BTN_SM, icon="queue")
+    drain_btn = button(progress_inner, "Copy Lua drain", lambda: _copy_sign_lua_drain(svc), kind="ghost",
+                       height=theme.BTN_SM)
     plan_signed_btn = button(progress_inner, "Plan signed players", lambda: None,
-                             kind="primary", height=28)
-    club_signed_btn = button(progress_inner, "Recently Added in Club", lambda: None,
-                             kind="ghost", height=28)
+                             kind="accent", height=theme.BTN_SM)
+    club_signed_btn = button(progress_inner, "Recently added in Club", lambda: None,
+                             kind="ghost", height=theme.BTN_SM)
     workspace = ctk.CTkFrame(root, fg_color="transparent", height=1, width=1)
     workspace.pack(fill="both", expand=True)
     workspace.grid_rowconfigure(0, weight=1)

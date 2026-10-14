@@ -347,7 +347,7 @@ def select_player(state, pid):
         from ...domain.squad_session import SquadTarget
         target = SquadTarget(pid, member.name, member.position, member.ovr, member.base.get("potential"),
                              member.ovr or 75, "rotation", "Outside the current request scope.")
-    text_label(host, member.name, size=20, bold=True).pack(anchor="w")
+    text_label(host, member.name, size=theme.T_TITLE, bold=True).pack(anchor="w")
     muted_label(host, f"{target.position or 'Player'}  ·  Current overall {member.ovr or '—'}", size=11).pack(anchor="w", pady=(3, 12))
     if state.get("team_context") is not None:
         context = state["team_context"]

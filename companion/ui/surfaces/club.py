@@ -11,10 +11,23 @@ from typing import Any, Sequence
 
 from ...app.presenters import liveness_view, squad_view
 from .. import theme
-from ..widgets.primitives import button, ensure_ctk, eyebrow, muted_label, panel, pill, set_disabled, text_label
+from ..widgets.primitives import (
+    button,
+    ensure_ctk,
+    muted_label,
+    panel,
+    pill,
+    restyle_button,
+    search_box,
+    section_title,
+    set_disabled,
+    text_label,
+    tooltip,
+)
 from ..widgets.states import loading_row, skeleton_table
 from ..widgets.table import Column, DataGrid, TableModel
 from ._common import (
+    collapse_below,
     filter_squad_rows,
     identity_row,
     monogram,
@@ -66,12 +79,12 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         section_header(
             root,
             "Reading your squad",
-            subtitle="Keep Career Mode open. The grid appears when the live export finishes.",
+            subtitle="Keep Career Mode open. The list appears when the live export finishes.",
         )
         banner = panel(root, level=1)
-        banner.pack(fill="x", pady=(0, theme.SP2))
+        banner.pack(fill="x", pady=(0, theme.SP3))
         loading_row(banner, "Reading squad from Career Mode…").pack(
-            anchor="w", padx=theme.SP3, pady=theme.SP2
+            anchor="w", padx=theme.SP4, pady=theme.SP3
         )
         skeleton_table(root).pack(fill="both", expand=True, pady=(theme.SP2, 0))
     elif phase == "setup":
@@ -136,11 +149,7 @@ def _build_setup(
     root: Any, svc: Any, live: dict, squad: dict, worker: dict[str, Any]
 ) -> None:
     del squad
-    section_header(
-        root,
-        "Club",
-        subtitle="What is my squad, and is it ready?",
-    )
+    section_header(root, "Club", subtitle="Connect to your Career save to see your squad.")
     worker_ok = bool(worker.get("installed"))
     ready = bool(live["armed"])
     game_open = _fc_is_running()
@@ -174,46 +183,45 @@ def _build_setup(
     hero = panel(root, level=1)
     hero.pack(fill="x", pady=(0, theme.SP3))
     hero_top = ctk.CTkFrame(hero, fg_color="transparent")
-    hero_top.pack(fill="x", padx=theme.SP4, pady=(theme.SP3, theme.SP2))
+    hero_top.pack(fill="x", padx=theme.SP5, pady=theme.SP5)
     copy = ctk.CTkFrame(hero_top, fg_color="transparent")
     copy.pack(side="left", fill="x", expand=True)
-    eyebrow(copy, "Next step").pack(anchor="w")
-    text_label(copy, next_title, size=16, bold=True).pack(anchor="w", pady=(2, 0))
-    muted_label(copy, next_copy, size=11).pack(anchor="w", pady=(2, 0))
+    text_label(copy, next_title, size=theme.T_HEADLINE, display=True).pack(anchor="w")
+    muted_label(copy, next_copy, size=theme.T_BODY, wraplength=560, justify="left").pack(
+        anchor="w", pady=(theme.SP2, 0)
+    )
     if ready:
         button(
             hero_top, "Read my squad", lambda: _read_squad(svc),
             kind="primary", height=theme.BTN_LG, width=150,
-        ).pack(side="right", padx=(theme.SP3, 0))
+        ).pack(side="right", padx=(theme.SP4, 0))
     elif game_open or worker_ok:
         button(
             hero_top, "Connect in this Career", lambda: _repair_connection(svc),
             kind="primary", height=theme.BTN_LG, width=190,
-        ).pack(side="right", padx=(theme.SP3, 0))
+        ).pack(side="right", padx=(theme.SP4, 0))
         button(
             hero_top, "Check connection", lambda: _refresh_connection(svc),
-            kind="ghost", height=theme.BTN_LG, width=142,
+            kind="secondary", height=theme.BTN_LG, width=150,
         ).pack(side="right", padx=(theme.SP2, 0))
     else:
         button(
             hero_top, "Install Companion worker", lambda: _install_worker(svc),
-            kind="primary", height=theme.BTN_LG, width=190,
+            kind="primary", height=theme.BTN_LG, width=200,
             disabled_reason=(
                 "Worker installation is disabled while this visual-test app root is active."
                 if _is_temporary_app_root(svc) else ""
             ),
-        ).pack(side="right", padx=(theme.SP3, 0))
+        ).pack(side="right", padx=(theme.SP4, 0))
 
-    guide = panel(root, level=1)
-    guide.pack(fill="x")
-    eyebrow(guide, "What happens next").pack(
-        anchor="w", padx=theme.SP3, pady=(theme.SP2, 0)
-    )
+    note = ctk.CTkFrame(root, fg_color="transparent")
+    note.pack(fill="x", padx=theme.SP1)
     muted_label(
-        guide,
-        "Read Squad only copies the active Career squad into this Companion. Nothing is changed in FC 26 until you review and apply a later edit.",
-        size=11,
-    ).pack(anchor="w", padx=theme.SP3, pady=(theme.SP1, theme.SP3))
+        note,
+        "Reading the squad only copies it into the Companion. Nothing changes in FC 26 "
+        "until you review and apply an edit.",
+        size=theme.T_SMALL,
+    ).pack(anchor="w")
 
 
 def _readiness_chips(
@@ -223,57 +231,50 @@ def _readiness_chips(
     game_open: bool,
     live: dict,
     squad_ready: bool,
+    svc: Any = None,
 ) -> Any:
-    """Compact readiness row — real worker/game/LE state only."""
+    """The four connection steps, as one strip. Real worker/game/LE state only.
+
+    On the squad board (``squad_ready``) the strip only appears while a step
+    needs attention; the header chip already says "Connected" when all is well.
+    """
     ensure_ctk()
-    row = ctk.CTkFrame(parent, fg_color="transparent")
-    row.pack(fill="x", pady=(0, theme.SP2))
+    from ..icons import ctk_icon
+
     armed = bool(live.get("armed"))
     pill_name = str(live.get("pill") or "")
     career_ok = armed and pill_name in ("LIVE", "ARMED", "WAITING")
     conn_ok = armed and pill_name in ("LIVE", "ARMED")
-    conn_label = pill_name if armed else "Offline"
     items = (
         ("Worker", "Installed" if worker_ok else "Needs install", worker_ok),
         ("FC 26", "Running" if game_open else "Not detected", game_open),
         ("Career Mode", "Ready" if career_ok else "Waiting", career_ok),
-        ("Connection", conn_label if conn_ok else ("Waiting" if armed else "Offline"), conn_ok),
+        ("Connection", "Connected" if conn_ok else ("Waiting" if armed else "Offline"), conn_ok),
     )
+    if squad_ready and all(done for _t, _d, done in items):
+        return None
     if squad_ready:
-        items = items  # squad readiness shown via board caption, not a fifth chip
+        # On the board, only the steps that need attention, plus a way forward.
+        items = tuple(item for item in items if not item[2])
+    row = panel(parent, level=1)
+    row.pack(fill="x", pady=(0, theme.SP3))
+    if squad_ready and svc is not None:
+        button(row, "Check connection", lambda: _refresh_connection(svc), kind="secondary",
+               icon="refresh", height=theme.BTN_SM).pack(side="right", padx=theme.SP4)
     for i, (title, detail, done) in enumerate(items):
-        chip = panel(row, level=1)
-        chip.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else theme.SP2, 0))
-        inner = ctk.CTkFrame(chip, fg_color="transparent")
-        inner.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
-        mark = "✓" if done else "·"
-        text_label(
-            inner, mark, size=13, bold=True,
-            color=theme.SUCCESS if done else theme.MUTED, width=18,
-        ).pack(side="left")
-        words = ctk.CTkFrame(inner, fg_color="transparent")
+        cell = ctk.CTkFrame(row, fg_color="transparent")
+        cell.pack(side="left", fill="x", expand=True, padx=(theme.SP4 if i == 0 else theme.SP2, 0),
+                  pady=theme.SP3)
+        image = ctk_icon("success" if done else "warning", 18,
+                         tint=theme.SUCCESS if done else theme.WARNING)
+        ctk.CTkLabel(cell, text="" if image else ("OK" if done else "!"), image=image,
+                     width=22).pack(side="left", padx=(0, theme.SP2))
+        words = ctk.CTkFrame(cell, fg_color="transparent")
         words.pack(side="left", fill="x", expand=True)
-        text_label(words, title, size=12, bold=True).pack(anchor="w")
-        muted_label(words, detail, size=10).pack(anchor="w")
+        text_label(words, title, size=theme.T_SMALL, bold=True).pack(anchor="w")
+        muted_label(words, detail, size=theme.T_CAPTION,
+                    color=theme.MUTED if done else theme.WARNING).pack(anchor="w")
     return row
-
-
-def _setup_status(
-    parent: Any, number: str, title: str, detail: str, done: bool, *, last: bool = False
-) -> None:
-    """One first-run step row inside the hero panel — not a nested card."""
-    del last
-    row = ctk.CTkFrame(parent, fg_color="transparent")
-    row.pack(fill="x", pady=(0, theme.SP1))
-    marker = "✓" if done else number
-    text_label(
-        row, marker, size=13, bold=True,
-        color=theme.SUCCESS if done else theme.MUTED, width=24,
-    ).pack(side="left")
-    words = ctk.CTkFrame(row, fg_color="transparent")
-    words.pack(side="left", fill="x", expand=True)
-    text_label(words, title, size=13, bold=True).pack(anchor="w")
-    muted_label(words, detail, size=11).pack(anchor="w")
 
 
 def _fc_is_running() -> bool:
@@ -353,40 +354,6 @@ def _repair_connection(svc: Any) -> None:
         set_status(svc, f"Could not prepare connection repair: {exc}")
 
 
-def _step_row(
-    parent: Any,
-    n: int,
-    title: str,
-    detail: str,
-    *,
-    done: bool = False,
-    automatic: bool = False,
-    action_label: str = "",
-    action: Any = None,
-    primary: bool = False,
-) -> None:
-    ensure_ctk()
-    row = ctk.CTkFrame(parent, fg_color="transparent")
-    row.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
-    mark = "✓" if done else ("◌" if automatic or action else "○")
-    color = theme.SUCCESS if done else (theme.ACCENT if primary else theme.MUTED)
-    text_label(row, f"{mark}  {n}", size=13, bold=True, color=color, width=48).pack(
-        side="left", anchor="n"
-    )
-    mid = ctk.CTkFrame(row, fg_color="transparent")
-    mid.pack(side="left", fill="x", expand=True)
-    text_label(mid, title, size=13, bold=True).pack(anchor="w")
-    muted_label(mid, detail, size=11).pack(anchor="w")
-    if automatic:
-        muted_label(row, "automatic", size=10).pack(side="right", padx=(theme.SP2, 0))
-    elif action_label and action is not None:
-        button(
-            row, action_label, action,
-            kind="ghost",
-            height=theme.BTN_SM,
-        ).pack(side="right")
-
-
 def _avg_ovr(squad: dict) -> int | None:
     ovrs: list[int] = []
     for player in squad.get("players") or ():
@@ -398,10 +365,11 @@ def _avg_ovr(squad: dict) -> int | None:
 
 
 def _squad_caption(squad: dict, avg_ovr: int | None) -> str:
-    del avg_ovr
-    text = f"avg  ·  {squad['count']} players  ·  {squad['caption']}"
+    text = f"{squad['count']} players  ·  {squad['caption']}"
+    if avg_ovr is not None:
+        text = f"average  ·  {text}"
     if squad.get("stale"):
-        text += "  ·  stale — refresh recommended"
+        text += "  ·  stale, refresh recommended"
     return text
 
 
@@ -419,6 +387,8 @@ def _focus_player(model: TableModel) -> dict | None:
 def _paint_selection_card(host: Any, row: dict | None, svc: Any) -> None:
     """Side card from real board fields only (name/pos/ovr/pot/age)."""
     ensure_ctk()
+    from ..widgets.ovr import ovr_chip
+
     for child in list(host.winfo_children()):
         try:
             child.destroy()
@@ -427,15 +397,16 @@ def _paint_selection_card(host: Any, row: dict | None, svc: Any) -> None:
     if row is None:
         muted_label(
             host,
-            "Select a player to inspect. Double-click or Open to edit on Player.",
-            size=11,
-            wraplength=200,
-        ).pack(anchor="w", padx=theme.SP3, pady=theme.SP3)
+            "Click a player to see them here. Double-click opens them in Player.",
+            size=theme.T_SMALL,
+            wraplength=220,
+            justify="left",
+        ).pack(anchor="w", padx=theme.SP4, pady=(theme.SP2, theme.SP4))
         return
     name = str(row.get("name") or "—")
     letters = monogram(name, fallback="PL")
     head = ctk.CTkFrame(host, fg_color="transparent")
-    head.pack(fill="x", padx=theme.SP3, pady=(theme.SP3, theme.SP2))
+    head.pack(fill="x", padx=theme.SP4, pady=(theme.SP2, theme.SP3))
     mono = ctk.CTkFrame(
         head, width=56, height=56, fg_color=theme.CARD_HOVER, corner_radius=theme.R_MD,
     )
@@ -449,37 +420,36 @@ def _paint_selection_card(host: Any, row: dict | None, svc: Any) -> None:
     if portrait_pid > 0:
         avatar(mono, svc, portrait_pid, name)
     else:
-        text_label(mono, letters[:2], size=16, bold=True).pack(expand=True)
+        text_label(mono, letters[:2], size=theme.T_HEADLINE, display=True,
+                   color=theme.ACCENT).pack(expand=True)
     meta = ctk.CTkFrame(head, fg_color="transparent")
     meta.pack(side="left", fill="x", expand=True)
-    text_label(meta, name, size=14, bold=True).pack(anchor="w")
+    text_label(meta, name, size=theme.T_HEADING, bold=True, wraplength=150,
+               justify="left").pack(anchor="w")
     muted_label(
         meta,
         f"{row.get('pos') or '—'}  ·  Age {row.get('age') or '—'}",
-        size=11,
+        size=theme.T_SMALL,
     ).pack(anchor="w", pady=(2, 0))
 
     stats = ctk.CTkFrame(host, fg_color="transparent")
-    stats.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP2))
-    for label, key in (("OVR", "ovr"), ("POT", "pot")):
-        cell = panel(stats, level=2)
-        cell.pack(side="left", fill="x", expand=True, padx=(0, theme.SP2))
-        text_label(cell, str(row.get(key) or "—"), size=18, bold=True, color=theme.SUCCESS).pack(
-            anchor="w", padx=theme.SP3, pady=(theme.SP2, 0)
-        )
-        muted_label(cell, label, size=10).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP2))
+    stats.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP3))
+    for label, key in (("Overall", "ovr"), ("Potential", "pot")):
+        cell = ctk.CTkFrame(stats, fg_color="transparent")
+        cell.pack(side="left", padx=(0, theme.SP4))
+        try:
+            value = int(row.get(key))
+        except (TypeError, ValueError):
+            value = None
+        ovr_chip(cell, value, size="md").pack(anchor="w")
+        muted_label(cell, label, size=theme.T_CAPTION).pack(anchor="w", pady=(theme.SP1, 0))
 
     pid = row.get("id")
-    muted_label(host, f"ID {pid}" if pid not in (None, "", "—") else "No player id", size=10).pack(
-        anchor="w", padx=theme.SP3, pady=(0, theme.SP2)
-    )
-    button(
-        host,
-        "Open in Player Page",
-        lambda r=row: _select_player(svc, r),
-        kind="accent",
-        height=theme.BTN_MD,
-    ).pack(fill="x", padx=theme.SP3, pady=(0, theme.SP3))
+    muted_label(host, f"Player ID {pid}" if pid not in (None, "", "—") else "No player ID",
+                size=theme.T_CAPTION).pack(anchor="w", padx=theme.SP4, pady=(0, theme.SP3))
+    muted_label(host, "Double-click the row, or use Open below, to edit in Player.",
+                size=theme.T_CAPTION, wraplength=220, justify="left").pack(
+        anchor="w", padx=theme.SP4, pady=(0, theme.SP3))
     if portrait_pid > 0:
         portrait_controls(host, svc, portrait_pid)
 
@@ -496,34 +466,6 @@ def _build_squad(
 ) -> None:
     ensure_ctk()
 
-    head = ctk.CTkFrame(root, fg_color="transparent")
-    head.pack(fill="x", pady=(0, theme.SP2))
-    left = ctk.CTkFrame(head, fg_color="transparent")
-    left.pack(side="left", fill="x", expand=True)
-    section_header(
-        left,
-        "Club",
-        subtitle="What is my squad, and is it ready?",
-    )
-
-    right = ctk.CTkFrame(head, fg_color="transparent")
-    right.pack(side="right", anchor="n", pady=(theme.SP1, 0))
-    # One primary CTA: prefer Refresh when the squad needs it; otherwise Open selected.
-    refresh_is_primary = bool(squad.get("needs_refresh") or squad.get("stale")) and not sync_pending
-    button(
-        right, "Reading squad…" if sync_pending else "Refresh squad", lambda: _read_squad(svc),
-        kind="primary" if refresh_is_primary else "ghost", height=theme.BTN_MD,
-        disabled_reason="A squad read is already queued." if sync_pending else "",
-    ).pack(side="left")
-
-    _readiness_chips(
-        root,
-        worker_ok=bool(worker.get("installed")),
-        game_open=_fc_is_running(),
-        live=live,
-        squad_ready=True,
-    )
-
     team = "Squad"
     if squad["players"]:
         sample = squad["players"][0]
@@ -535,40 +477,59 @@ def _build_squad(
         except (TypeError, ValueError):
             pass
     avg_ovr = round(sum(ovrs) / len(ovrs)) if ovrs else None
+
+    # ---- header: the club is the page title -------------------------------
+    head = ctk.CTkFrame(root, fg_color="transparent")
+    head.pack(fill="x", pady=(0, theme.SP4))
     identity = identity_row(
-        root,
+        head,
         letters=monogram(team),
         title=team,
         caption=_squad_caption(squad, avg_ovr),
         ovr=avg_ovr,
     )
-    identity.pack(anchor="w", pady=(0, theme.SP2))
+    identity.pack(side="left", fill="x", expand=True)
+    refresh_is_primary = bool(squad.get("needs_refresh") or squad.get("stale")) and not sync_pending
+    button(
+        head, "Reading squad…" if sync_pending else "Refresh squad", lambda: _read_squad(svc),
+        kind="primary" if refresh_is_primary else "secondary", height=theme.BTN_MD,
+        icon="refresh",
+        disabled_reason="A squad read is already queued." if sync_pending else "",
+    ).pack(side="right", anchor="n", pady=(theme.SP1, 0))
+
+    _readiness_chips(
+        root,
+        worker_ok=bool(worker.get("installed")),
+        game_open=_fc_is_running(),
+        live=live,
+        squad_ready=True,
+        svc=svc,
+    )
 
     if not live["armed"] or squad.get("stale") or sync_pending:
         sync_strip = panel(root, level=1)
-        sync_strip.pack(fill="x", pady=(0, theme.SP2))
+        sync_strip.pack(fill="x", pady=(0, theme.SP3))
         if sync_pending:
             loading_row(sync_strip, "Reading squad… Keep Career Mode open.").pack(
-                anchor="w", padx=theme.SP3, pady=theme.SP2
+                anchor="w", padx=theme.SP4, pady=theme.SP3
             )
-            skeleton_table(root, rows=4).pack(fill="x", pady=(0, theme.SP2))
         elif not live["armed"]:
             row = ctk.CTkFrame(sync_strip, fg_color="transparent")
-            row.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
+            row.pack(fill="x", padx=theme.SP4, pady=theme.SP3)
             pill(row, "Offline", tone="warn").pack(side="left")
             muted_label(
                 row,
-                "Connection lost — showing your last squad. Reconnect Live Editor, then refresh.",
-                size=11,
+                "Connection lost. Showing your last squad; reconnect Live Editor, then refresh.",
+                size=theme.T_SMALL,
             ).pack(side="left", padx=(theme.SP2, 0))
         else:
             row = ctk.CTkFrame(sync_strip, fg_color="transparent")
-            row.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
+            row.pack(fill="x", padx=theme.SP4, pady=theme.SP3)
             pill(row, "Stale", tone="warn").pack(side="left")
             muted_label(
                 row,
-                "Squad data is stale — refresh when Career Mode is ready.",
-                size=11,
+                "This squad may be out of date. Refresh when Career Mode is ready.",
+                size=theme.T_SMALL,
             ).pack(side="left", padx=(theme.SP2, 0))
 
     all_rows = tuple(squad_board_row(player) for player in squad["players"])
@@ -577,11 +538,11 @@ def _build_squad(
     view["checked_ids"] = restored
     model = TableModel(
         columns=(
-            Column("name", "NAME", width=220, stretch=True),
-            Column("pos", "POS", width=50),
-            Column("ovr", "OVR", width=46, numeric=True, kind="ovr"),
-            Column("pot", "POT", width=46, numeric=True, kind="ovr"),
-            Column("age", "AGE", width=46, numeric=True),
+            Column("name", "NAME", width=150, stretch=True, max_width=380),
+            Column("pos", "POS", width=52, kind="pos"),
+            Column("ovr", "OVR", width=50, numeric=True, kind="ovr"),
+            Column("pot", "POT", width=50, numeric=True, kind="ovr", priority=1),
+            Column("age", "AGE", width=48, numeric=True, priority=2),
         ),
         rows=all_rows,
         key_field="id",
@@ -601,7 +562,7 @@ def _build_squad(
         checked = [dict(r) for r in model.selected_rows()]
         focused = model.cursor_row()
         n = len(checked)
-        reason = "Tick players to plan."
+        reason = "Tick two or more players to plan them, or one to open it."
         if n >= 2:
             label = f"Plan these {n}"
             reason = ""
@@ -612,7 +573,7 @@ def _build_squad(
             label = f"Open {focused.get('name') or 'player'}"
             reason = ""
         else:
-            label = "Plan squad"
+            label = "Plan players"
         try:
             action_button.configure(text=label)
             set_disabled(action_button, reason)
@@ -634,7 +595,7 @@ def _build_squad(
         try:
             if n >= 2:
                 if not same_button.winfo_manager():
-                    same_button.pack(side="left", padx=(theme.SP2, 0))
+                    same_button.pack(side="right", padx=(theme.SP2, 0), before=release_button)
             else:
                 same_button.pack_forget()
         except NameError:
@@ -644,10 +605,21 @@ def _build_squad(
         try:
             select_caption.configure(
                 text=(
-                    f"{n} player{'s' if n != 1 else ''} selected — plan, open, or release"
+                    f"{n} player{'s' if n != 1 else ''} ticked"
                     if n
-                    else "Tick players to plan, open, or release."
-                )
+                    else "Tick players to plan or release them together."
+                ),
+                text_color=theme.TEXT if n else theme.MUTED,
+            )
+        except NameError:
+            pass
+        except Exception:
+            pass
+        try:
+            shown = model.visible_count
+            total = len(all_rows)
+            count_label.configure(
+                text=f"{shown} of {total} players" if shown != total else f"{total} players"
             )
         except NameError:
             pass
@@ -703,34 +675,26 @@ def _build_squad(
         except Exception as exc:  # noqa: BLE001
             set_status(svc, str(exc))
 
-    # Actions stay on screen. Pack them before the list so a tall squad
-    # cannot push Plan / Release / Codex below the window.
-    foot = ctk.CTkFrame(root, fg_color="transparent", height=112)
-    foot.pack(side="bottom", fill="x", pady=(theme.SP2, 0))
-    try:
-        foot.pack_propagate(False)
-    except Exception:
-        pass
-
-    actions_card = panel(foot, level=1)
-    actions_card.pack(fill="both", expand=True)
-    eyebrow(actions_card, "Squad actions").pack(
-        anchor="w", padx=theme.SP3, pady=(theme.SP2, 0)
+    # ---- action bar: packed before the board so a tall squad can never push
+    # Plan / Release below the window.
+    foot = panel(root, level=1)
+    foot.pack(side="bottom", fill="x", pady=(theme.SP3, 0))
+    actions = ctk.CTkFrame(foot, fg_color="transparent")
+    actions.pack(fill="x", padx=theme.SP4, pady=theme.SP3)
+    select_caption = text_label(
+        actions, "Tick players to plan or release them together.", size=theme.T_SMALL,
+        color=theme.MUTED,
     )
-    select_caption = muted_label(
-        actions_card, "Tick players to plan, open, or release.", size=11
-    )
-    select_caption.pack(anchor="w", padx=theme.SP3, pady=(theme.SP1, 0))
-    actions = ctk.CTkFrame(actions_card, fg_color="transparent")
-    actions.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP2))
+    select_caption.pack(side="left")
     action_button = button(
-        actions, "Plan squad",
+        actions, "Plan players",
         run_club_action,
         kind="secondary" if refresh_is_primary else "primary",
         height=theme.BTN_MD,
-        disabled_reason="Tick players to plan.",
+        icon="ai",
+        disabled_reason="Tick two or more players to plan them, or one to open it.",
     )
-    action_button.pack(side="left")
+    action_button.pack(side="right")
     release_button = button(
         actions,
         "Release from club",
@@ -739,18 +703,32 @@ def _build_squad(
         height=theme.BTN_MD,
         disabled_reason="Tick the players you want to release.",
     )
-    release_button.pack(side="left", padx=(theme.SP2, 0))
+    release_button.pack(side="right", padx=(0, theme.SP2))
     same_button = button(
         actions,
-        "Same numbers",
+        "Same change for all",
         lambda: _open_squad_planner(svc, [dict(r) for r in model.selected_rows()]),
         kind="ghost",
         height=theme.BTN_MD,
     )
+    tooltip(same_button, "Give every ticked player the same values.")
 
     # ---- board: the list fills whatever height the window leaves ----
     board = ctk.CTkFrame(root, fg_color="transparent")
     board.pack(fill="both", expand=True)
+
+    detail_card = panel(board, level=1, width=272)
+    detail_pack = {"side": "right", "fill": "y", "padx": (theme.SP3, 0)}
+    detail_card.pack(**detail_pack)
+    try:
+        detail_card.pack_propagate(False)
+    except Exception:
+        pass
+    section_title(detail_card, "Selected player").pack(
+        anchor="w", padx=theme.SP4, pady=(theme.SP3, theme.SP1)
+    )
+    detail_body = ctk.CTkFrame(detail_card, fg_color="transparent")
+    detail_body.pack(fill="both", expand=True)
 
     main = ctk.CTkFrame(board, fg_color="transparent")
     main.pack(side="left", fill="both", expand=True)
@@ -764,38 +742,29 @@ def _build_squad(
         pass
 
     search_row = ctk.CTkFrame(table_card, fg_color="transparent")
-    search_row.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP1))
+    search_row.pack(fill="x", padx=theme.SP3, pady=(theme.SP3, theme.SP2))
     query = ctk.StringVar(value=str(view.get("squad_query") or ""))
-    search_box = ctk.CTkEntry(
-        search_row,
-        textvariable=query,
-        placeholder_text="Filter by name, position, or ID…",
-        height=theme.BTN_MD,
-        fg_color=theme.CARD,
-        border_color=theme.BORDER,
-        text_color=theme.TEXT,
+    search = search_box(
+        search_row, variable=query, placeholder="Filter by name, position, or ID",
     )
-    search_box.pack(side="left", fill="x", expand=True)
-    button(
-        search_row,
-        "Clear",
-        lambda: query.set(""),
-        kind="ghost",
-        height=theme.BTN_MD,
-        width=62,
-    ).pack(side="left", padx=(theme.SP2, 0))
+    search.pack(side="left", fill="x", expand=True)
+    search_box_entry = search.entry
 
     def toggle_recently_added() -> None:
         view["recently_added"] = not bool(view.get("recently_added"))
         apply_filter()
 
-    recent_button = button(search_row, "Recently Added", toggle_recently_added,
+    recent_button = button(search_row, "Recently added", toggle_recently_added,
                            kind="ghost", height=theme.BTN_MD)
     recent_button.pack(side="left", padx=(theme.SP2, 0))
+    tooltip(recent_button, "Show only players you signed recently.")
 
     count_row = ctk.CTkFrame(table_card, fg_color="transparent")
-    count_row.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP1))
-    muted_label(count_row, f"{squad['count']} players", size=11).pack(side="left")
+    count_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP2))
+    count_label = muted_label(count_row, f"{squad['count']} players", size=theme.T_CAPTION)
+    count_label.pack(side="left")
+    muted_label(count_row, "Click a row to inspect  ·  Double-click or Enter to open",
+                size=theme.T_CAPTION).pack(side="right")
 
     grid = DataGrid(
         table_card,
@@ -809,23 +778,14 @@ def _build_squad(
         on_selection_change=on_sel,
     )
     grid.pack(fill="both", expand=True, padx=theme.SP2, pady=(0, theme.SP2))
-
-    detail_card = panel(board, level=1)
-    detail_card.pack(side="right", fill="y", padx=(theme.SP2, 0))
-    detail_card.configure(width=240)
-    try:
-        detail_card.pack_propagate(False)
-    except Exception:
-        pass
-    eyebrow(detail_card, "Selected").pack(anchor="w", padx=theme.SP3, pady=(theme.SP2, 0))
-    detail_body = ctk.CTkFrame(detail_card, fg_color="transparent")
-    detail_body.pack(fill="both", expand=True)
+    collapse_below(board, detail_card, 700, pack_kw=dict(detail_pack, before=main))
 
     def apply_filter(*_args: Any) -> None:
         view["squad_query"] = query.get() or ""
         needle = (query.get() or "").strip()
         recent_only = bool(view.get("recently_added"))
-        recent_button.configure(text="All players" if recent_only else "Recently Added")
+        recent_button.configure(text="All players" if recent_only else "Recently added")
+        restyle_button(recent_button, "accent" if recent_only else "ghost")
         if not needle and not recent_only:
             model.set_filter_fn(None)
         else:
@@ -841,6 +801,7 @@ def _build_squad(
 
     query.trace_add("write", apply_filter)
     apply_filter()
+    root.search_entry = search_box_entry
 
     def refresh_board() -> bool:
         """Update the squad rows without destroying the grid."""

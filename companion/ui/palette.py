@@ -21,22 +21,22 @@ class PaletteCommand:
 def palette_commands() -> tuple[PaletteCommand, ...]:
     """Minimal Tier-A catalog: surfaces, activity, settings, doctor, apply."""
     return (
-        PaletteCommand("nav.club", "Go to Club", "navigate", "club"),
-        PaletteCommand("nav.player", "Go to Player", "navigate", "player"),
-        PaletteCommand("nav.add_player", "Go to Sign", "navigate", "add_player"),
-        PaletteCommand("nav.injury", "Go to Injuries", "navigate", "injury"),
-        PaletteCommand("nav.automations", "Go to Matchday", "navigate", "automations"),
-        PaletteCommand("nav.library", "Go to Library", "navigate", "library"),
+        PaletteCommand("nav.club", "Club: your squad", "navigate", "club"),
+        PaletteCommand("nav.player", "Player: edit one player", "navigate", "player"),
+        PaletteCommand("nav.add_player", "Sign: search and sign cards", "navigate", "add_player"),
+        PaletteCommand("nav.injury", "Injuries: scan and heal", "navigate", "injury"),
+        PaletteCommand("nav.automations", "Matchday: prepare the squad", "navigate", "automations"),
+        PaletteCommand("nav.library", "Library: find a card", "navigate", "library"),
         PaletteCommand(
             "nav.club.planner",
-            "Club · multi-select for Squad Planner",
+            "Plan several players (multi-select in Club)",
             "navigate",
             "club",
         ),
         PaletteCommand("activity", "Open Activity", "activity"),
         PaletteCommand("settings", "Open Settings", "settings"),
-        PaletteCommand("doctor", "Run doctor (status line)", "doctor"),
-        PaletteCommand("apply", "Review / Apply changes", "apply"),
+        PaletteCommand("doctor", "Run a health check", "doctor"),
+        PaletteCommand("apply", "Review staged changes", "apply"),
     )
 
 

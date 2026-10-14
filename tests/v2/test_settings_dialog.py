@@ -26,8 +26,8 @@ def test_settings_opens_ai_card_and_installs_with_configured_queue(monkeypatch, 
     # Keep real widgets and the actual AI-card import/mounting, while avoiding
     # credential discovery, worker files, application polling, and game calls.
     monkeypatch.setattr(ai_bar, "_prefs", lambda svc: None)
-    monkeypatch.setattr(ai_bar, "readiness", lambda: SimpleNamespace(
-        model_id="test-model", message="Test provider", ready=False,
+    monkeypatch.setattr(ai_bar, "readiness", lambda provider=None: SimpleNamespace(
+        model_id="test-model", message="Test provider", ready=False, label="Codex Account",
     ))
     monkeypatch.setattr(ai_bar, "model_id", lambda: "test-model")
     monkeypatch.setattr(ai_bar, "provider_id", lambda: ai_bar.PROVIDER_CODEX)
@@ -74,7 +74,7 @@ def test_settings_opens_ai_card_and_installs_with_configured_queue(monkeypatch, 
         win = windows[0]
         widgets = list(_descendants(win))
         labels = {widget.cget("text") for widget in widgets if isinstance(widget, ctk.CTkLabel)}
-        assert {"About", "Display", "AI & Codex", "Paths", "Worker", "Health"} <= labels
+        assert {"About", "Display", "AI provider", "Paths", "Worker", "Health"} <= labels
         assert any("test-model" in text for text in labels)
         buttons = [widget for widget in widgets if isinstance(widget, ctk.CTkButton)]
         install_button = next(widget for widget in buttons if widget.cget("text") == "Install / repair worker")

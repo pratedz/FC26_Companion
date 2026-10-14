@@ -412,9 +412,9 @@ def test_player_surface_contains_embedded_selective_card_workflow():
         "themed_scroll",
         "read_live_first=False",
         "show_card_preview",
-        "Review -> Apply",
+        "nothing is applied until you confirm",
         "Select a card variant to preview",
-        "← Back",
+        "Back to results",
         "clear_card_selection",
     ):
         assert marker in source

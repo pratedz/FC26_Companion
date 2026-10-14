@@ -45,14 +45,18 @@ from .widgets.primitives import (
     ensure_ctk,
     hairline,
     icon_button,
+    install_focus_ring,
+    install_window_branding,
     muted_label,
     panel,
-    pill,
+    search_box,
     set_disabled,
+    shade,
+    status_pill,
     text_label,
     tooltip,
     truncate,
-    update_pill,
+    update_status_pill,
 )
 from .widgets.toast import ToastHost
 
@@ -63,6 +67,20 @@ except ImportError:  # pragma: no cover
 
 PUMP_MS = 50        # UI-callback drain cadence
 POLL_MS = 1000      # liveness + finished-job sweep cadence
+
+DRAWER_WIDTH = 360
+#: Narrowest page the drawer may sit beside; below it the drawer overlays.
+PAGE_MIN_WIDTH = 760
+
+#: The connection chip's word for each liveness pill. "Armed" was the worker's
+#: internal state name; to the person playing it means the game is connected.
+CONNECTION_WORDS = {
+    "OFF": "Offline",
+    "ARMED": "Connected",
+    "LIVE": "Live",
+    "WAITING": "Waiting",
+    "STALLED": "Stalled",
+}
 
 _SURFACE_DEPS: dict[str, tuple[str, ...]] = {
     "club": ("squad", "target", "bridge_view", "squad_sync", "signing"),
@@ -157,13 +175,16 @@ class Shell:
         # prints `invalid command name ..._pump` to stderr.
         self._after_ids: list[str] = []
 
-        self.root = ctk.CTk()
         try:
             ctk.set_appearance_mode("Dark")
         except Exception:
             pass
-        self.root.title("LE Companion — FC 26 Career")
+        theme.apply_ctk_theme()
+        self.root = ctk.CTk()
+        self.root.title("FC26 Companion")
         self.root.configure(fg_color=theme.BG)
+        install_focus_ring(self.root)
+        install_window_branding(self.root)
         self.root.geometry("1280x820")
         self.root.minsize(*MIN_SIZE)
         self._apply_ui_scale(self._pref_ui_scale())
@@ -202,62 +223,79 @@ class Shell:
     # ---- chrome -------------------------------------------------------
 
     def _build_chrome(self) -> None:
-        bar = ctk.CTkFrame(self.root, fg_color=theme.CHROME, corner_radius=0, height=56)
+        bar = ctk.CTkFrame(self.root, fg_color=theme.CHROME, corner_radius=0, height=52)
         bar.pack(fill="x")
         bar.pack_propagate(False)
         inner = ctk.CTkFrame(bar, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=theme.SP4, pady=theme.SP2)
 
+        # Left: where the game connection stands, then what is loaded.
         self.status_holder = ctk.CTkFrame(inner, fg_color="transparent")
         self.status_holder.pack(side="left")
         self._pill = None
-        self.bridge_caption = muted_label(inner, "Checking Live Editor…", size=12)
-        self.bridge_caption.pack(side="left", padx=(theme.SP3, 0))
-        self.squad_caption = muted_label(inner, "", size=12)
+        self.squad_caption = text_label(inner, "", size=theme.T_SMALL, bold=True)
         self.squad_caption.pack(side="left", padx=(theme.SP3, 0))
+        self.bridge_caption = muted_label(inner, "Checking Live Editor…", size=theme.T_SMALL)
+        self.bridge_caption.pack(side="left", padx=(theme.SP2, 0))
 
-        self.settings_btn = icon_button(inner, "☰", self._open_settings,
-                                        tooltip_text="Settings")
-        self.settings_btn.pack(side="right")
-        self.drawer_btn = icon_button(inner, "⧉", self.toggle_drawer,
-                                      tooltip_text="Activity  (Ctrl+J)")
-        self.drawer_btn.pack(side="right", padx=(0, theme.SP2))
-        self.palette_btn = icon_button(inner, "⌘K", self.open_palette,
-                                       tooltip_text="Command palette  (Ctrl+K)",
-                                       size=30, width=46)
-        self.palette_btn.pack(side="right", padx=(0, theme.SP3))
+        # Right: Activity, the palette, then the selected player.
+        self.drawer_btn = icon_button(
+            inner, "", self.toggle_drawer, icon="queue", label="Activity",
+            tooltip_text="Queued, running and finished jobs  (Ctrl+J)",
+        )
+        self.drawer_btn.pack(side="right")
+        self.palette_btn = icon_button(
+            inner, "", self.open_palette, icon="search", label="Ctrl K",
+            tooltip_text="Go to a page or run a command  (Ctrl+K)",
+        )
+        self.palette_btn.pack(side="right", padx=(0, theme.SP2))
+        self.settings_btn = None  # Settings lives at the bottom of the sidebar.
 
         self.target_chip = button(
             inner, "No player selected", self._open_target_chip,
-            kind="ghost", height=theme.BTN_SM, width=220,
+            kind="ghost", height=theme.BTN_MD, icon="player",
         )
-        self.target_chip.pack(side="right", padx=(0, theme.SP3))
-        tooltip(self.target_chip, "Open the selected player, or choose one on Player.")
+        tooltip(self.target_chip, "The player you are editing. Click to open Player.")
         self.target_label = self.target_chip  # test seam: header target control
         ctk.CTkFrame(self.root, height=1, fg_color=theme.BORDER, corner_radius=0).pack(fill="x")
 
     def _build_body(self) -> None:
+        try:
+            from .. import __version__ as version
+        except Exception:
+            version = ""
         body = ctk.CTkFrame(self.root, fg_color="transparent")
         body.pack(fill="both", expand=True)
-        self.tabs = nav.side_nav(body, self.registry, active=self.active, on_select=self._show)
+        self.tabs = nav.side_nav(
+            body, self.registry, active=self.active, on_select=self._show,
+            on_settings=self._open_settings,
+            version=f"Version {version}" if version else "",
+        )
         self.tabs.pack(side="left", fill="y")
         ctk.CTkFrame(body, width=1, fg_color=theme.BORDER, corner_radius=0).pack(side="left", fill="y")
         self.host = ctk.CTkFrame(body, fg_color=theme.BG)
         self.host.pack(side="left", fill="both", expand=True)
         # The drawer is a sibling, not an overlay: CTk cannot composite, and an
         # overlay that steals clicks is worse than one that takes width.
-        self.drawer = ctk.CTkFrame(body, fg_color=theme.CHROME, width=360,
+        self.drawer = ctk.CTkFrame(body, fg_color=theme.CHROME, width=DRAWER_WIDTH,
                                    corner_radius=0)
         self.drawer.pack_propagate(False)
         ctk.CTkFrame(
-            self.drawer, width=1, fg_color=theme.CHROME_LINE, corner_radius=0,
+            self.drawer, width=1, fg_color=theme.BORDER, corner_radius=0,
         ).pack(side="left", fill="y")
         self._surfaces: dict[str, Any] = {}
+        try:
+            import tkinter
+
+            tkinter.Misc.bind(self.root, "<Configure>",
+                              debounce(self.root, 80, self._on_root_resize), add="+")
+        except Exception:
+            pass
 
     def _build_changes_bar(self) -> None:
         self.changes_divider = hairline(self.root)
         self.changes_divider.pack(fill="x")
-        bar = ctk.CTkFrame(self.root, fg_color=theme.CHROME, corner_radius=0, height=58)
+        bar = ctk.CTkFrame(self.root, fg_color=theme.CHROME, corner_radius=0, height=60)
         bar.pack(fill="x")
         bar.pack_propagate(False)
         self.changes_bar = bar
@@ -266,17 +304,17 @@ class Shell:
 
         left = ctk.CTkFrame(inner, fg_color="transparent")
         left.pack(side="left", fill="x", expand=True)
-        self.changes_title = text_label(left, "Changes", size=12, bold=True,
+        self.changes_title = text_label(left, "Changes", size=theme.T_SMALL, bold=True,
                                         color=theme.MUTED)
         self.changes_title.pack(anchor="w")
-        self.changes_summary = muted_label(left, "No changes staged.", size=12)
+        self.changes_summary = muted_label(left, "No changes staged.", size=theme.T_SMALL)
         self.changes_summary.pack(anchor="w")
 
         self.apply_btn = button(inner, "Review changes", self.apply, kind="primary",
-                                width=140, height=theme.BTN_MD)
+                                width=150, height=theme.BTN_LG)
         self.apply_btn.pack(side="right")
         self.review_btn = button(inner, "How it runs", self._automation_help, kind="ghost",
-                                 width=100, height=theme.BTN_MD)
+                                 width=110, height=theme.BTN_LG)
         # Packed only on Automations as contextual help — player review uses apply_btn.
 
     def _set_changes_bar_visible(self, visible: bool) -> None:
@@ -290,20 +328,26 @@ class Shell:
             self.changes_divider.pack_forget()
             self.changes_bar.pack_forget()
         try:
-            self._toasts.set_bottom_offset(128 if visible else 70)
+            self._toasts.set_bottom_offset(156 if visible else 96)
         except Exception:
             pass
 
     def _bind_keys(self) -> None:
-        """Global shortcuts. Number keys do not switch tabs."""
+        """Global shortcuts. Bare number keys never switch pages (they type)."""
         binds = {
             "<Control-k>": lambda _e: self.open_palette(),
             "<Control-K>": lambda _e: self.open_palette(),
             "<Control-j>": lambda _e: self.toggle_drawer(),
             "<Control-J>": lambda _e: self.toggle_drawer(),
             "<Control-Return>": lambda _e: self.apply(),
+            "<Control-comma>": lambda _e: self._open_settings(),
             "<Escape>": lambda _e: self.close_drawer(),
         }
+        for index, key in enumerate(
+            (s.key for s in self.registry.ordered() if s.key != nav.DRAWER.key), start=1,
+        ):
+            if index <= 9:
+                binds[f"<Control-Key-{index}>"] = lambda _e, k=key: self._show(k)
         for sequence, fn in binds.items():
             try:
                 self.root.bind_all(sequence, fn)
@@ -316,7 +360,9 @@ class Shell:
         """Switch surface, building it lazily and never fatally (see nav.py)."""
         if key not in self.registry:
             return
-        for widget in self._surfaces.values():
+        for name, widget in self._surfaces.items():
+            if name == nav.DRAWER.key:
+                continue  # the drawer is a sibling of the page, not a page
             try:
                 widget.pack_forget()
             except Exception:
@@ -371,6 +417,11 @@ class Shell:
             retry=lambda k=key: self._rebuild(k),
         )
         self._surfaces[key] = widget
+        if key == nav.DRAWER.key:
+            try:
+                widget.close_drawer = self.close_drawer
+            except Exception:
+                pass
         try:
             widget.pack(
                 side="left" if key == nav.DRAWER.key else "top",
@@ -386,14 +437,54 @@ class Shell:
     def toggle_drawer(self) -> None:
         self.close_drawer() if self.drawer_open else self.open_drawer()
 
+    def _drawer_mode(self) -> str:
+        """``side`` when the page keeps PAGE_MIN_WIDTH beside the drawer, else ``overlay``."""
+        try:
+            scale = float(self.root._get_window_scaling())
+        except Exception:
+            scale = 1.0
+        width = self.root.winfo_width() / max(scale, 0.5)
+        room = width - nav.SIDEBAR_WIDTH - 1 - DRAWER_WIDTH
+        return "side" if room >= PAGE_MIN_WIDTH else "overlay"
+
+    def _place_drawer(self) -> None:
+        """Beside the page on wide windows; over its right edge on narrow ones.
+
+        Side by side at the 1040 px minimum would leave every page about 450 px,
+        which no page can lay out. Overlaying keeps the page at full width.
+        """
+        mode = self._drawer_mode()
+        if mode == getattr(self, "_drawer_placed", None):
+            return
+        self._drawer_placed = mode
+        try:
+            self.drawer.pack_forget()
+            self.drawer.place_forget()
+        except Exception:
+            pass
+        if mode == "side":
+            self.drawer.pack(side="right", fill="y", before=self.host)
+        else:
+            self.drawer.place(relx=1.0, y=0, relheight=1.0, anchor="ne")
+            self.drawer.lift()
+
+    def _on_root_resize(self, _event: Any = None) -> None:
+        if self.drawer_open:
+            self._place_drawer()
+
     def open_drawer(self) -> None:
-        self.drawer.pack(side="right", fill="y")
+        self._drawer_placed = None
+        self._place_drawer()
         if self._surfaces.get(nav.DRAWER.key) is None:
             self._surfaces[nav.DRAWER.key] = self.registry.build(
                 nav.DRAWER.key, self.drawer, self.svc,
                 vm=self._surface_vms.setdefault(nav.DRAWER.key, {}),
                 retry=lambda: self._rebuild(nav.DRAWER.key),
             )
+            try:
+                self._surfaces[nav.DRAWER.key].close_drawer = self.close_drawer
+            except Exception:
+                pass
             try:
                 self._surfaces[nav.DRAWER.key].pack(
                     side="left", fill="both", expand=True,
@@ -406,22 +497,24 @@ class Shell:
     def close_drawer(self) -> None:
         try:
             self.drawer.pack_forget()
+            self.drawer.place_forget()
         except Exception:
             pass
+        self._drawer_placed = None
         self.drawer_open = False
 
     def open_palette(self) -> None:
-        """Ctrl+K — real command palette (navigate, activity, settings, doctor, apply)."""
+        """Ctrl+K — go to a page or run a command. Arrows move, Enter runs, Esc closes."""
         if callable(self.on_palette):
             self.on_palette()
             return
         ensure_ctk()
+        from .icons import ctk_icon
         from .palette import dispatch_palette, filter_commands, palette_commands
 
-        self._status("Command palette open — type to filter.")
         win = ctk.CTkToplevel(self.root)
-        win.title("Command palette")
-        win.geometry("420x360")
+        win.title("Go to")
+        win.geometry("520x440")
         win.configure(fg_color=theme.BG)
         try:
             win.transient(self.root)
@@ -429,14 +522,22 @@ class Shell:
         except Exception:
             pass
 
-        muted_label(win, "Type to filter · Enter runs the first match", size=11).pack(
-            anchor="w", padx=theme.SP3, pady=(theme.SP2, 0)
-        )
         query = ctk.StringVar()
-        entry = ctk.CTkEntry(win, textvariable=query, placeholder_text="Jump to…")
-        entry.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
-        list_host = ctk.CTkScrollableFrame(win, fg_color="transparent")
-        list_host.pack(fill="both", expand=True, padx=theme.SP3, pady=(0, theme.SP3))
+        box = search_box(win, variable=query, placeholder="Go to a page or run a command")
+        box.pack(fill="x", padx=theme.SP4, pady=(theme.SP4, theme.SP2))
+        list_host = ctk.CTkFrame(win, fg_color="transparent")
+        list_host.pack(fill="both", expand=True, padx=theme.SP3, pady=(0, theme.SP2))
+        muted_label(
+            win, "↑ ↓ to move   ·   Enter to run   ·   Esc to close", size=theme.T_CAPTION,
+        ).pack(anchor="w", padx=theme.SP4, pady=(0, theme.SP3))
+
+        hotkeys = {f"nav.{s.key}": s.hotkey for s in self.registry.ordered() if s.hotkey}
+        hotkeys.update({"activity": "Ctrl+J", "settings": "Ctrl+,", "apply": "Ctrl+Enter"})
+        icons = {f"nav.{s.key}": s.icon for s in self.registry.ordered()}
+        icons.update({"activity": "queue", "settings": "settings", "doctor": "shield_check",
+                      "apply": "apply", "nav.club.planner": "ai"})
+        state: dict[str, Any] = {"hits": (), "index": 0}
+        rows: list[Any] = []
 
         def run(cmd: Any) -> None:
             def _doctor() -> None:
@@ -450,6 +551,10 @@ class Shell:
                 except Exception as exc:  # noqa: BLE001
                     self._status(f"Doctor failed: {exc}")
 
+            try:
+                win.destroy()
+            except Exception:
+                pass
             msg = dispatch_palette(
                 cmd,
                 navigate=self._show,
@@ -458,50 +563,84 @@ class Shell:
                 run_doctor=_doctor,
                 open_apply=self.review,
             )
-            self._status(msg)
-            try:
-                win.destroy()
-            except Exception:
-                pass
+            if cmd.kind in ("doctor",):
+                self._status(msg)
 
-        buttons: list[Any] = []
+        def highlight() -> None:
+            for index, row in enumerate(rows):
+                on = index == state["index"] and index < len(state["hits"])
+                try:
+                    row.configure(fg_color=theme.CARD_HOVER if on else "transparent")
+                except Exception:
+                    pass
+
+        def make_row(slot: int) -> Any:
+            row = ctk.CTkFrame(list_host, fg_color="transparent", height=36,
+                               corner_radius=theme.R_SM)
+            row.pack_propagate(False)
+            row.label = ctk.CTkLabel(  # type: ignore[attr-defined]
+                row, text="", anchor="w", compound="left", text_color=theme.TEXT,
+                font=ctk.CTkFont(family=theme.FONT, size=theme.T_BODY),
+            )
+            row.label.pack(side="left", padx=(theme.SP3, 0))
+            row.hint = ctk.CTkLabel(  # type: ignore[attr-defined]
+                row, text="", text_color=theme.MUTED,
+                font=ctk.CTkFont(family=theme.FONT, size=theme.T_CAPTION),
+            )
+            row.hint.pack(side="right", padx=(0, theme.SP3))
+
+            def pick(_e: Any = None, n: int = slot) -> None:
+                if n < len(state["hits"]):
+                    run(state["hits"][n])
+
+            def hover(_e: Any = None, n: int = slot) -> None:
+                state["index"] = n
+                highlight()
+
+            for widget in (row, row.label, row.hint):
+                widget.bind("<Button-1>", pick, add="+")
+                widget.bind("<Enter>", hover, add="+")
+            return row
 
         def repaint(*_a: Any) -> None:
-            hits = filter_commands(query.get())
-            while len(buttons) < len(hits):
-                btn = button(
-                    list_host, "", lambda: None, kind="ghost", height=28,
-                )
-                buttons.append(btn)
+            hits = filter_commands(query.get(), palette_commands())
+            state["hits"], state["index"] = hits, 0
+            while len(rows) < len(hits):
+                rows.append(make_row(len(rows)))
             for index, cmd in enumerate(hits):
-                btn = buttons[index]
-                try:
-                    btn.configure(text=cmd.label, command=lambda c=cmd: run(c))
-                except Exception:
-                    pass
-                try:
-                    if not btn.winfo_manager():
-                        btn.pack(fill="x", pady=1)
-                except Exception:
-                    btn.pack(fill="x", pady=1)
-            for index in range(len(hits), len(buttons)):
-                try:
-                    buttons[index].pack_forget()
-                except Exception:
-                    pass
+                row = rows[index]
+                row.label.configure(
+                    text=f"  {cmd.label}",
+                    image=ctk_icon(icons.get(cmd.id, "forward"), 16, tint=theme.ACCENT),
+                )
+                row.hint.configure(text=hotkeys.get(cmd.id, ""))
+                if not row.winfo_manager():
+                    row.pack(fill="x", pady=1)
+            for index in range(len(hits), len(rows)):
+                rows[index].pack_forget()
+            highlight()
 
-        query.trace_add("write", debounce(entry, 120, repaint))
-        entry.bind("<Return>", lambda _e: (
-            run(filter_commands(query.get())[0])
-            if filter_commands(query.get()) else None
-        ))
+        def move(delta: int) -> str:
+            if state["hits"]:
+                state["index"] = max(0, min(len(state["hits"]) - 1, state["index"] + delta))
+                highlight()
+            return "break"
+
+        def submit(_e: Any = None) -> str:
+            if state["hits"]:
+                run(state["hits"][state["index"]])
+            return "break"
+
+        query.trace_add("write", debounce(box.entry, 60, repaint))
+        box.entry.bind("<Down>", lambda _e: move(1), add="+")
+        box.entry.bind("<Up>", lambda _e: move(-1), add="+")
+        box.entry.bind("<Return>", submit, add="+")
+        win.bind("<Escape>", lambda _e: win.destroy())
         repaint()
         try:
-            entry.focus_set()
+            box.entry.focus_set()
         except Exception:
             pass
-        # Silence unused import if linted
-        _ = palette_commands
 
     def _open_signing(self, card: dict[str, Any]) -> None:
         """Navigate to Sign and rebuild so the pending Library card is consumed."""
@@ -604,8 +743,8 @@ class Shell:
             return
 
         win = ctk.CTkToplevel(self.root)
-        win.title("Settings — LE Companion")
-        win.geometry("560x720")
+        win.title("Settings — FC26 Companion")
+        win.geometry("640x760")
         win.configure(fg_color=theme.BG)
         try:
             win.transient(self.root)
@@ -616,15 +755,19 @@ class Shell:
         scroll = ctk.CTkScrollableFrame(win, fg_color="transparent")
         scroll.pack(fill="both", expand=True, padx=theme.SP4, pady=theme.SP4)
 
+        text_label(scroll, "Settings", size=theme.T_TITLE, display=True).pack(
+            anchor="w", pady=(0, theme.SP4)
+        )
+
         def group(title: str, *, subtitle: str = "") -> Any:
             box = panel(scroll, level=1)
             box.pack(fill="x", pady=(0, theme.SP3))
-            text_label(box, title, size=14, bold=True).pack(
-                anchor="w", padx=theme.SP3, pady=(theme.SP3, 2)
+            text_label(box, title, size=theme.T_HEADING, bold=True).pack(
+                anchor="w", padx=theme.SP4, pady=(theme.SP4, 2)
             )
             if subtitle:
-                muted_label(box, subtitle, size=11).pack(
-                    anchor="w", padx=theme.SP3, pady=(0, theme.SP2)
+                muted_label(box, subtitle, size=theme.T_SMALL).pack(
+                    anchor="w", padx=theme.SP4, pady=(0, theme.SP3)
                 )
             return box
 
@@ -636,13 +779,14 @@ class Shell:
         )
         muted_label(
             about,
-            "Club has the first-run checklist. Activity (Ctrl+J) has undo and queue history.",
-            size=11,
-        ).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP3))
+            "Shortcuts: Ctrl+1 to Ctrl+6 switch pages, Ctrl+K goes anywhere, Ctrl+J opens "
+            "Activity, Ctrl+Enter reviews staged changes, Esc closes the drawer.",
+            size=theme.T_SMALL, wraplength=560, justify="left",
+        ).pack(anchor="w", padx=theme.SP4, pady=(0, theme.SP4))
 
-        display = group("Display", subtitle="UI scale for this window (saved with prefs).")
+        display = group("Display", subtitle="Interface scale for this window. Saved with your preferences.")
         scale_row = ctk.CTkFrame(display, fg_color="transparent")
-        scale_row.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP2))
+        scale_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP2))
         scale_choices = ("0.90", "1.00", "1.10", "1.25")
         current_scale = f"{self._pref_ui_scale():.2f}"
         if current_scale not in scale_choices:
@@ -654,11 +798,6 @@ class Shell:
             variable=scale_var,
             width=100,
             height=theme.BTN_MD,
-            fg_color=theme.CARD,
-            button_color=theme.BORDER,
-            button_hover_color=theme.CARD_HOVER,
-            dropdown_fg_color=theme.CARD,
-            text_color=theme.TEXT,
         )
         scale_menu.pack(side="left")
 
@@ -678,11 +817,11 @@ class Shell:
 
         muted_label(
             display,
-            "Stadium wallpaper behind the HUD. Cards and tables stay solid.",
-            size=11,
-        ).pack(anchor="w", padx=theme.SP3)
+            "Stadium wallpaper behind the pages. Panels and tables stay solid.",
+            size=theme.T_SMALL,
+        ).pack(anchor="w", padx=theme.SP4, pady=(theme.SP2, 0))
         wall_row = ctk.CTkFrame(display, fg_color="transparent")
-        wall_row.pack(fill="x", padx=theme.SP3, pady=(theme.SP1, theme.SP3))
+        wall_row.pack(fill="x", padx=theme.SP4, pady=(theme.SP2, theme.SP4))
         wall_var = ctk.BooleanVar(value=self._pref_wallpaper())
 
         def apply_wallpaper() -> None:
@@ -699,15 +838,11 @@ class Shell:
             text="Stadium wallpaper",
             variable=wall_var,
             command=apply_wallpaper,
-            progress_color=theme.ACCENT,
-            button_color=theme.TEXT,
-            button_hover_color=theme.MUTED,
-            text_color=theme.TEXT,
         ).pack(side="left")
 
         ai = group(
-            "AI & Codex",
-            subtitle="One provider and one model for Club, Player, and Sign.",
+            "AI provider",
+            subtitle="Pick Codex account or OpenAI API key. One choice and one model for Club, Player, and Sign.",
         )
         from .widgets.ai_bar import mount_ai_settings
 
@@ -721,14 +856,17 @@ class Shell:
             ("Profiles", self.svc.paths.profiles_file),
             ("Catalog", self.svc.paths.universe_db),
         ):
-            muted_label(
-                paths, f"{label}: {truncate(str(path), 56)}", size=11,
-            ).pack(anchor="w", padx=theme.SP3)
-        ctk.CTkFrame(paths, fg_color="transparent", height=theme.SP2).pack()
+            line = ctk.CTkFrame(paths, fg_color="transparent")
+            line.pack(fill="x", padx=theme.SP4, pady=1)
+            muted_label(line, label, size=theme.T_SMALL, width=72, anchor="w").pack(side="left")
+            text_label(line, str(path), size=theme.T_SMALL, wraplength=480,
+                       justify="left").pack(side="left", fill="x", expand=True)
+        ctk.CTkFrame(paths, fg_color="transparent", height=theme.SP3).pack()
 
-        worker = group("Worker")
-        status_lbl = muted_label(worker, "Checking…", size=11)
-        status_lbl.pack(anchor="w", padx=theme.SP3)
+        worker = group("Worker", subtitle="The Lua worker inside Live Editor that runs your queued jobs.")
+        status_lbl = muted_label(worker, "Checking…", size=theme.T_SMALL, wraplength=560,
+                                 justify="left")
+        status_lbl.pack(anchor="w", padx=theme.SP4)
 
         def refresh_worker() -> None:
             try:
@@ -756,18 +894,17 @@ class Shell:
             refresh_worker()
 
         row = ctk.CTkFrame(worker, fg_color="transparent")
-        row.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP3))
-        button(row, "Refresh status", refresh_worker, kind="ghost", height=theme.BTN_MD).pack(
-            side="left"
-        )
+        row.pack(fill="x", padx=theme.SP4, pady=(theme.SP3, theme.SP4))
         button(
-            row, "Install / repair worker", do_install, kind="primary", height=theme.BTN_MD,
-        ).pack(side="left", padx=(theme.SP2, 0))
+            row, "Install / repair worker", do_install, kind="accent", height=theme.BTN_MD,
+        ).pack(side="left")
+        button(row, "Refresh status", refresh_worker, kind="ghost", icon="refresh",
+               height=theme.BTN_MD).pack(side="left", padx=(theme.SP2, 0))
         refresh_worker()
 
-        health = group("Health")
+        health = group("Health", subtitle="Checks the worker, queue, database and catalog.")
         health_box = ctk.CTkFrame(health, fg_color="transparent")
-        health_box.pack(fill="x", padx=theme.SP3)
+        health_box.pack(fill="x", padx=theme.SP4)
 
         def run_doctor() -> None:
             for child in list(health_box.winfo_children()):
@@ -775,7 +912,7 @@ class Shell:
             try:
                 report = doctor_cmd.run(self.svc)
             except Exception as exc:  # noqa: BLE001
-                muted_label(health_box, f"Doctor failed: {exc}", size=11).pack(anchor="w")
+                muted_label(health_box, f"Doctor failed: {exc}", size=theme.T_SMALL).pack(anchor="w")
                 return
             overall = ctk.CTkFrame(health_box, fg_color="transparent")
             overall.pack(fill="x", pady=(0, theme.SP1))
@@ -795,12 +932,11 @@ class Shell:
                 muted_label(
                     line,
                     f"{check.name}: {check.detail}",
-                    size=10,
+                    size=theme.T_CAPTION, wraplength=440, justify="left",
                 ).pack(side="left", padx=(theme.SP2, 0))
 
-        button(health, "Run doctor", run_doctor, kind="secondary", height=theme.BTN_MD).pack(
-            anchor="w", padx=theme.SP3, pady=(theme.SP2, theme.SP3)
-        )
+        button(health, "Run health check", run_doctor, kind="secondary", icon="shield_check",
+               height=theme.BTN_MD).pack(anchor="w", padx=theme.SP4, pady=(theme.SP3, theme.SP4))
 
     def _status(self, text: str, *, tone: str = "info") -> None:
         from ..app import events as E
@@ -891,33 +1027,42 @@ class Shell:
         tip = f"{bridge['message']}  {bridge['age_text']}".strip()
         if bridge["pill"] in ("WAITING", "STALLED"):
             tip = f"{bridge['message']} Open Activity. {bridge['age_text']}".strip()
+        word = CONNECTION_WORDS.get(bridge["pill"], bridge["pill"].title())
         if self._pill is None:
-            self._pill = pill(
-                self.status_holder, bridge["pill"], tone=bridge["tone"], glyph="●",
-            )
+            self._pill = status_pill(self.status_holder, word, tone=bridge["tone"])
             self._pill.pack()
-            tooltip(self._pill, tip)
         else:
-            update_pill(
-                self._pill, bridge["pill"], tone=bridge["tone"], glyph="●",
-            )
-            tooltip(self._pill, tip)
-        try:
-            self.bridge_caption.configure(text=truncate(str(bridge.get("message") or ""), 42))
-        except Exception:
-            pass
+            update_status_pill(self._pill, word, tone=bridge["tone"])
+        tooltip(self._pill, tip)
+        tooltip(self._pill._pill_label, tip)
         squad = state.squad
         team = "Squad"
         if squad.players:
             sample = squad.players[0]
             team = str(sample.get("teamname") or sample.get("club") or "Squad")
         count = len(squad.players or ())
-        squad_text = f"{team}  ·  {count} players" if count else "Squad not read"
+        squad_text = f"{team}  ·  {count} players" if count else ""
+        # Healthy: the chip says it, so the line names what is loaded instead.
+        # Anything else: the bridge's own sentence, in its tone.
+        message = "" if bridge["tone"] == "ok" and count else str(bridge.get("message") or "")
         try:
-            self.squad_caption.configure(text=truncate(squad_text, 36))
+            self.squad_caption.configure(text=truncate(squad_text, 40))
+            self.bridge_caption.configure(
+                text=truncate(message, 70),
+                text_color=theme.tone_fg(bridge["tone"]) if bridge["tone"] in ("warn", "error")
+                else theme.MUTED,
+            )
         except Exception:
             pass
-        self.target_chip.configure(text=head["target"]["text"])
+        target = head["target"]
+        self.target_chip.configure(text=target["text"] if target["locked"] else "No player selected")
+        try:
+            if target["locked"] and not self.target_chip.winfo_manager():
+                self.target_chip.pack(side="right", padx=(0, theme.SP3))
+            elif not target["locked"] and self.target_chip.winfo_manager():
+                self.target_chip.pack_forget()
+        except Exception:
+            pass
 
         status_id = int(head.get("status_id") or 0)
         if status_id and status_id != self._last_status_id:
@@ -940,11 +1085,17 @@ class Shell:
                     pass
 
         n = head["in_flight"]
-        self.drawer_btn.configure(
-            text=f"⧉ {n}" if n else "⧉",
-            border_color=theme.ACCENT if n else theme.BORDER,
-            text_color=theme.ACCENT if n else theme.MUTED,
-        )
+        if n != getattr(self, "_drawer_count", None):
+            self._drawer_count = n
+            from .icons import ctk_icon
+
+            self.drawer_btn.configure(
+                text=f" Activity  {n}" if n else " Activity",
+                image=ctk_icon("queue", 18, tint=theme.ACCENT if n else theme.MUTED),
+                fg_color=shade(theme.ACCENT, 0.16) if n else "transparent",
+                border_color=shade(theme.ACCENT, 0.55) if n else theme.BORDER,
+                text_color=theme.ACCENT if n else theme.MUTED,
+            )
 
         view = editor_view(state)
         count = view["dirty_count"]

@@ -5,7 +5,18 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping, Sequence
 
 from ... import theme
-from ...widgets.primitives import button, eyebrow, muted_label, panel, set_disabled, text_label
+from ...widgets.primitives import (
+    button,
+    entry,
+    muted_label,
+    panel,
+    restyle_button,
+    search_box,
+    section_title,
+    set_disabled,
+    text_label,
+    tooltip,
+)
 from ...widgets.table import Column, TableModel
 from .._common import set_status
 from .results import CardResults, can_add
@@ -133,8 +144,8 @@ def shop_feedback(
         return "No cards match. Try another name, or clear the year and OVR."
     if shown <= 0:
         return (
-            "No verified faces in these matches. Switch to All faces to inspect them. "
-            "Checkout still refuses a missing face."
+            "None of these matches has a verified FC 26 face. Show all faces to inspect them; "
+            "checkout still needs a verified face."
         )
     if best_only and shown != total:
         lead = f"{shown} best card{'s' if shown != 1 else ''} from {total} matches"
@@ -321,18 +332,10 @@ def add_to_bag_label(rows: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _entry(parent: Any, placeholder: str, width: int, *, value: str = "") -> Any:
-    entry = ctk.CTkEntry(
-        parent,
-        placeholder_text=placeholder,
-        width=width,
-        height=theme.BTN_MD,
-        fg_color=theme.CARD,
-        border_color=theme.BORDER,
-        text_color=theme.TEXT,
-    )
+    field = entry(parent, placeholder=placeholder, width=width, height=theme.BTN_MD)
     if value:
-        entry.insert(0, str(value))
-    return entry
+        field.insert(0, str(value))
+    return field
 
 
 class LibrarySearchPanel:
@@ -388,24 +391,30 @@ class LibrarySearchPanel:
 
     def _mount_controls(self) -> None:
         self.search_row = ctk.CTkFrame(self.controls, fg_color="transparent")
-        self.search_row.pack(fill="x", padx=theme.SP3, pady=(theme.SP3, theme.SP2))
-        self.query = _entry(self.search_row, "Search players in your local Library…", 120, value=self.view["query"])
-        self.query.configure(height=40)
-        self.query.pack(side="left", fill="x", expand=True)
-        self.search_button = button(self.search_row, "Search", self.search, kind="accent", height=40, width=92)
-        self.search_button.pack(side="right", padx=(8, 0))
+        self.search_row.pack(fill="x", padx=theme.SP4, pady=(theme.SP3, theme.SP2))
+        query_box = search_box(self.search_row, placeholder="Search players in your local Library",
+                               height=theme.BTN_LG)
+        query_box.pack(side="left", fill="x", expand=True)
+        self.query = query_box.entry
+        if self.view["query"]:
+            self.query.insert(0, str(self.view["query"]))
+        self.search_button = button(self.search_row, "Search", self.search, kind="accent",
+                                    height=theme.BTN_LG, width=96)
+        self.search_button.pack(side="right", padx=(theme.SP2, 0))
         self.shop_row = ctk.CTkFrame(self.controls, fg_color="transparent")
-        self.shop_row.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP2))
-        self.year = _entry(self.shop_row, "Any year", 70, value=self.view.get("year") or "")
-        self.year.pack(side="left", padx=(0, 6))
+        self.shop_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP3))
+        self.year = _entry(self.shop_row, "Any year", 76, value=self.view.get("year") or "")
+        self.year.pack(side="left", padx=(0, theme.SP2))
         self.verified_button = button(self.shop_row, "Verified only", self.toggle_verified,
-                                      kind="ghost", height=30, width=100)
-        self.verified_button.pack(side="left", padx=(0, 6))
+                                      kind="ghost", height=theme.BTN_MD, width=104)
+        self.verified_button.pack(side="left", padx=(0, theme.SP2))
+        tooltip(self.verified_button, "Only cards with a verified FC 26 face. Checkout always requires one.")
         self.best_button = button(self.shop_row, "Best card", self.toggle_best,
-                                  kind="ghost", height=30, width=84)
-        self.best_button.pack(side="left", padx=(0, 6))
+                                  kind="ghost", height=theme.BTN_MD, width=96)
+        self.best_button.pack(side="left", padx=(0, theme.SP2))
+        tooltip(self.best_button, "One card per player: the highest-rated version.")
         self.refine_button = button(self.shop_row, "More filters", self.toggle_refine,
-                                    kind="ghost", height=30, width=90)
+                                    kind="ghost", height=theme.BTN_MD, width=104)
         self.refine_button.pack(side="left")
         self.refine_row = ctk.CTkFrame(self.controls, fg_color="transparent")
         self.refine_visible = {"value": bool(self.view.get("refine_open") or self.view.get("ovr_min") or
@@ -418,17 +427,17 @@ class LibrarySearchPanel:
         self.pos.pack(side="left", padx=(5, 0))
         self.source_options = {"Any source": "", "Career": "career", "FUT": "fut", "EA official": "ea_official", "Live Editor": "le_base"}
         label = next((k for k,v in self.source_options.items() if v == self.view.get("source", "")), "Any source")
-        self.source = ctk.CTkOptionMenu(self.refine_row, values=list(self.source_options), width=104, height=30,
-                                      fg_color=theme.CARD, button_color=theme.BORDER, text_color=theme.TEXT,
-                                      dropdown_fg_color=theme.CARD, dropdown_text_color=theme.TEXT,
-                                      command=lambda _value: self._filter_changed())
+        self.source = ctk.CTkOptionMenu(self.refine_row, values=list(self.source_options), width=120,
+                                      height=theme.BTN_MD, command=lambda _value: self._filter_changed())
         self.source.set(label)
         self.source.pack(side="left", padx=(5, 0))
         if self.refine_visible["value"]:
-            self.refine_row.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP2))
+            self.refine_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP3))
             self.refine_button.configure(text="Less filters")
-        self.filter_error = muted_label(self.controls, "", size=10, color=theme.DANGER, wraplength=400, justify="left")
-        self.search_feedback = muted_label(self.controls, "", size=10, wraplength=400, justify="left")
+        self.filter_error = muted_label(self.controls, "", size=theme.T_CAPTION, color=theme.DANGER_TEXT,
+                                        wraplength=560, justify="left")
+        self.search_feedback = muted_label(self.controls, "", size=theme.T_CAPTION, wraplength=560,
+                                           justify="left")
         self._sync_shop_toggles()
         for field in (self.query, self.year, self.ovr_min, self.ovr_max, self.pos):
             field.bind("<Return>", lambda _event: self.search())
@@ -444,14 +453,15 @@ class LibrarySearchPanel:
 
     def _mount_results(self) -> None:
         header = ctk.CTkFrame(self.root, fg_color="transparent")
-        header.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP1))
-        self.result_title = text_label(header, "Search results", size=16, bold=True)
+        header.pack(fill="x", padx=theme.SP4, pady=(theme.SP3, theme.SP2))
+        self.result_title = text_label(header, "Search results", size=theme.T_HEADING, bold=True)
         self.result_title.pack(side="left")
         self.result_count = muted_label(
-            header, "Search for a player to see cards here.", size=11
+            header, "Search for a player to see cards here.", size=theme.T_SMALL
         )
         self.result_count.pack(side="left", padx=(theme.SP2, 0))
-        self.add_button = button(header, "Add to bag", self._add_picked, kind="secondary", height=28, width=92,
+        self.add_button = button(header, "Add to bag", self._add_picked, kind="secondary",
+                                 height=theme.BTN_MD, width=104, icon="add",
                                  disabled_reason="Select a verified local card first")
         self.add_button.pack(side="right")
         self.model = TableModel(
@@ -481,7 +491,7 @@ class LibrarySearchPanel:
         self.refine_visible["value"] = not self.refine_visible["value"]
         self.view["refine_open"] = self.refine_visible["value"]
         if self.refine_visible["value"]:
-            self.refine_row.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP1), after=self.shop_row)
+            self.refine_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP3), after=self.shop_row)
             self.refine_button.configure(text="Less filters")
         else:
             self.refine_row.pack_forget()
@@ -500,17 +510,12 @@ class LibrarySearchPanel:
     def _sync_shop_toggles(self) -> None:
         verified = bool(self.view.get("verified_only", True))
         best = bool(self.view.get("best_only", True))
+        # One look for every active filter: tonal accent when on, ghost when off.
         try:
-            self.verified_button.configure(
-                text="Verified only" if verified else "All faces",
-                border_color=theme.SUCCESS if verified else theme.BORDER,
-                text_color=theme.SUCCESS if verified else theme.TEXT,
-            )
-            self.best_button.configure(
-                text="Best card" if best else "All versions",
-                border_color=theme.ACCENT if best else theme.BORDER,
-                text_color=theme.ACCENT if best else theme.TEXT,
-            )
+            self.verified_button.configure(text="Verified only" if verified else "All faces")
+            restyle_button(self.verified_button, "accent" if verified else "ghost")
+            self.best_button.configure(text="Best card" if best else "All versions")
+            restyle_button(self.best_button, "accent" if best else "ghost")
         except Exception:
             pass
 
@@ -667,29 +672,46 @@ class LibrarySearchPanel:
                 child.destroy()
             except Exception:
                 pass
-        card = panel(self.empty_results, level=1)
+        from ...icons import ctk_icon
+
+        card = panel(self.empty_results, level=2)
         card.pack(fill="x")
         row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
+        row.pack(fill="x", padx=theme.SP4, pady=theme.SP4)
+        image = ctk_icon("search", 24, tint=theme.ACCENT)
+        if image is not None:
+            ctk.CTkLabel(row, text="", image=image).pack(side="left", anchor="n",
+                                                         padx=(0, theme.SP3))
+        # The control names the fix for *this* emptiness. A filter that hid
+        # every match is undone here; otherwise the search box above is the action.
+        if bool(self.view.get("verified_only", True)) and self._catalog_hits:
+            button(
+                row,
+                "Show all faces",
+                self.toggle_verified,
+                kind="accent",
+                height=theme.BTN_MD,
+            ).pack(side="right", anchor="n", padx=(theme.SP3, 0))
         copy = ctk.CTkFrame(row, fg_color="transparent")
         copy.pack(side="left", fill="x", expand=True)
-        text_label(copy, headline, size=13, bold=True).pack(anchor="w")
-        muted_label(copy, detail, size=11, wraplength=720, justify="left").pack(
-            anchor="w", pady=(theme.SP1, 0)
-        )
-        button(
-            row,
-            "Focus search",
-            lambda: self.query.focus(),
-            kind="primary",
-            height=theme.BTN_MD,
-        ).pack(side="right", padx=(theme.SP3, 0))
+        text_label(copy, headline, size=theme.T_BODY, bold=True).pack(anchor="w")
+        detail_label = muted_label(copy, detail, size=theme.T_SMALL, wraplength=480, justify="left")
+        detail_label.pack(anchor="w", fill="x", pady=(theme.SP1, 0))
+
+        def rewrap(event: Any) -> None:
+            if event.width > 40:
+                detail_label.configure(wraplength=max(200, event.width - theme.SP2))
+
+        copy.bind("<Configure>", rewrap, add="+")
+        self._empty_detail = detail
 
     def show_empty_results(self, headline: str, detail: str) -> None:
         self.grid.pack_forget()
+        if detail and detail == str(self.search_feedback.cget("text") or ""):
+            self._pack_hint(self.search_feedback, "")  # said once, in the empty card
         self.result_count.configure(text="No cards shown")
         self._paint_empty(headline, detail)
-        self.empty_results.pack(fill="x", padx=theme.SP2, pady=(theme.SP1, 0))
+        self.empty_results.pack(fill="x", padx=theme.SP3, pady=(theme.SP1, 0))
 
     def show_result_grid(
         self, rows: Sequence[Mapping[str, Any]] | None = None
@@ -788,7 +810,10 @@ class LibrarySearchPanel:
             self.search_feedback.configure(text=text)
         except Exception:
             pass
-        self._pack_hint(self.search_feedback, text)
+        # The empty-results card already says it; one place is enough.
+        duplicate = bool(text) and text == getattr(self, "_empty_detail", None) and bool(
+            self.empty_results.winfo_manager())
+        self._pack_hint(self.search_feedback, "" if duplicate else text)
 
     def show_filter_error(self, message: str) -> None:
         try:

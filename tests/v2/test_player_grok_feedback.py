@@ -121,8 +121,8 @@ def test_player_surface_has_visible_grok_feedback_and_safe_card_activation() -> 
     )
     for marker in (
         "AI assistant",
-        "Check Codex login",
-        "Codex is preparing a review-only proposal",
+        "Check AI status",
+        "is preparing a review-only proposal",
         "grok_player_worker",
         "stage_selected()",
         "Review every value before Apply",

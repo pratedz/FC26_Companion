@@ -39,7 +39,7 @@ class PlayerDetailsPanel:
         self.host.grid(row=1, column=0, sticky="nsew", pady=(theme.SP2, 0))
         self.host.grid_rowconfigure(1, weight=1)
         self.host.grid_columnconfigure(0, weight=1)
-        text_label(self.host, "Player details", size=14, bold=True).grid(
+        text_label(self.host, "Player details", size=theme.T_HEADING, bold=True).grid(
             row=0, column=0, sticky="w", padx=theme.SP3, pady=(theme.SP3, theme.SP2))
         self.scroll = themed_scroll(self.host, fill=theme.PANEL, height=150)
         self.scroll.grid(row=1, column=0, sticky="nsew", padx=theme.SP3, pady=(0, theme.SP3))
@@ -64,9 +64,9 @@ class PlayerDetailsPanel:
         head = ctk.CTkFrame(self.scroll.inner, fg_color="transparent")
         head.pack(fill="x", pady=(0, theme.SP2))
         name = real_text(card.get("name") or card.get("playername")) or "Player"
-        text_label(head, monogram(name)[:2], size=14, bold=True, color=theme.ACCENT,
+        text_label(head, monogram(name)[:2], size=theme.T_HEADING, bold=True, color=theme.ACCENT,
                    width=36, height=36).pack(side="left", padx=(0, theme.SP2))
-        text_label(head, name, size=14, bold=True, wraplength=175, justify="left").pack(
+        text_label(head, name, size=theme.T_HEADING, bold=True, wraplength=175, justify="left").pack(
             side="left", fill="x", expand=True)
         raw_ovr = card.get("overallrating") or card.get("overall") or card.get("ovr")
         try:

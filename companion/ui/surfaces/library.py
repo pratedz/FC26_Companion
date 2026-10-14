@@ -7,9 +7,19 @@ from typing import Any, Mapping
 from ...app.presenters import search_view
 from .. import theme
 from ..widgets import states
-from ..widgets.primitives import button, ensure_ctk, eyebrow, muted_label, panel, set_disabled, text_label
+from ..widgets.primitives import (
+    button,
+    ensure_ctk,
+    entry as text_entry,
+    muted_label,
+    panel,
+    search_box,
+    section_title,
+    set_disabled,
+    text_label,
+)
 from ..widgets.table import Column, DataGrid, TableModel
-from ._common import identity_row, monogram, section_header, set_status, surface_root
+from ._common import identity_row, monogram, position_text, section_header, set_status, surface_root
 
 try:  # pragma: no cover
     import customtkinter as ctk
@@ -19,7 +29,7 @@ except ImportError:  # pragma: no cover
 
 def _target_route_copy() -> str:
     """One shared prerequisite route for every unselected-target state."""
-    return "Lock a Club player to stage a card build, or Send to Sign with no lock."
+    return "Choose a player to copy a card's build onto, or send the card to Sign."
 
 
 def _compact_prompt(
@@ -31,18 +41,23 @@ def _compact_prompt(
     action: Any,
 ) -> None:
     """A purposeful first-use prompt, rather than a screen-sized empty grid."""
+    from ..icons import ctk_icon
+
     card = panel(parent, level=1)
-    card.pack(fill="x", pady=(theme.SP2, 0))
+    card.pack(fill="x", pady=(theme.SP3, 0))
     row = ctk.CTkFrame(card, fg_color="transparent")
-    row.pack(fill="x", padx=theme.SP3, pady=theme.SP3)
+    row.pack(fill="x", padx=theme.SP5, pady=theme.SP5)
+    image = ctk_icon("card", 32, tint=theme.ACCENT)
+    if image is not None:
+        ctk.CTkLabel(row, text="", image=image).pack(side="left", anchor="n", padx=(0, theme.SP4))
+    button(row, action_label, action, kind="accent", height=theme.BTN_MD).pack(
+        side="right", anchor="n", padx=(theme.SP3, 0)
+    )
     copy = ctk.CTkFrame(row, fg_color="transparent")
     copy.pack(side="left", fill="x", expand=True)
-    text_label(copy, headline, size=13, bold=True).pack(anchor="w")
-    muted_label(copy, detail, size=11, wraplength=900, justify="left").pack(
+    text_label(copy, headline, size=theme.T_HEADLINE, display=True).pack(anchor="w")
+    muted_label(copy, detail, size=theme.T_SMALL, wraplength=640, justify="left").pack(
         anchor="w", pady=(theme.SP1, 0)
-    )
-    button(row, action_label, action, kind="primary", height=theme.BTN_MD).pack(
-        side="right", padx=(theme.SP3, 0)
     )
 
 
@@ -53,19 +68,17 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     search = search_view(state)
     section_header(
         root, "Library",
-        subtitle="Find a card, inspect it, then choose one safe next step.",
+        subtitle="Every card from FIFA 18 to FC 26, stored locally. Copy one onto a player or send it to Sign.",
     )
     _target_bar(root, svc, state)
 
     search_card = panel(root, level=1)
-    search_card.pack(fill="x", pady=(0, theme.SP2))
-    eyebrow(search_card, "Find a card").pack(
-        anchor="w", padx=theme.SP3, pady=(theme.SP2, 0)
-    )
+    search_card.pack(fill="x", pady=(0, theme.SP3))
     bar = ctk.CTkFrame(search_card, fg_color="transparent")
-    bar.pack(fill="x", padx=theme.SP3, pady=(theme.SP1, theme.SP2))
-    entry = _entry(bar, "Player or variant", 220)
-    entry.pack(side="left", fill="x", expand=True)
+    bar.pack(fill="x", padx=theme.SP4, pady=theme.SP3)
+    query_box = search_box(bar, placeholder="Player name or card variant", height=theme.BTN_LG)
+    query_box.pack(side="left", fill="x", expand=True)
+    entry = query_box.entry
     if search["query"] and not search["query"].startswith(("Best:", "Variants:")):
         entry.insert(0, search["query"])
     filters_row = ctk.CTkFrame(search_card, fg_color="transparent")
@@ -91,20 +104,21 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         )
 
     entry.bind("<Return>", lambda _event: do_search())
-    button(bar, "Search", do_search, kind="primary", height=theme.BTN_LG, width=76).pack(
+    button(bar, "Search", do_search, kind="accent", height=theme.BTN_LG, width=88).pack(
         side="left", padx=(theme.SP2, 0)
     )
     button(
-        bar, "Favorites", lambda: _show_favorites(svc),
-        kind="secondary", height=theme.BTN_LG, width=82,
+        bar, "Favourites", lambda: _show_favorites(svc), icon="star",
+        kind="secondary", height=theme.BTN_LG,
     ).pack(side="left", padx=(theme.SP2, 0))
-    filter_button = button(bar, "Filters", lambda: None, kind="ghost", height=theme.BTN_LG, width=72)
+    filter_button = button(bar, "Filters", lambda: None, kind="ghost", icon="filter",
+                           height=theme.BTN_LG)
     filter_button.pack(side="left", padx=(theme.SP2, 0))
 
     def toggle_filters() -> None:
         filters_visible["value"] = not filters_visible["value"]
         if filters_visible["value"]:
-            filters_row.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP2))
+            filters_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP3))
             filter_button.configure(text="Hide filters")
         else:
             filters_row.pack_forget()
@@ -112,12 +126,12 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
 
     filter_button.configure(command=toggle_filters)
     if filters_visible["value"]:
-        filters_row.pack(fill="x", padx=theme.SP3, pady=(0, theme.SP2))
+        filters_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP3))
         filter_button.configure(text="Hide filters")
     if state.target.locked:
         button(
-            bar, "Best match", lambda: _best_matches(svc),
-            kind="secondary", height=theme.BTN_LG, width=92,
+            bar, "Best match", lambda: _best_matches(svc), icon="target",
+            kind="secondary", height=theme.BTN_LG,
         ).pack(side="left", padx=(theme.SP2, 0))
 
     body = ctk.CTkFrame(root, fg_color="transparent")
@@ -132,49 +146,48 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         return root
     if search["empty"]:
         _compact_prompt(
-            body, headline=f'No results for "{search["query"]}"',
+            body, headline=f'No cards match "{search["query"]}"',
             detail="Try a shorter name, another year, or a wider OVR range.",
             action_label="Clear search", action=lambda: _search(svc, ""),
         )
         return root
     if not search["results"]:
-        missing_target = not state.target.locked
         _compact_prompt(
-            body, headline="Search the local card library",
+            body, headline="Search 238,000+ cards",
             detail=(
-                "Search 238,000+ card observations here. " + _target_route_copy()
-                if missing_target
-                else "Search is local. Select a card to inspect it or stage its card build."
+                "Type a player name or a promo such as TOTY above. Select a card to inspect it, "
+                + (
+                    "then copy its build onto your player or send it to Sign."
+                    if state.target.locked
+                    else "then send it to Sign, or choose a player first to copy its build."
+                )
             ),
-            action_label="Open Club" if missing_target else "Search Neymar",
-            action=(
-                (lambda: svc.ui.navigate("club"))
-                if missing_target
-                else (lambda: _search(svc, "Neymar"))
-            ),
+            action_label="Browse favourites",
+            action=lambda: _show_favorites(svc),
         )
         return root
 
+    count_n = int(search["count"] or 0)
     muted_label(
         body,
-        f"{search['count']} card variant(s). "
+        f"{count_n} card variant{'s' if count_n != 1 else ''}  ·  "
         + (
-            "Double-click to stage the card build."
+            "Double-click copies the card build onto your player."
             if state.target.locked
-            else "Double-click to send the card to Sign."
+            else "Double-click sends the card to Sign."
         ),
-        size=11,
+        size=theme.T_SMALL,
     ).pack(anchor="w")
     rows = [_card_row(svc, result) for result in search["results"]]
     model = TableModel(
         columns=(
-            Column("favorite", "FAV", width=38),
-            Column("name", "NAME", width=175),
-            Column("year", "YR", width=38),
-            Column("ovr", "OVR", width=44, numeric=True, kind="ovr"),
-            Column("pos", "POS", width=42),
-            Column("variant", "VARIANT", width=175),
-            Column("club", "CLUB", width=110),
+            Column("favorite", "", width=26, sortable=False),
+            Column("name", "NAME", width=160, stretch=True, max_width=260),
+            Column("year", "YEAR", width=48, numeric=True),
+            Column("ovr", "OVR", width=50, numeric=True, kind="ovr"),
+            Column("pos", "POS", width=96, kind="pos", priority=2),
+            Column("variant", "VARIANT", width=230, priority=1),
+            Column("club", "CLUB", width=150, priority=3),
         ),
         rows=rows, key_field="_key", multi_select=True,
     )
@@ -183,19 +196,17 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     inspector = panel(body, level=1)
     inspector.pack(fill="x", pady=(theme.SP2, 0))
     identity_host = ctk.CTkFrame(inspector, fg_color="transparent")
-    identity_host.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, 0))
-    identity_row(
-        identity_host,
-        letters="?",
-        title="Select a card to inspect it",
-        caption="Library stages the card build (ratings, skills, body, run style). Kit, name, age and face stay off here.",
+    identity_host.pack(fill="x", padx=theme.SP4, pady=(theme.SP3, 0))
+    section_title(
+        identity_host, "No card selected",
+        detail="Click a card to inspect it. Library copies the card build (ratings, skills, body, run style); kit, name, age and face stay as they are.",
     ).pack(anchor="w")
     inspector_actions = ctk.CTkFrame(inspector, fg_color="transparent")
-    inspector_actions.pack(fill="x", padx=theme.SP3, pady=(theme.SP2, theme.SP2))
+    inspector_actions.pack(fill="x", padx=theme.SP4, pady=theme.SP3)
     stage_button = button(
         inspector_actions, "Stage card build for selected player",
         lambda: _stage_card(svc, selected),
-        kind="primary", height=theme.BTN_MD,
+        kind="primary", height=theme.BTN_MD, icon="card",
         disabled_reason=(
             _target_route_copy()
             if not state.target.locked else "Select a card first."
@@ -204,7 +215,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     stage_button.pack(side="left")
     send_button = button(
         inspector_actions, "Send to Sign", lambda: _add_to_team(svc, selected),
-        kind="secondary", height=theme.BTN_MD,
+        kind="secondary", height=theme.BTN_MD, icon="contract",
         disabled_reason="Select a card first.",
     )
     send_button.pack(side="left", padx=(theme.SP2, 0))
@@ -215,7 +226,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         name = row.get("name") or "card"
         target = state.target.name or state.target.playerid
         caption = (
-            f"Will affect: {target}. Will copy: card build (ratings, skills, body, run style)."
+            f"Copies the card build (ratings, skills, body, run style) onto {target}."
             if state.target.locked
             else _target_route_copy()
         )
@@ -269,6 +280,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         body, model, show_checkboxes=True, on_row_click=select,
         on_row_activate=open_card,
         on_selection_change=on_sel,
+        fill_available=True,
     )
     grid.pack(fill="both", expand=True, pady=(theme.SP2, 0))
     more = ctk.CTkFrame(body, fg_color="transparent")
@@ -414,11 +426,9 @@ def _sources_panel(root: Any, svc: Any, vm: dict[str, Any] | None = None) -> Non
     card = panel(root, level=1)
     card.pack(fill="x", pady=(0, theme.SP2))
     header = ctk.CTkFrame(card, fg_color="transparent")
-    header.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
-    eyebrow(header, "Catalog tools").pack(side="left")
-    muted_label(header, "Sync and diagnostics - not needed to search cards.", size=10).pack(
-        side="left", padx=theme.SP2
-    )
+    header.pack(fill="x", padx=theme.SP4, pady=theme.SP2)
+    section_title(header, "Catalog tools",
+                  detail="Sync and diagnostics. Not needed to search cards.").pack(side="left")
     inner = ctk.CTkFrame(card, fg_color="transparent")
     shown = {"value": False}
 
@@ -433,7 +443,7 @@ def _sources_panel(root: Any, svc: Any, vm: dict[str, Any] | None = None) -> Non
 
     reveal = button(header, "Catalog tools", toggle, kind="ghost", height=theme.BTN_MD, width=112)
     reveal.pack(side="right")
-    eyebrow(inner, "Sources").pack(anchor="w")
+    section_title(inner, "Sources").pack(anchor="w")
     root_path = Path(svc.paths.root)
     futgg_dir = root_path / "card_db" / "futgg"
     rows: list[tuple[str, Path]] = [
@@ -644,14 +654,15 @@ def _target_bar(root: Any, svc: Any, state: Any) -> None:
         root, fg_color=theme.PANEL, border_color=theme.BORDER,
         border_width=1, corner_radius=theme.R_MD,
     )
-    bar.pack(fill="x", pady=(0, theme.SP2))
+    bar.pack(fill="x", pady=(0, theme.SP3))
     inner = ctk.CTkFrame(bar, fg_color="transparent")
-    inner.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
-    current = (
-        f"Staging onto {state.target.name or state.target.playerid}"
-        if state.target.locked else _target_route_copy()
-    )
-    muted_label(inner, current, size=11).pack(side="left")
+    inner.pack(fill="x", padx=theme.SP4, pady=theme.SP2)
+    if state.target.locked:
+        text_label(inner, "Copying onto", size=theme.T_SMALL, color=theme.MUTED).pack(side="left")
+        text_label(inner, str(state.target.name or state.target.playerid), size=theme.T_SMALL,
+                   bold=True).pack(side="left", padx=(theme.SP1, 0))
+    else:
+        muted_label(inner, _target_route_copy(), size=theme.T_SMALL).pack(side="left")
     live = state.bridge.liveness
     verified = (
         live.armed
@@ -673,12 +684,8 @@ def _target_bar(root: Any, svc: Any, state: Any) -> None:
         chooser = ctk.CTkComboBox(
             inner,
             values=labels,
-            width=230,
+            width=240,
             height=theme.BTN_MD,
-            fg_color=theme.CARD,
-            border_color=theme.BORDER,
-            button_color=theme.CARD_HOVER,
-            text_color=theme.TEXT,
             command=lambda label: _choose_library_target(svc, mapping.get(label)),
         )
         chooser.set("Change player..." if state.target.locked else "Choose player...")
@@ -710,10 +717,7 @@ def _choose_library_target(svc: Any, raw: Mapping[str, Any] | None) -> None:
 
 
 def _entry(parent: Any, placeholder: str, width: int) -> Any:
-    return ctk.CTkEntry(
-        parent, placeholder_text=placeholder, width=width, height=theme.BTN_LG,
-        fg_color=theme.CARD, border_color=theme.BORDER, text_color=theme.TEXT,
-    )
+    return text_entry(parent, placeholder=placeholder, width=width, height=theme.BTN_LG)
 
 
 def _card_row(svc: Any, card: dict) -> dict:
@@ -727,7 +731,7 @@ def _card_row(svc: Any, card: dict) -> dict:
         "name": card.get("name") or card.get("playername") or "—",
         "year": card.get("year") or card.get("game_year") or "—",
         "ovr": card.get("overallrating") or card.get("ovr") or "—",
-        "pos": card.get("positions_text") or card.get("preferredposition1") or "—",
+        "pos": card.get("positions_text") or position_text(card.get("preferredposition1")),
         "variant": card.get("variant") or card.get("revision") or "Base",
         "club": card.get("club") or card.get("teamname") or "—",
         "_key": card.get("_card_key") or card.get("obs_id") or id(card),
@@ -765,9 +769,11 @@ def _search(
                     E.SearchSucceeded(results=rows, generation=generation)
                 )
             )
-            svc.executor.on_ui_thread(
-                lambda: set_status(svc, f"{len(rows)} card variant(s) found.")
-            )
+            if not rows:
+                # The page states the count; only an empty result needs a nudge.
+                svc.executor.on_ui_thread(
+                    lambda: set_status(svc, "No cards match. Try a shorter name.", tone="warn")
+                )
         except Exception as exc:  # noqa: BLE001
             svc.executor.on_ui_thread(
                 lambda: svc.store.dispatch(

@@ -26,12 +26,13 @@ EXAMPLE_PROMPTS: tuple[str, ...] = (
 
 
 def _grok_readiness_copy(result: Any) -> tuple[str, str]:
-    """Small, testable UI wording for Codex readiness; never exposes credentials."""
-    if bool(getattr(result, "connected", False)):
-        return "Codex: ready — proposals still require Review → Apply.", theme.SUCCESS
-    hint = str(getattr(result, "login_hint", "") or "").strip()
-    message = str(getattr(result, "message", "Codex needs a login.") or "Codex needs a login.")
-    return f"Codex: {message}{(' ' + hint) if hint else ''}", theme.WARNING
+    """UI wording for the selected AI provider's readiness; never exposes credentials."""
+    label = str(getattr(result, "label", "") or "AI")
+    if bool(getattr(result, "ready", False)):
+        return f"{label}: ready — proposals still require Review → Apply.", theme.SUCCESS
+    from ....integrations.ai_provider import block_reason
+
+    return f"{label}: {block_reason() or getattr(result, 'message', 'not ready.')}", theme.WARNING
 
 
 def _set_grok_feedback(widget: Any, text: str, *, color: str | None = None) -> None:
@@ -47,16 +48,23 @@ def _set_grok_feedback(widget: Any, text: str, *, color: str | None = None) -> N
         pass
 
 
+def _watch_ai_changes(widget: Any, refresh: Any) -> None:
+    """Re-run ``refresh`` whenever the provider, model, or key changes, until ``widget`` dies."""
+    from ...widgets.ai_bar import _watch
+
+    _watch(widget, refresh)
+
+
 def _connect_grok(svc: Any, feedback: Any = None) -> None:
     try:
-        from ....integrations.grok import use_build_session
+        from ....integrations.ai_provider import readiness
 
-        result = use_build_session()
+        result = readiness()
         message, color = _grok_readiness_copy(result)
         _set_grok_feedback(feedback, message, color=color)
         set_status(svc, message)
     except Exception as exc:  # noqa: BLE001
-        message = f"Codex: {exc}"
+        message = f"AI status check failed: {exc}"
         _set_grok_feedback(feedback, message, color=theme.WARNING)
         set_status(svc, message)
 
@@ -107,7 +115,7 @@ def _confirm_draft_replacement(svc: Any, incoming: str, proceed: Any) -> None:
         # A headless/UI-less caller must never silently replace a draft.
         set_status(svc, f"Your staged changes are protected. Discard them before using {incoming}.")
         return
-    text_label(win, "Replace staged changes?", size=17, bold=True).pack(
+    text_label(win, "Replace staged changes?", size=theme.T_HEADLINE, bold=True).pack(
         anchor="w", padx=theme.SP4, pady=(theme.SP4, theme.SP1)
     )
     muted_label(
@@ -171,21 +179,8 @@ def _ask_grok(
         return
     ai_state = ai_state if ai_state is not None else {}
     if ai_state.get("busy"):
-        _set_grok_feedback(feedback, "Codex is already preparing this proposal…", color=theme.WARNING)
-        set_status(svc, "Codex is already preparing a proposal.")
-        return
-    try:
-        from ....integrations.grok import status as grok_status
-
-        ready = grok_status()
-    except Exception as exc:  # noqa: BLE001
-        _set_grok_feedback(feedback, f"Codex status check failed: {exc}", color=theme.WARNING)
-        set_status(svc, f"Codex status check failed: {exc}")
-        return
-    if not ready.connected:
-        message, color = _grok_readiness_copy(ready)
-        _set_grok_feedback(feedback, message, color=color)
-        set_status(svc, message)
+        _set_grok_feedback(feedback, "AI is already preparing this proposal…", color=theme.WARNING)
+        set_status(svc, "AI is already preparing a proposal.")
         return
     playerid = int(state.target.playerid)
     current = dict(state.editor.merged())
@@ -193,20 +188,20 @@ def _ask_grok(
     player_name = state.target.name
     ai_state["busy"] = True
     _set_grok_feedback(
-        feedback, "Codex is preparing a review-only proposal (up to ~2 minutes)…", color=theme.ACCENT
+        feedback, "AI is preparing a review-only proposal (up to ~2 minutes)…", color=theme.ACCENT
     )
     try:
         if propose_button is not None:
-            propose_button.configure(state="disabled")
+            propose_button.configure(state="disabled", text="Proposing…")
     except Exception:
         pass
-    set_status(svc, "Codex is preparing a proposal. Nothing is being written.")
+    set_status(svc, "AI is preparing a proposal. Nothing is being written.")
 
     def finish_button() -> None:
         ai_state["busy"] = False
         try:
             if propose_button is not None:
-                propose_button.configure(state="normal")
+                propose_button.configure(state="normal", text="Propose changes")
         except Exception:
             pass
 

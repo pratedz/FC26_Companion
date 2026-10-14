@@ -276,16 +276,6 @@ class SquadAssistantPanel:
         else:
             request = prompt
         request += squad_context(self.svc)
-        try:
-            from ....integrations.grok import status as grok_status
-
-            readiness = grok_status()
-            if not readiness.connected:
-                set_status(self.svc, readiness.message)
-                return
-        except Exception as exc:  # noqa: BLE001
-            set_status(self.svc, f"Codex status check failed: {exc}")
-            return
         self.save_view()
         self._show_retry(False)
         self.view["grok_generation"] = int(self.view.get("grok_generation", 0)) + 1

@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from ... import theme
-from ...widgets.primitives import button, eyebrow, muted_label, panel, text_label
+from ...widgets.primitives import button, muted_label, panel, search_box, set_disabled, text_label
 from ...widgets.table import Column, DataGrid, TableModel
-from .._common import section_header, set_status
+from .._common import section_header, set_status, squad_board_row
 
 try:  # pragma: no cover
     import customtkinter as ctk
@@ -16,120 +16,111 @@ except ImportError:  # pragma: no cover
 
 
 def _build_target_picker(root: Any, svc: Any, view: dict[str, Any] | None = None) -> None:
-    title_row = ctk.CTkFrame(root, fg_color="transparent")
-    title_row.pack(fill="x", pady=(0, theme.SP1))
-    text_label(title_row, "Player", size=22, bold=True).pack(anchor="w")
     section_header(
         root,
-        "Choose a player",
-        subtitle="Start with a verified player from the Career save that is open now.",
+        "Player",
+        subtitle="Choose who to edit. Nothing changes in FC 26 until you review and apply.",
     )
     state = svc.store.snapshot()
     squad = state.squad
     live = state.bridge.liveness
     verified = _has_verified_live_squad(squad, live)
     if not squad.players or not verified:
+        from ...icons import ctk_icon
+
         gate = panel(root, level=1)
-        gate.pack(fill="x", pady=(theme.SP1, theme.SP3))
+        gate.pack(fill="x", pady=(0, theme.SP3))
         top = ctk.CTkFrame(gate, fg_color="transparent")
-        top.pack(fill="x", padx=theme.SP4, pady=theme.SP3)
+        top.pack(fill="x", padx=theme.SP5, pady=theme.SP5)
+        image = ctk_icon("squad", 32, tint=theme.ACCENT)
+        if image is not None:
+            ctk.CTkLabel(top, text="", image=image).pack(side="left", padx=(0, theme.SP4))
         copy = ctk.CTkFrame(top, fg_color="transparent")
         copy.pack(side="left", fill="x", expand=True)
-        eyebrow(copy, "Live squad required").pack(anchor="w")
-        text_label(copy, "Read your current squad before editing", size=16, bold=True).pack(
-            anchor="w", pady=(2, 0)
-        )
+        text_label(copy, "Read your current squad first", size=theme.T_HEADLINE,
+                   display=True).pack(anchor="w")
         muted_label(
             copy,
             "Old squad caches are deliberately unavailable here, so a player from another save cannot be edited by mistake.",
-            size=11,
-        ).pack(anchor="w", pady=(2, 0))
+            size=theme.T_SMALL, wraplength=520, justify="left",
+        ).pack(anchor="w", pady=(theme.SP1, 0))
         button(
             top, "Open Club", lambda: svc.ui.navigate("club"),
             kind="primary", height=theme.BTN_LG, width=130,
         ).pack(side="right", padx=(theme.SP3, 0))
-        path = ctk.CTkFrame(gate, fg_color="transparent")
-        path.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP3))
-        muted_label(path, "Club", size=11).pack(side="left")
-        text_label(path, "›", size=15, color=theme.BORDER).pack(side="left", padx=theme.SP2)
-        text_label(path, "Read squad", size=11, bold=True, color=theme.ACCENT).pack(side="left")
-        text_label(path, "›", size=15, color=theme.BORDER).pack(side="left", padx=theme.SP2)
-        muted_label(path, "Choose player", size=11).pack(side="left")
         return
 
-    rows = []
-    for raw in squad.players:
-        rows.append(
-            {
-                "name": raw.get("name") or raw.get("playername") or "-",
-                "pos": raw.get("position") or raw.get("preferredposition1") or "-",
-                "ovr": raw.get("overallrating") or raw.get("ovr") or "-",
-                "pot": raw.get("potential") or raw.get("pot") or "-",
-                "id": raw.get("playerid") or raw.get("id"),
-                "_raw": raw,
-            }
-        )
+    rows = [squad_board_row(raw) for raw in squad.players]
     all_rows = tuple(rows)
-    guide = panel(root, level=1)
-    guide.pack(fill="x", pady=(theme.SP1, theme.SP2))
-    guide_row = ctk.CTkFrame(guide, fg_color="transparent")
-    guide_row.pack(fill="x", padx=theme.SP3, pady=theme.SP2)
-    eyebrow(guide_row, f"{len(rows)} players").pack(side="left")
-    muted_label(
-        guide_row, "Select a row to preview it, then open it. Double-click opens immediately.", size=11,
-    ).pack(side="left", padx=(theme.SP3, 0))
-    search_row = ctk.CTkFrame(root, fg_color="transparent")
-    search_row.pack(fill="x", pady=(theme.SP1, 0))
-    query = ctk.StringVar(value=str((view or {}).get("squad_query") or ""))
-    search_box = ctk.CTkEntry(
-        search_row,
-        textvariable=query,
-        placeholder_text="Search your current squad by name, position, or ID…",
-        height=theme.BTN_MD,
-        fg_color=theme.CARD,
-        border_color=theme.BORDER,
-        text_color=theme.TEXT,
-    )
-    search_box.pack(side="left", fill="x", expand=True)
     model = TableModel(
         columns=(
-            Column("name", "PLAYER", width=220),
-            Column("pos", "POS", width=55),
-            Column("ovr", "OVR", width=55, numeric=True, kind="ovr"),
-            Column("pot", "POT", width=55, numeric=True, kind="ovr"),
+            Column("name", "PLAYER", width=170, stretch=True, max_width=380),
+            Column("pos", "POS", width=52, kind="pos"),
+            Column("ovr", "OVR", width=50, numeric=True, kind="ovr"),
+            Column("pot", "POT", width=50, numeric=True, kind="ovr", priority=1),
+            Column("age", "AGE", width=48, numeric=True, priority=2),
         ),
         rows=rows,
         key_field="id",
         multi_select=False,
     )
     selected: dict[str, Any] = {}
-    picker_actions = ctk.CTkFrame(root, fg_color="transparent")
-    picker_actions.pack(fill="x", pady=(theme.SP2, 0))
+
+    # Bottom bar first, so a long squad can never push "Open player" off screen.
+    bar = panel(root, level=1)
+    bar.pack(side="bottom", fill="x", pady=(theme.SP3, 0))
+    bar_row = ctk.CTkFrame(bar, fg_color="transparent")
+    bar_row.pack(fill="x", padx=theme.SP4, pady=theme.SP3)
+    picked_label = muted_label(bar_row, "No player chosen yet.", size=theme.T_SMALL)
+    picked_label.pack(side="left")
     open_button = button(
-        picker_actions,
+        bar_row,
         "Open player",
         lambda: _pick_squad_player(svc, selected) if selected else None,
         kind="primary",
         height=theme.BTN_MD,
+        icon="edit",
         disabled_reason="Choose a player first.",
     )
-    open_button.pack(side="left")
-    muted_label(
-        picker_actions, "Nothing is changed when you open a player.", size=11,
-    ).pack(side="left", padx=(theme.SP2, 0))
+    open_button.pack(side="right")
+    if getattr(svc, "ui", None) is not None:
+        button(
+            bar_row, "Start from a Library card", lambda: svc.ui.navigate("library"),
+            kind="ghost", height=theme.BTN_MD,
+        ).pack(side="right", padx=(0, theme.SP2))
+
+    card = panel(root, level=1)
+    card.pack(fill="both", expand=True)
+    search_row = ctk.CTkFrame(card, fg_color="transparent")
+    search_row.pack(fill="x", padx=theme.SP3, pady=(theme.SP3, theme.SP2))
+    query = ctk.StringVar(value=str((view or {}).get("squad_query") or ""))
+    search = search_box(
+        search_row, variable=query,
+        placeholder="Search your current squad by name, position, or ID",
+    )
+    search.pack(side="left", fill="x", expand=True)
+    count_row = ctk.CTkFrame(card, fg_color="transparent")
+    count_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP2))
+    count_label = muted_label(count_row, f"{len(rows)} players", size=theme.T_CAPTION)
+    count_label.pack(side="left")
+    muted_label(count_row, "Click to choose  ·  Double-click or Enter opens",
+                size=theme.T_CAPTION).pack(side="right")
 
     def focus_player(row: dict[str, Any]) -> None:
         selected.clear()
         selected.update(row)
-        try:
-            open_button.configure(state="normal")
-        except Exception:
-            pass
+        set_disabled(open_button, "")
+        open_button.configure(text=f"Open {row.get('name') or 'player'}")
+        picked_label.configure(
+            text=f"{row.get('name') or 'Player'}  ·  {row.get('pos') or '—'}  ·  OVR {row.get('ovr') or '—'}",
+            text_color=theme.TEXT,
+        )
 
     grid = DataGrid(
-        root,
+        card,
         model,
         show_checkboxes=False,
+        fill_available=True,
         select_on_click=False,
         on_row_click=focus_player,
         on_row_activate=lambda row: _pick_squad_player(svc, row),
@@ -150,24 +141,14 @@ def _build_target_picker(root: Any, svc: Any, view: dict[str, Any] | None = None
             )
         model.set_rows(filtered)
         grid.refresh()
+        count_label.configure(
+            text=f"{len(filtered)} of {len(all_rows)} players" if needle else f"{len(all_rows)} players"
+        )
 
     query.trace_add("write", filter_squad)
     if query.get():
         filter_squad()
-    button(
-        search_row,
-        "Clear",
-        lambda: query.set(""),
-        kind="ghost",
-        height=theme.BTN_MD,
-        width=62,
-    ).pack(side="left", padx=(theme.SP2, 0))
-    grid.pack(fill="both", expand=True, pady=(theme.SP2, 0))
-    if getattr(svc, "ui", None) is not None:
-        button(
-            root, "Use a Library card instead", lambda: svc.ui.navigate("library"),
-            kind="ghost", height=theme.BTN_MD,
-        ).pack(anchor="w", pady=(theme.SP2, 0))
+    grid.pack(fill="both", expand=True, padx=theme.SP2, pady=(0, theme.SP2))
 
 
 def _has_verified_live_squad(squad: Any, live: Any) -> bool:

@@ -34,29 +34,30 @@ def identity_row(
     caption: str = "",
     ovr: Any = None,
 ) -> Any:
-    """Broadcast lock-up: teal monogram, 18 pt name, optional OVR chip."""
+    """Broadcast lock-up: crest tile, display-face name, OVR chip and caption."""
     ensure_ctk()
     from ..widgets.ovr import ovr_chip
 
     frame = ctk.CTkFrame(parent, fg_color="transparent")
     mono = ctk.CTkFrame(
-        frame, width=44, height=44, fg_color=theme.ACCENT, corner_radius=theme.R_SM,
+        frame, width=48, height=48, fg_color=theme.CARD_HOVER, corner_radius=theme.R_MD,
+        border_width=1, border_color=theme.BORDER,
     )
     mono.pack(side="left", padx=(0, theme.SP3))
     mono.pack_propagate(False)
-    text_label(mono, (letters or "FC")[:3], size=14, bold=True, color=theme.BG).pack(
-        expand=True
-    )
+    text_label(mono, (letters or "FC")[:3], size=theme.T_HEADLINE, display=True,
+               color=theme.ACCENT).pack(expand=True)
     names = ctk.CTkFrame(frame, fg_color="transparent")
     names.pack(side="left", fill="x", expand=True)
-    title_label = text_label(names, title, size=18, bold=True)
+    title_label = text_label(names, title, size=theme.T_TITLE, display=True)
     title_label.pack(anchor="w")
     frame.title_label = title_label
     stats = ctk.CTkFrame(names, fg_color="transparent")
     stats.pack(anchor="w", pady=(2, 0))
-    ovr_chip(stats, ovr, size="xs").pack(side="left")
-    caption_label = muted_label(stats, caption, size=12)
-    caption_label.pack(side="left", padx=(theme.SP2, 0))
+    if ovr is not None:
+        ovr_chip(stats, ovr, size="xs").pack(side="left", padx=(0, theme.SP2))
+    caption_label = muted_label(stats, caption, size=theme.T_SMALL)
+    caption_label.pack(side="left")
     frame.caption_label = caption_label
     return frame
 
@@ -85,13 +86,78 @@ def action_row(parent: Any, *actions: tuple[str, Callable[[], None], str]) -> An
 def info_card(parent: Any, title: str, body: str) -> Any:
     card = panel(parent, level=1)
     card.pack(fill="x", pady=(0, theme.SP2))
-    text_label(card, title, size=13, bold=True).pack(anchor="w", padx=theme.SP3, pady=(theme.SP3, 2))
-    muted_label(card, body, size=12).pack(anchor="w", padx=theme.SP3, pady=(0, theme.SP3))
+    text_label(card, title, size=theme.T_BODY, bold=True).pack(
+        anchor="w", padx=theme.SP4, pady=(theme.SP3, 2)
+    )
+    muted_label(card, body, size=theme.T_SMALL).pack(
+        anchor="w", padx=theme.SP4, pady=(0, theme.SP3)
+    )
     return card
 
 
 def status_line(parent: Any, text: str) -> Any:
-    return muted_label(parent, text, size=11)
+    return muted_label(parent, text, size=theme.T_CAPTION)
+
+
+def collapse_below(container: Any, side_panel: Any, min_width: int, *, pack_kw: dict) -> None:
+    """Hide ``side_panel`` while ``container`` is narrower than ``min_width``.
+
+    The Club detail card and similar side panels are useful, but at the minimum
+    window with the Activity drawer open they would squeeze the list they
+    describe down to one column. The list wins; the panel returns when there is
+    room again.
+    """
+    import tkinter
+
+    state = {"shown": True, "job": None}
+
+    def apply() -> None:
+        state["job"] = None
+        try:
+            if not container.winfo_exists():
+                return
+            scale = float(container._get_widget_scaling())
+            width = int(container.winfo_width() / max(scale, 0.5))
+        except Exception:
+            return
+        if width <= 1:
+            return
+        want = width >= min_width
+        if want == state["shown"]:
+            return
+        state["shown"] = want
+        try:
+            if want:
+                side_panel.pack(**pack_kw)
+            else:
+                side_panel.pack_forget()
+        except Exception:
+            pass
+
+    def schedule(_event: Any = None) -> None:
+        if state["job"] is None:
+            try:
+                state["job"] = container.after_idle(apply)
+            except Exception:
+                state["job"] = None
+
+    try:
+        tkinter.Misc.bind(container, "<Configure>", schedule, add="+")
+    except Exception:
+        pass
+    schedule()
+
+
+def position_text(value: Any) -> str:
+    """A position for display. Raw FC position ids (25) become names (ST)."""
+    if value in (None, "", "—", "-"):
+        return "—"
+    try:
+        from ...domain.squad_session import _FC_POS
+
+        return _FC_POS.get(int(value), str(value))
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def squad_board_row(player: Mapping[str, Any]) -> dict[str, Any]:
@@ -103,7 +169,9 @@ def squad_board_row(player: Mapping[str, Any]) -> dict[str, Any]:
         player_id = raw_id
     return {
         "name": player.get("name") or player.get("playername") or "—",
-        "pos": player.get("position") or player.get("preferredposition1") or player.get("pos") or "—",
+        "pos": position_text(
+            player.get("position") or player.get("preferredposition1") or player.get("pos")
+        ),
         "ovr": player.get("overallrating") or player.get("ovr") or "—",
         "pot": player.get("potential") or player.get("pot") or "—",
         "age": _board_age(player),

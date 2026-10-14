@@ -162,13 +162,43 @@ def truncate(text: str, limit: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def ui_font(size: int = 13, *, bold: bool = False) -> Any:
+def ui_font(size: int = theme.T_BODY, *, bold: bool = False) -> Any:
     ensure_ctk()
     return ctk.CTkFont(family=theme.FONT, size=size, weight="bold" if bold else "normal")
 
 
-def mono_font(size: int = 12, *, bold: bool = False) -> Any:
-    """Tabular numerics. §6.8: numbers align without a monospace *layout*."""
+_DISPLAY_FAMILY: list[str] = []
+
+
+def display_family() -> str:
+    """Bahnschrift when Windows has it (10 1709+), else Segoe UI Semibold."""
+    if not _DISPLAY_FAMILY:
+        family = theme.DISPLAY_FALLBACK
+        try:
+            import tkinter.font as tkfont
+
+            if theme.DISPLAY in tkfont.families():
+                family = theme.DISPLAY
+        except Exception:
+            pass
+        _DISPLAY_FAMILY.append(family)
+    return _DISPLAY_FAMILY[0]
+
+
+def display_font(size: int = theme.T_TITLE) -> Any:
+    """The broadcast voice: page titles and rating numerals (DIN, Bahnschrift)."""
+    ensure_ctk()
+    return ctk.CTkFont(family=display_family(), size=size, weight="normal")
+
+
+def num_font(size: int = theme.T_SMALL, *, bold: bool = False) -> Any:
+    """Table numbers. Segoe UI figures are tabular, so columns align."""
+    ensure_ctk()
+    return ctk.CTkFont(family=theme.FONT, size=size, weight="bold" if bold else "normal")
+
+
+def mono_font(size: int = theme.T_SMALL, *, bold: bool = False) -> Any:
+    """Raw code, Lua and worker messages only. Data uses :func:`num_font`."""
     ensure_ctk()
     return ctk.CTkFont(family=theme.MONO, size=size, weight="bold" if bold else "normal")
 
@@ -601,15 +631,21 @@ def text_label(
     parent: Any,
     text: str,
     *,
-    size: int = 13,
+    size: int = theme.T_BODY,
     bold: bool = False,
     color: str | None = None,
     mono: bool = False,
+    display: bool = False,
     anchor: str = "w",
     **kw: Any,
 ) -> Any:
     ensure_ctk()
-    font = mono_font(size, bold=bold) if mono else ui_font(size, bold=bold)
+    if display:
+        font = display_font(size)
+    elif mono:
+        font = mono_font(size, bold=bold)
+    else:
+        font = ui_font(size, bold=bold)
     return ctk.CTkLabel(
         parent,
         text=str(text),
@@ -620,16 +656,26 @@ def text_label(
     )
 
 
-def eyebrow(parent: Any, text: str, **kw: Any) -> Any:
-    """Sentence-case section cue — accent, 12 pt, never ALL-CAPS micro-labels."""
-    return text_label(parent, text, size=12, bold=True, color=theme.ACCENT, **kw)
+def section_title(parent: Any, text: str, *, detail: str = "", **kw: Any) -> Any:
+    """A panel's heading: body-size semibold in TEXT, optional muted detail after it.
+
+    This replaced the accent "eyebrow" micro-label. A heading carries its own
+    weight; a coloured label above it only competed with the content.
+    """
+    ensure_ctk()
+    row = ctk.CTkFrame(parent, fg_color="transparent")
+    text_label(row, text, size=theme.T_BODY, bold=True).pack(side="left")
+    if detail:
+        muted_label(row, detail, size=theme.T_SMALL).pack(side="left", padx=(theme.SP2, 0))
+    row.title_label = row.winfo_children()[0]  # type: ignore[attr-defined]
+    return row
 
 
 def muted_label(
     parent: Any,
     text: str,
     *,
-    size: int = 11,
+    size: int = theme.T_CAPTION,
     color: str | None = None,
     **kw: Any,
 ) -> Any:
@@ -648,35 +694,45 @@ def section_header(
     title: str,
     subtitle: str = "",
     *,
-    glyph: str = "",
+    icon: str = "",
     trailing: Callable[[Any], Any] | None = None,
 ) -> Any:
-    """Surface title: 18 pt bold + optional 12 pt muted helper line.
+    """Page header: display-face title, optional muted context line, actions right.
 
     ``trailing`` is a builder so the caller can hang an action on the right of
-    the header without this function knowing what an action is. Matches the
-    hierarchy used by ``surfaces._common.section_header``.
+    the header without this function knowing what an action is. The subtitle is
+    for live context (club, counts, freshness), not for restating the page's
+    purpose.
     """
     ensure_ctk()
     frame = ctk.CTkFrame(parent, fg_color="transparent")
-    frame.pack(fill="x", pady=(0, theme.SP3))
+    frame.pack(fill="x", pady=(0, theme.SP4))
     row = ctk.CTkFrame(frame, fg_color="transparent")
     row.pack(fill="x")
 
-    if glyph:
-        text_label(row, glyph, size=18, color=theme.ACCENT, width=24).pack(
-            side="left", padx=(0, theme.SP2)
-        )
+    if icon:
+        from ..icons import ctk_icon
+
+        image = ctk_icon(icon, 24, tint=theme.ACCENT)
+        if image is not None:
+            ctk.CTkLabel(row, text="", image=image, width=28).pack(
+                side="left", padx=(0, theme.SP3), anchor="n", pady=(2, 0)
+            )
 
     col = ctk.CTkFrame(row, fg_color="transparent")
     col.pack(side="left", fill="x", expand=True)
-    text_label(col, title, size=18, bold=True).pack(anchor="w")
+    title_label = text_label(col, title, size=theme.T_TITLE, display=True)
+    title_label.pack(anchor="w")
+    frame.title_label = title_label  # type: ignore[attr-defined]
+    subtitle_label = None
     if subtitle:
-        muted_label(col, subtitle, size=12).pack(anchor="w", pady=(2, 0))
+        subtitle_label = muted_label(col, subtitle, size=theme.T_SMALL)
+        subtitle_label.pack(anchor="w", pady=(2, 0))
+    frame.subtitle_label = subtitle_label  # type: ignore[attr-defined]
 
     if trailing is not None:
         holder = ctk.CTkFrame(row, fg_color="transparent")
-        holder.pack(side="right")
+        holder.pack(side="right", anchor="n")
         try:
             built = trailing(holder)
             if built is not None:
@@ -708,7 +764,34 @@ def hairline(parent: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 #: §6.7 — exactly one control per screen may use ``primary`` (SUCCESS solid).
+#: ``accent`` and ``danger`` are tonal (tinted fill, coloured text) so a
+#: secondary emphasis never competes with the one solid primary.
 BUTTON_KINDS = ("primary", "accent", "secondary", "ghost", "danger")
+
+
+def button_style(kind: str) -> dict[str, Any]:
+    """Colours and font for a button kind. Pure apart from the font object."""
+    if kind == "primary":
+        fill, fg = theme.tone_colors("ok")
+        return dict(fg_color=fill, hover_color=hover_for(fill), text_color=fg,
+                    border_width=0, font=ui_font(theme.T_BODY, bold=True))
+    if kind == "accent":
+        return dict(fg_color=soft_fill("info"), hover_color=shade(theme.ACCENT, 0.32),
+                    text_color=theme.ACCENT, border_width=1,
+                    border_color=shade(theme.ACCENT, 0.55),
+                    font=ui_font(theme.T_BODY, bold=True))
+    if kind == "danger":
+        return dict(fg_color=shade(theme.DANGER, 0.2), hover_color=shade(theme.DANGER, 0.3),
+                    text_color=theme.DANGER_TEXT, border_width=1,
+                    border_color=shade(theme.DANGER, 0.6),
+                    font=ui_font(theme.T_BODY, bold=True))
+    if kind == "ghost":
+        return dict(fg_color="transparent", hover_color=theme.CARD_HOVER,
+                    border_width=1, border_color=theme.BORDER,
+                    text_color=theme.TEXT, font=ui_font(theme.T_SMALL))
+    return dict(fg_color=theme.CARD, hover_color=theme.CARD_HOVER,
+                border_width=1, border_color=theme.BORDER,
+                text_color=theme.TEXT, font=ui_font(theme.T_SMALL, bold=True))
 
 
 def button(
@@ -718,14 +801,16 @@ def button(
     *,
     kind: str = "secondary",
     width: int | None = None,
-    height: int = 30,
+    height: int = theme.BTN_MD,
     disabled_reason: str = "",
+    icon: str = "",
     **kw: Any,
 ) -> Any:
     """C1. ``disabled_reason`` is not decoration — A9 makes it mandatory.
 
     "Disabled with no explanation" is classified as a bug in §8.1, so passing a
     reason both disables the control and attaches the tooltip that explains it.
+    ``icon`` names a pack icon drawn before the label in the button's text colour.
     """
     ensure_ctk()
     kw.setdefault("corner_radius", theme.R_SM)
@@ -734,32 +819,311 @@ def button(
     kw["height"] = height
     if width is not None:
         kw["width"] = width
+    style = button_style(kind)
+    for key, value in style.items():
+        kw.setdefault(key, value)
+    if icon:
+        from ..icons import ctk_icon
 
-    if kind == "primary":
-        fill, fg = theme.tone_colors("ok")
-        kw.update(fg_color=fill, hover_color=hover_for(fill), text_color=fg,
-                  font=ui_font(13, bold=True))
-    elif kind == "accent":
-        fill, fg = theme.tone_colors("info")
-        kw.update(fg_color=fill, hover_color=hover_for(fill), text_color=fg,
-                  font=ui_font(13, bold=True))
-    elif kind == "danger":
-        fill, fg = theme.tone_colors("error")
-        kw.update(fg_color=fill, hover_color=hover_for(fill), text_color=fg,
-                  font=ui_font(13, bold=True))
-    elif kind == "ghost":
-        kw.update(fg_color="transparent", hover_color=theme.CARD_HOVER,
-                  border_width=1, border_color=theme.BORDER,
-                  text_color=theme.TEXT, font=ui_font(12))
-    else:  # secondary
-        kw.update(fg_color=theme.CARD, hover_color=theme.CARD_HOVER,
-                  border_width=1, border_color=theme.BORDER,
-                  text_color=theme.TEXT, font=ui_font(12, bold=True))
+        image = ctk_icon(icon, 16, tint=str(kw.get("text_color") or theme.TEXT))
+        if image is not None:
+            kw.setdefault("image", image)
+            kw.setdefault("compound", "left")
 
     btn = ctk.CTkButton(parent, **kw)
+    btn._companion_kind = kind  # type: ignore[attr-defined]
+    btn._companion_icon = icon  # type: ignore[attr-defined]
     if disabled_reason:
         set_disabled(btn, disabled_reason)
     return btn
+
+
+def restyle_button(btn: Any, kind: str) -> None:
+    """Switch an existing button's kind (e.g. a CTA that becomes primary)."""
+    try:
+        style = button_style(kind)
+        icon = getattr(btn, "_companion_icon", "")
+        if icon:
+            from ..icons import ctk_icon
+
+            style["image"] = ctk_icon(icon, 16, tint=str(style.get("text_color")))
+        disabled = str(btn.cget("state")) == "disabled"
+        btn._companion_kind = kind  # type: ignore[attr-defined]
+        if disabled and hasattr(btn, "_companion_enabled_style"):
+            btn._companion_enabled_style = {
+                key: style.get(key, btn._companion_enabled_style.get(key))
+                for key in btn._companion_enabled_style
+            }
+            return
+        btn.configure(**style)
+    except Exception:
+        pass
+
+
+def brand_window(window: Any) -> None:
+    """App icon and a dark Windows title bar, so a dialog never flashes white."""
+    try:
+        from ..icons import icons_dir
+
+        icon = icons_dir().parent / "app.ico"
+        if icon.is_file():
+            window.iconbitmap(str(icon))
+    except Exception:
+        pass
+    try:
+        import ctypes
+        import sys
+
+        if sys.platform.startswith("win"):
+            window.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(window.winfo_id()) or window.winfo_id()
+            value = ctypes.c_int(1)
+            for attribute in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (new, old builds)
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value)
+                ) == 0:
+                    break
+    except Exception:
+        pass
+
+
+def install_window_branding(root: Any) -> None:
+    """Brand the main window now and every Toplevel the moment it maps."""
+    brand_window(root)
+    seen: set[str] = set()
+
+    def _on_map(event: Any) -> None:
+        window = getattr(event, "widget", None)
+        try:
+            if window is None or window.winfo_toplevel() is not window:
+                return
+            name = str(window)
+        except Exception:
+            return
+        if name in seen:
+            return
+        seen.add(name)
+        brand_window(window)
+
+    try:
+        root.bind_class("Toplevel", "<Map>", _on_map, add="+")
+    except Exception:
+        pass
+
+
+def install_focus_ring(root: Any) -> None:
+    """Every entry shows a 2 px accent ring while it has keyboard focus (A2).
+
+    CustomTkinter draws no focus indicator. Binding the Tk ``Entry`` class once
+    covers every CTkEntry in the app, including ones built before this ran.
+    A search box draws its border on a wrapper frame; the entry names that
+    frame as ``_focus_target``.
+    """
+    def _owner(widget: Any) -> Any:
+        master = getattr(widget, "master", None)
+        if master is None or ctk is None or not isinstance(master, ctk.CTkEntry):
+            return None
+        return getattr(master, "_focus_target", None) or master
+
+    def _focus_in(event: Any) -> None:
+        owner = _owner(getattr(event, "widget", None))
+        if owner is None:
+            return
+        try:
+            if not hasattr(owner, "_ring_rest"):
+                owner._ring_rest = (owner.cget("border_color"), owner.cget("border_width"))
+            owner.configure(border_color=theme.FOCUS, border_width=2)
+        except Exception:
+            pass
+
+    def _focus_out(event: Any) -> None:
+        owner = _owner(getattr(event, "widget", None))
+        rest = getattr(owner, "_ring_rest", None) if owner is not None else None
+        if rest is None:
+            return
+        try:
+            owner.configure(border_color=rest[0], border_width=rest[1])
+        except Exception:
+            pass
+
+    try:
+        root.bind_class("Entry", "<FocusIn>", _focus_in, add="+")
+        root.bind_class("Entry", "<FocusOut>", _focus_out, add="+")
+    except Exception:
+        pass
+
+
+def _sync_entry_with(entry: Any, variable: Any) -> None:
+    """Two-way binding that leaves CTkEntry's placeholder working.
+
+    CTkEntry disables its placeholder whenever ``textvariable`` is passed, which
+    is why the squad filter and the palette rendered as blank boxes. The entry
+    therefore owns its text and mirrors it into ``variable``; traces on the
+    variable keep firing exactly as before.
+    """
+    guard = {"busy": False}
+
+    def push(_event: Any = None) -> None:
+        if guard["busy"]:
+            return
+        try:
+            text = "" if getattr(entry, "_placeholder_text_active", False) else entry.get()
+        except Exception:
+            return
+        if variable.get() != text:
+            guard["busy"] = True
+            try:
+                variable.set(text)
+            finally:
+                guard["busy"] = False
+
+    def pull(*_args: Any) -> None:
+        if guard["busy"]:
+            return
+        value = str(variable.get() or "")
+        current = "" if getattr(entry, "_placeholder_text_active", False) else entry.get()
+        if value == current:
+            return
+        guard["busy"] = True
+        try:
+            entry.delete(0, "end")
+            if value:
+                entry.insert(0, value)
+            else:
+                try:
+                    if entry.focus_get() is not getattr(entry, "_entry", None):
+                        entry._activate_placeholder()
+                except Exception:
+                    pass
+        finally:
+            guard["busy"] = False
+
+    for sequence in ("<KeyRelease>", "<<Paste>>", "<<Cut>>", "<FocusOut>"):
+        try:
+            entry.bind(sequence, lambda e: entry.after_idle(push), add="+")
+        except Exception:
+            pass
+    trace = variable.trace_add("write", pull)
+    entry._companion_variable = variable  # type: ignore[attr-defined]
+
+    def _drop(_event: Any = None) -> None:
+        try:
+            variable.trace_remove("write", trace)
+        except Exception:
+            pass
+
+    try:
+        entry.bind("<Destroy>", _drop, add="+")
+    except Exception:
+        pass
+    pull()
+
+
+def entry(
+    parent: Any,
+    *,
+    variable: Any = None,
+    placeholder: str = "",
+    height: int = theme.BTN_MD,
+    **kw: Any,
+) -> Any:
+    """A text field whose placeholder survives a bound variable. See :func:`_sync_entry_with`."""
+    ensure_ctk()
+    kw.setdefault("fg_color", theme.CARD)
+    kw.setdefault("border_color", theme.BORDER_STRONG)
+    kw.setdefault("border_width", 1)
+    kw.setdefault("text_color", theme.TEXT)
+    kw.setdefault("placeholder_text_color", theme.MUTED)
+    kw.setdefault("font", ui_font(theme.T_BODY))
+    kw.setdefault("corner_radius", theme.R_SM)
+    field = ctk.CTkEntry(parent, height=height, placeholder_text=placeholder or None, **kw)
+    if variable is not None:
+        _sync_entry_with(field, variable)
+    return field
+
+
+def search_box(
+    parent: Any,
+    *,
+    variable: Any = None,
+    placeholder: str = "Search",
+    on_submit: Callable[[], Any] | None = None,
+    height: int = theme.BTN_MD,
+    width: int | None = None,
+) -> Any:
+    """Search field: magnifier, borderless entry, and a clear control while it has text.
+
+    Returns the wrapper frame; ``.entry`` is the CTkEntry for focus and binding.
+    """
+    ensure_ctk()
+    frame = ctk.CTkFrame(
+        parent, fg_color=theme.CARD, corner_radius=theme.R_SM,
+        border_width=1, border_color=theme.BORDER_STRONG, height=height,
+        **({"width": width} if width else {}),
+    )
+    frame.pack_propagate(False)
+    from ..icons import ctk_icon
+
+    image = ctk_icon("search", 16, tint=theme.MUTED)
+    if image is not None:
+        ctk.CTkLabel(frame, text="", image=image, width=20).pack(
+            side="left", padx=(theme.SP2 + 2, 0)
+        )
+    field = entry(
+        frame, variable=variable, placeholder=placeholder, height=height - 4,
+        border_width=0, fg_color=theme.CARD,
+    )
+    field.pack(side="left", fill="both", expand=True, padx=(2, 2), pady=2)
+    field._focus_target = frame  # type: ignore[attr-defined]
+    clear = ctk.CTkButton(
+        frame, text="", width=24, height=24, fg_color="transparent",
+        hover_color=theme.CARD_HOVER, corner_radius=theme.R_XS,
+        image=ctk_icon("close", 12, tint=theme.MUTED),
+        command=lambda: (_clear(), field.focus_set()),
+    )
+    tooltip(clear, "Clear")
+
+    def _clear() -> None:
+        if variable is not None:
+            variable.set("")
+        else:
+            field.delete(0, "end")
+
+    def _show_clear(*_a: Any) -> None:
+        text = variable.get() if variable is not None else field.get()
+        try:
+            if text and not clear.winfo_manager():
+                clear.pack(side="right", padx=(0, theme.SP1))
+            elif not text and clear.winfo_manager():
+                clear.pack_forget()
+        except Exception:
+            pass
+
+    if variable is not None:
+        trace = variable.trace_add("write", _show_clear)
+        frame.bind("<Destroy>", lambda _e: _untrace(variable, trace), add="+")
+    else:
+        field.bind("<KeyRelease>", _show_clear, add="+")
+    if on_submit is not None:
+        field.bind("<Return>", lambda _e: on_submit(), add="+")
+    def _escape(_e: Any = None) -> str | None:
+        text = variable.get() if variable is not None else field.get()
+        if not text:
+            return None  # let Esc close the dialog or drawer
+        _clear()
+        return "break"
+
+    field.bind("<Escape>", _escape, add="+")
+    _show_clear()
+    frame.entry = field  # type: ignore[attr-defined]
+    return frame
+
+
+def _untrace(variable: Any, trace: str) -> None:
+    try:
+        variable.trace_remove("write", trace)
+    except Exception:
+        pass
 
 
 def set_disabled(widget: Any, reason: str) -> None:
@@ -771,12 +1135,18 @@ def set_disabled(widget: Any, reason: str) -> None:
     a calm muted control until it becomes available again.
     """
     try:
+        icon = getattr(widget, "_companion_icon", "")
         if reason:
             if not hasattr(widget, "_companion_enabled_style"):
-                widget._companion_enabled_style = {
-                    key: widget.cget(key)
-                    for key in ("fg_color", "hover_color", "text_color", "border_color", "border_width")
-                }
+                keys = ["fg_color", "hover_color", "text_color", "border_color", "border_width"]
+                if icon:
+                    keys.append("image")
+                widget._companion_enabled_style = {key: widget.cget(key) for key in keys}
+            muted: dict[str, Any] = {}
+            if icon:
+                from ..icons import ctk_icon
+
+                muted["image"] = ctk_icon(icon, 16, tint=theme.MUTED_DIM)
             widget.configure(
                 state="disabled",
                 fg_color=theme.CARD,
@@ -784,6 +1154,7 @@ def set_disabled(widget: Any, reason: str) -> None:
                 text_color=theme.MUTED_DIM,
                 border_color=theme.BORDER,
                 border_width=1,
+                **muted,
             )
         else:
             style = getattr(widget, "_companion_enabled_style", None)
@@ -802,54 +1173,53 @@ def icon_button(
     *,
     icon: str = "",
     tooltip_text: str = "",
-    size: int = 30,
+    size: int = theme.BTN_MD,
     width: int | None = None,
     tone: str = "muted",
     badge_count: int = 0,
+    label: str = "",
 ) -> Any:
-    """A square chrome control — PNG graphic and/or text glyph.
+    """A chrome control drawn from the icon pack, tinted by tone.
 
-    Prefer ``icon`` (``assets/icons/<name>.png``) for toolbar actions so the UI
-    stays graphic-first; ``tooltip_text`` carries the accessible label. ``glyph``
-    remains the fallback when the PNG pack is missing.
-
-    ``badge_count`` renders the in-flight count directly on the control, which
-    is the only way §3.1's "⧉ 2" is honest without a separate widget that can
-    drift out of sync with it.
-
-    ``width`` overrides the square default for multi-character labels — ``⌘K``
-    needs ~44 px and silently clips at 34.
+    ``tooltip_text`` carries the accessible name. ``label`` adds short text after
+    the icon (a shortcut hint such as ``Ctrl K``). ``badge_count`` renders the
+    in-flight count on the control itself, so the chrome's count cannot drift
+    from a separate widget. ``glyph`` is only a fallback when the PNG is missing.
     """
     ensure_ctk()
+    colour = theme.ACCENT if badge_count else theme.tone_fg(tone)
     image = None
     if icon:
         try:
             from ..icons import ctk_icon
 
-            image = ctk_icon(icon, max(14, min(size - 10, 22)))
+            image = ctk_icon(icon, 18, tint=colour)
         except Exception:
             image = None
-    if image is not None and not badge_count:
-        label = ""
-    else:
-        label = f"{glyph} {badge_count}" if badge_count else str(glyph or "")
-        if image is not None and badge_count:
-            label = str(badge_count)
+    parts = [label] if label else []
+    if badge_count:
+        parts.append(str(badge_count))
+    text = "  ".join(parts) if parts else ("" if image is not None else str(glyph or ""))
+    if image is not None and text:
+        text = " " + text
+    natural = size if not text else size + 8 + 8 * len(text)
     btn = ctk.CTkButton(
         parent,
-        text=label,
+        text=text,
         image=image,
+        compound="left",
         command=command or (lambda: None),
-        width=width if width is not None else size + (14 if badge_count else 0),
+        width=width if width is not None else natural,
         height=size,
         corner_radius=theme.R_SM,
-        fg_color="transparent",
+        fg_color=shade(theme.ACCENT, 0.16) if badge_count else "transparent",
         hover_color=theme.CARD_HOVER,
         border_width=1,
-        border_color=theme.ACCENT if badge_count else theme.BORDER,
-        text_color=theme.ACCENT if badge_count else theme.tone_fg(tone),
-        font=ui_font(13, bold=bool(badge_count)),
+        border_color=shade(theme.ACCENT, 0.55) if badge_count else theme.BORDER,
+        text_color=colour if badge_count else theme.MUTED,
+        font=ui_font(theme.T_SMALL, bold=bool(badge_count)),
     )
+    btn._icon_name = icon  # type: ignore[attr-defined]
     if tooltip_text:
         tooltip(btn, tooltip_text)
     return btn
@@ -891,10 +1261,10 @@ def pill(
     label_widget = ctk.CTkLabel(
         frame,
         text=label,
-        font=ui_font(10, bold=True),
+        font=ui_font(theme.T_MICRO, bold=True),
         text_color=text_color,
     )
-    label_widget.pack(padx=theme.SP2 + 2, pady=theme.SP1 - 1)
+    label_widget.pack(padx=theme.SP2 + 2, pady=2)
     frame._pill_label = label_widget  # type: ignore[attr-defined]
     frame._pill_solid = bool(solid)  # type: ignore[attr-defined]
     return frame
@@ -928,6 +1298,36 @@ def update_pill(
         pass
 
 
+def status_pill(parent: Any, text: str, *, tone: str = "muted") -> Any:
+    """Connection state: a drawn dot plus a word, so colour is never the only signal (A5)."""
+    ensure_ctk()
+    frame = ctk.CTkFrame(
+        parent, fg_color=soft_fill(tone), corner_radius=theme.R_PILL,
+        border_width=1, border_color=shade(theme.tone_colors(tone)[0], 0.7), height=26,
+    )
+    dot = ctk.CTkFrame(frame, width=8, height=8, corner_radius=4,
+                       fg_color=theme.tone_fg(tone))
+    dot.pack(side="left", padx=(theme.SP3, 0))
+    label = ctk.CTkLabel(frame, text=str(text), font=ui_font(theme.T_SMALL, bold=True),
+                         text_color=theme.tone_fg(tone), height=22)
+    label.pack(side="left", padx=(theme.SP2, theme.SP3))
+    frame._status_dot = dot  # type: ignore[attr-defined]
+    frame._pill_label = label  # type: ignore[attr-defined]
+    return frame
+
+
+def update_status_pill(frame: Any, text: str, *, tone: str = "muted") -> None:
+    if frame is None:
+        return
+    try:
+        frame.configure(fg_color=soft_fill(tone),
+                        border_color=shade(theme.tone_colors(tone)[0], 0.7))
+        frame._status_dot.configure(fg_color=theme.tone_fg(tone))
+        frame._pill_label.configure(text=str(text), text_color=theme.tone_fg(tone))
+    except Exception:
+        pass
+
+
 def badge(parent: Any, text: str, *, tone: str = "muted") -> Any:
     """A square-cornered chip — for counts and categories, not for status."""
     ensure_ctk()
@@ -942,7 +1342,7 @@ def badge(parent: Any, text: str, *, tone: str = "muted") -> Any:
     ctk.CTkLabel(
         frame,
         text=str(text),
-        font=ui_font(10, bold=True),
+        font=ui_font(theme.T_MICRO, bold=True),
         text_color=theme.tone_fg(tone),
     ).pack(padx=theme.SP2, pady=1)
     return frame
@@ -971,9 +1371,9 @@ def stat_chip(
     )
     ctk.CTkLabel(
         frame,
-        text=str(label).upper(),
-        font=ui_font(9),
-        text_color=theme.MUTED_DIM,
+        text=str(label),
+        font=ui_font(theme.T_MICRO, bold=True),
+        text_color=theme.MUTED,
     ).pack(padx=theme.SP2, pady=(theme.SP1, 0))
     color = provenance_color("unknown") if value is None else (
         theme.tone_fg(tone) if tone else provenance_color(provenance)
@@ -981,7 +1381,7 @@ def stat_chip(
     ctk.CTkLabel(
         frame,
         text=display_value(value),
-        font=mono_font(12, bold=True),
+        font=display_font(theme.T_HEADING),
         text_color=color,
     ).pack(padx=theme.SP2, pady=(0, theme.SP1))
     return frame
@@ -1004,19 +1404,18 @@ def key_value_row(
     """
     ensure_ctk()
     row = ctk.CTkFrame(parent, fg_color="transparent")
-    text_label(row, key, size=12, color=theme.MUTED, width=key_width).pack(
+    text_label(row, key, size=theme.T_SMALL, color=theme.MUTED, width=key_width).pack(
         side="left", anchor="w"
     )
     text_label(
         row,
         display_value(value),
-        size=12,
-        mono=True,
+        size=theme.T_SMALL,
         bold=provenance == "edited",
         color=provenance_color("unknown" if value is None else provenance),
     ).pack(side="left", anchor="w")
     if note:
-        muted_label(row, f"  {note}", size=10).pack(side="left", anchor="w")
+        muted_label(row, f"  {note}", size=theme.T_CAPTION).pack(side="left", anchor="w")
     return row
 
 
@@ -1078,11 +1477,11 @@ def tooltip(widget: Any, text: str, *, delay_ms: int = 400) -> None:
                 text=copy,
                 background=theme.PANEL,
                 foreground=theme.TEXT,
-                font=(theme.FONT, 9),
+                font=(theme.FONT, -theme.T_SMALL),
                 padx=theme.SP2,
                 pady=theme.SP1,
                 justify="left",
-                wraplength=320,
+                wraplength=340,
             ).pack(padx=1, pady=1)
             x = widget.winfo_rootx() + 12
             y = widget.winfo_rooty() + widget.winfo_height() + 6
