@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover
     ctk = None  # type: ignore[assignment]
 
 from .discovery import squad_context
+from .card_filters import view_pick
 
 from .search import (
     _criteria_text,
@@ -45,6 +46,15 @@ class CodexLibraryDraft:
     ovr_max: int | None = None
 
 
+def suggestion_filters(view: Any) -> dict[str, str]:
+    """Sign's Best/Base/All, Collection and Type, as resolver arguments."""
+    return {
+        "pick": view_pick(view),
+        "collection": str(view.get("collection") or ""),
+        "kind": str(view.get("kind") or ""),
+    }
+
+
 def grok_library_worker(
     *,
     request: str,
@@ -55,6 +65,9 @@ def grok_library_worker(
     ovr_max: int | None = None,
     require_exact: bool = False,
     exclude_people: Sequence[str] = (),
+    pick: str = "best",
+    collection: str = "",
+    kind: str = "",
 ) -> CodexLibraryDraft:
     """Executor boundary: Codex names become only exact local-card matches."""
     from ....integrations.grok import recommend_library_players
@@ -72,6 +85,9 @@ def grok_library_worker(
         ovr_min=minimum,
         ovr_max=maximum,
         exclude_people=exclude_people,
+        pick=pick,
+        collection=collection,
+        kind=kind,
     )
     if not report.resolved and require_exact:
         detail = "None of Codex's player names were found in the local Library."
@@ -300,6 +316,7 @@ class SquadAssistantPanel:
                     ovr_min=minimum,
                     ovr_max=maximum,
                     require_exact=selected_formation != INDIVIDUAL_PLAYERS,
+                    **suggestion_filters(self.view),
                 )
                 if token.cancelled:
                     return
@@ -460,6 +477,7 @@ class SquadAssistantPanel:
                     ovr_max=maximum,
                     require_exact=False,
                     exclude_people=exclude,
+                    **suggestion_filters(self.view),
                 )
                 if token.cancelled:
                     return

@@ -6,7 +6,7 @@ import customtkinter as ctk
 
 from ....domain.add_player import sign_list_items, sign_list_key
 from ... import theme
-from ...widgets.primitives import button, muted_label, themed_scroll, set_disabled
+from ...widgets.primitives import button, muted_label, themed_scroll, set_disabled, tooltip
 from . import result_row
 from .._common import set_status
 
@@ -33,12 +33,14 @@ class CardResults:
         self.toolbar = ctk.CTkFrame(self.widget, fg_color="transparent")
         self.toolbar.pack(fill="x", pady=(0, theme.SP2))
         self.all_var = ctk.BooleanVar(value=False)
-        self.all_check = ctk.CTkCheckBox(self.toolbar, text="Select all on this page", variable=self.all_var,
-                                        command=self._all, width=100, font=(theme.FONT, -theme.T_SMALL),
+        # Short label: Sign's Collection and Best/Base/All controls share this row.
+        self.all_check = ctk.CTkCheckBox(self.toolbar, text="All", variable=self.all_var,
+                                        command=self._all, width=40, font=(theme.FONT, -theme.T_SMALL),
                                         checkbox_width=16, checkbox_height=16)
         self.all_check.pack(side="left", padx=theme.SP1)
+        tooltip(self.all_check, "Select all on this page")
         self.sort = ctk.CTkOptionMenu(self.toolbar, values=["Overall ↓", "Year ↓", "Name A–Z"],
-                                     command=self._sort, width=130, height=theme.BTN_SM)
+                                     command=self._sort, width=108, height=theme.BTN_SM)
         self.sort.pack(side="right")
         self.scroll = themed_scroll(self.widget, fill=theme.PANEL, height=220, stable_children=True)
         self.scroll.pack(fill="both", expand=True)

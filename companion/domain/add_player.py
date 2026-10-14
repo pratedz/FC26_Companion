@@ -192,6 +192,9 @@ def resolve_card_recommendations(
     ovr_min: int | None = None,
     ovr_max: int | None = None,
     exclude_people: Sequence[str] = (),
+    pick: str = "best",
+    collection: str = "",
+    kind: str = "",
 ) -> tuple[ResolvedCardRecommendation, ...]:
     """Resolve AI names to distinct, real local cards; never invent a row."""
     return resolve_recommendation_report(
@@ -202,6 +205,9 @@ def resolve_card_recommendations(
         ovr_min=ovr_min,
         ovr_max=ovr_max,
         exclude_people=exclude_people,
+        pick=pick,
+        collection=collection,
+        kind=kind,
     ).resolved
 
 
@@ -214,24 +220,45 @@ def resolve_recommendation_report(
     ovr_min: int | None = None,
     ovr_max: int | None = None,
     exclude_people: Sequence[str] = (),
+    pick: str = "best",
+    collection: str = "",
+    kind: str = "",
 ) -> RecommendationResolveReport:
-    """Same resolve as the draft, plus names the Library could not keep in-band."""
+    """Same resolve as the draft, plus names the Library could not keep in-band.
+
+    ``pick``/``collection``/``kind`` are Sign's card filters: the AI names the
+    player, the filters decide which of that player's cards is offered.
+    """
+    from .card_collections import PICK_BASE, pick_rank
+
     resolved: list[ResolvedCardRecommendation] = []
     missing: list[str] = []
     rejected: list[str] = []
     seen_people: set[str] = {str(item) for item in exclude_people if str(item)}
     year_text = "" if year is None else str(year)
     band = _ovr_band_text(ovr_min, ovr_max)
+    # Only pass filters that are set, so simple catalog fakes keep working.
+    card_filter = {
+        key: value
+        for key, value in (("collection", collection), ("kind", kind), ("base_only", pick == PICK_BASE))
+        if value
+    }
+    filter_text = " ".join(
+        part for part in ("base" if pick == PICK_BASE else "", collection, kind) if part
+    )
     for recommendation in recommendations[: max(1, min(int(limit), 11))]:
         name = recommendation.name.strip()
         if not name:
             continue
         candidates = [
             dict(card)
-            for card in catalog.search(name, year=year_text, limit=100)
+            for card in catalog.search(name, year=year_text, limit=100, **card_filter)
         ]
         if not candidates:
-            missing.append(name)
+            if card_filter and catalog.search(name, year=year_text, limit=1):
+                rejected.append(f"{name} has no {filter_text} card in the Library.")
+            else:
+                missing.append(name)
             continue
         eligible = [
             card
@@ -267,11 +294,14 @@ def resolve_recommendation_report(
         if len(people) > 1:
             missing.append(name)
             continue
-        ranked = sorted(
-            exact,
-            key=lambda card: _candidate_score(card, recommendation),
-            reverse=True,
-        )
+        if pick == PICK_BASE:
+            # Hints still decide between people's cards; then the newest base card.
+            def rank(card: Mapping[str, Any]) -> tuple[Any, ...]:
+                return (_candidate_score(card, recommendation)[:6], pick_rank(card, PICK_BASE))
+        else:
+            def rank(card: Mapping[str, Any]) -> tuple[Any, ...]:
+                return _candidate_score(card, recommendation)
+        ranked = sorted(exact, key=rank, reverse=True)
         chosen = None
         for card in ranked:
             person = str(

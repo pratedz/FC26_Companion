@@ -67,7 +67,7 @@ def bind(owner: Any, item: dict[str, Any], row: Any) -> None:
     card = row.get("_raw") or row
     history = bool(card.get("_history"))
     # Compare only painted fields. Card attributes can contain hundreds of values.
-    signature = tuple(row.get(k) for k in ("_key", "name", "year", "ovr", "pos", "face", "reason", "club")) + (history, card.get("_signed_at"))
+    signature = tuple(row.get(k) for k in ("_key", "name", "year", "ovr", "pos", "face", "reason", "club", "collection")) + (history, card.get("_signed_at"))
     item["row"] = row
     if signature == item["presentation"]:
         return
@@ -105,7 +105,10 @@ def bind(owner: Any, item: dict[str, Any], row: Any) -> None:
             item["rating"].configure(text=str(rating), fg_color=fill, text_color=color)
             item["rating"].grid(row=0, column=1, padx=(6, 0))
         year, pos = str(row.get("year") or ""), str(row.get("pos") or "")
-        metadata = " · ".join(p for p in (f"FC {year}" if year not in {"", "-"} else "", pos.replace(", ", " / ")) if p and p != "-")
+        # Collection sits beside the year so it survives when a narrow row clips the end.
+        metadata = " · ".join(p for p in (f"FC {year}" if year not in {"", "-"} else "",
+                                          str(row.get("collection") or ""),
+                                          pos.replace(", ", " / ")) if p and p != "-")
         item["face"].configure(text=("Verified face" if row.get("face") == "Verified" else
                                       "Safe generic face" if row.get("face") == "Generic" else
                                       "Generic fallback" if row.get("face") == "Fallback" else

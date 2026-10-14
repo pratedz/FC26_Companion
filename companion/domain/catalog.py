@@ -30,6 +30,13 @@ class CatalogQuery:
     position: int | None = None
     source: str = ""
     limit: int = 50
+    collection: str = ""
+    kind: str = ""
+    base_only: bool = False
+
+
+#: Largest result page the Library returns (collection browsing needs more than a name search).
+MAX_SEARCH_LIMIT = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +170,7 @@ class LocalCatalog:
         self.universe_path = Path(universe_path) if universe_path else None
         self.state_db = state_db
         self._signing_metadata_cache: dict[int, tuple[tuple[int, int], dict[tuple[str, str], dict[str, Any]]]] = {}
+        self._label_cache: dict[tuple[str, str], tuple[tuple[int, int], tuple[tuple[str, int], ...]]] = {}
 
     @property
     def available(self) -> bool:
@@ -181,20 +189,27 @@ class LocalCatalog:
         position: int | None = None,
         source: str = "",
         limit: int = 50,
+        collection: str = "",
+        kind: str = "",
+        base_only: bool = False,
     ) -> Sequence[Mapping[str, Any]]:
         spec = query if isinstance(query, CatalogQuery) else CatalogQuery(
             text=str(query or ""), year=year, ovr_min=ovr_min,
             ovr_max=ovr_max, position=position, source=source, limit=limit,
+            collection=collection, kind=kind, base_only=base_only,
         )
         spec = CatalogQuery(
             text=spec.text.strip(), year=spec.year.strip(),
             ovr_min=_integer(spec.ovr_min), ovr_max=_integer(spec.ovr_max),
             position=_integer(spec.position), source=spec.source.strip(),
-            limit=max(1, min(int(spec.limit), 200)),
+            limit=max(1, min(int(spec.limit), MAX_SEARCH_LIMIT)),
+            collection=str(spec.collection or "").strip(),
+            kind=str(spec.kind or "").strip(),
+            base_only=bool(spec.base_only),
         )
         if not spec.text and not any(
             (spec.year, spec.ovr_min is not None, spec.ovr_max is not None,
-             spec.position is not None, spec.source)
+             spec.position is not None, spec.source, spec.collection, spec.kind)
         ):
             return ()
 
@@ -502,16 +517,72 @@ class LocalCatalog:
         if spec.source:
             where.append("lower(o.source_kind)=?")
             args.append(spec.source.casefold())
-        args.append(spec.limit)
-        sql = (
-            "SELECT p.display_name AS name, p.exists_in_fc26, o.* "
-            "FROM observation o JOIN person p ON p.person_id=o.person_id "
-            f"WHERE {' AND '.join(where) if where else '1=1'} "
-            "ORDER BY o.overall DESC, o.year DESC, p.display_name COLLATE NOCASE "
-            "LIMIT ?"
-        )
         with self._connect(path) as con:
+            collection_sql, collection_args = self._collection_filter(
+                con, path, spec, table="observation", label_col="o.variant",
+                ovr_col="o.overall", club_col="o.club_name",
+            )
+            if collection_sql:
+                where.append(collection_sql)
+                args.extend(collection_args)
+            args.append(spec.limit)
+            sql = (
+                "SELECT p.display_name AS name, p.exists_in_fc26, o.* "
+                "FROM observation o JOIN person p ON p.person_id=o.person_id "
+                f"WHERE {' AND '.join(where) if where else '1=1'} "
+                "ORDER BY o.overall DESC, o.year DESC, p.display_name COLLATE NOCASE "
+                "LIMIT ?"
+            )
             return tuple(self._normalize_universe(dict(row)) for row in con.execute(sql, args))
+
+    def _labels(self, con: sqlite3.Connection, path: Path, table: str) -> tuple[tuple[str, int], ...]:
+        """Distinct card labels with their years, cached until the file changes."""
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = self._label_cache.get((str(path), table))
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        if table == "observation":
+            query = "SELECT DISTINCT variant, year FROM observation"
+        else:
+            query = "SELECT DISTINCT revision, year FROM cards"
+        labels = []
+        for label, year in con.execute(query):
+            number = _year_number(str(year or ""))
+            labels.append((str(label or ""), -1 if number is None else number))
+        result = tuple(labels)
+        self._label_cache[(str(path), table)] = (stamp, result)
+        return result
+
+    def _collection_filter(
+        self, con: sqlite3.Connection, path: Path, spec: CatalogQuery, *,
+        table: str, label_col: str, ovr_col: str, club_col: str,
+    ) -> tuple[str, list[Any]]:
+        if not (spec.collection or spec.kind or spec.base_only):
+            return "", []
+        from .card_collections import sql_filter
+        labels = {label for label, _year in self._labels(con, path, table)}
+        return sql_filter(
+            labels, collection=spec.collection, kind=spec.kind, base_only=spec.base_only,
+            label_col=label_col, ovr_col=ovr_col, club_col=club_col,
+        )
+
+    def collections(self, *, year: str = "") -> tuple[str, ...]:
+        """Collections present in the Library (optionally one FC year), in Sign's order."""
+        from .card_collections import collections_for_labels
+        wanted = _year_number(year) if year else None
+        for path, table in ((self.universe_path, "observation"), (self.catalog_path, "cards")):
+            if path is None or not path.is_file():
+                continue
+            try:
+                with self._connect(path) as con:
+                    labels = self._labels(con, path, table)
+            except sqlite3.Error:
+                continue
+            return collections_for_labels(
+                label for label, label_year in labels if wanted is None or label_year == wanted
+            )
+        return ()
 
     def _universe_person_variants(
         self, path: Path, person_id: int, limit: int
@@ -571,8 +642,15 @@ class LocalCatalog:
         if spec.ovr_max is not None:
             where.append("ovr<=?")
             args.append(spec.ovr_max)
-        args.append(spec.limit)
         with self._connect(path) as con:
+            collection_sql, collection_args = self._collection_filter(
+                con, path, spec, table="cards", label_col="revision",
+                ovr_col="ovr", club_col="json_extract(payload,'$.club')",
+            )
+            if collection_sql:
+                where.append(collection_sql)
+                args.extend(collection_args)
+            args.append(spec.limit)
             rows = con.execute(
                 f"SELECT * FROM cards WHERE {' AND '.join(where) if where else '1=1'} "
                 "ORDER BY ovr DESC,name_norm LIMIT ?", args,
@@ -589,6 +667,10 @@ class LocalCatalog:
                     card.update(payload)
                 card.setdefault("overallrating", raw.get("ovr"))
                 card.setdefault("revision", raw.get("revision") or "")
+                # The indexed label can name a campaign the raw payload hides
+                # (FC26 Ultimate Rewind / Pre-Season); collections read ``variant``.
+                if raw.get("revision") and raw.get("revision") != card.get("revision"):
+                    card["variant"] = raw["revision"]
                 if spec.position is not None and spec.position not in {
                     _integer(card.get(f"preferredposition{i}")) for i in range(1, 5)
                 }:

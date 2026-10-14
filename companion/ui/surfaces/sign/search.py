@@ -20,6 +20,8 @@ from ...widgets.primitives import (
 from ...widgets.table import Column, TableModel
 from .._common import set_status
 from .results import CardResults, can_add
+from .card_filters import CardFilterBar, card_filters, filter_caption, repick_cards, view_pick
+from ....domain.card_collections import describe as describe_collection
 from ....domain.catalog import card_key
 
 try:  # pragma: no cover - desktop only
@@ -53,6 +55,8 @@ def _optional_int(text: str, label: str, *, minimum: int, maximum: int) -> int |
 
 
 SEARCH_LIMIT = 200
+#: Collection/type browsing without a name (the Library's own ceiling).
+BROWSE_LIMIT = 500
 
 
 def _card_overall(card: Mapping[str, Any]) -> int:
@@ -101,12 +105,15 @@ def shop_cards(
     verified_only: bool = True,
     best_only: bool = True,
     position: str = "",
+    pick: str = "",
 ) -> tuple[dict[str, Any], ...]:
     """Narrow a Library hit list the way a shopper actually picks a card.
 
     A real face is preferred. Native generic appearances and generic fallbacks
     remain signable. Best-card keeps the highest overall for each person, then
-    the newer year, so one name is not twenty nearly identical rows.
+    the newer year, so one name is not twenty nearly identical rows. Base-card
+    keeps each person's plain card (Base Icon/Hero or gold/silver/bronze),
+    newest year.
     """
     items = [dict(row) for row in rows if isinstance(row, Mapping)]
     if verified_only:
@@ -114,7 +121,11 @@ def shop_cards(
     token = str(position or "").strip().upper()
     if token:
         items = [row for row in items if token in _position_tokens(row)]
-    if not best_only:
+    pick = pick or ("best" if best_only else "all")
+    if pick == "base":
+        from ....domain.card_collections import PICK_BASE, choose_cards
+        return choose_cards(items, PICK_BASE)
+    if pick == "all":
         return tuple(items)
     best: dict[str, dict[str, Any]] = {}
     order: list[str] = []
@@ -138,10 +149,18 @@ def shop_feedback(
     *,
     best_only: bool,
     capped: bool,
+    pick: str = "",
 ) -> str:
     """One status line after a search: what is on screen, and the next click."""
     if total <= 0:
         return "No cards match. Try another name, or clear the year and OVR."
+    if pick == "base":
+        if shown <= 0:
+            return "None of these matches has a base card. Choose Best card or All versions."
+        lead = f"{shown} base card{'s' if shown != 1 else ''} from {total} matches"
+        notes = ["Showing the top matches — add a year or OVR to narrow it."] if capped else []
+        notes.append("Add a usable card to your bag, then Checkout.")
+        return lead + ". " + " ".join(notes)
     if shown <= 0:
         return (
             "No cards remain with these filters. Show all faces or clear the position filter."
@@ -313,6 +332,8 @@ def _card_row(card: Mapping[str, Any]) -> dict[str, Any]:
         "ovr": annotated.get("overallrating") or annotated.get("overall") or "-",
         "pos": annotated.get("positions_text") or annotated.get("preferredposition1") or "-",
         "variant": annotated.get("variant") or annotated.get("revision") or "Base",
+        # Signing history has no source card, so it has no collection either.
+        "collection": "" if annotated.get("_history") else describe_collection(annotated),
         "club": annotated.get("club") or annotated.get("club_name") or "-",
         "face": annotated.get("_face_status") or "—",
         "reason": annotated.get("_ai_reason") or "",
@@ -365,6 +386,8 @@ class LibrarySearchPanel:
         self.selected: dict[str, Any] = {}
         self.selection: list[dict[str, Any]] = []
         self._catalog_hits: tuple[Mapping[str, Any], ...] = tuple(view.get("catalog_hits") or ())
+        # True when the hits on screen came from a base-cards-only Library query.
+        self._base_hits = bool(view.get("catalog_hits_base"))
         self._showing_catalog = False
         self._search_after: str | None = None
         self._position_after: str | None = None
@@ -412,10 +435,6 @@ class LibrarySearchPanel:
                                       kind="ghost", height=theme.BTN_MD, width=104)
         self.verified_button.pack(side="left", padx=(0, theme.SP2))
         tooltip(self.verified_button, "Only cards with a verified real FC26 face. Turn this off to include safe generic-face cards.")
-        self.best_button = button(self.shop_row, "Best card", self.toggle_best,
-                                  kind="ghost", height=theme.BTN_MD, width=96)
-        self.best_button.pack(side="left", padx=(0, theme.SP2))
-        tooltip(self.best_button, "One card per player: the highest-rated version.")
         self.refine_button = button(self.shop_row, "More filters", self.toggle_refine,
                                     kind="ghost", height=theme.BTN_MD, width=104)
         self.refine_button.pack(side="left")
@@ -467,6 +486,11 @@ class LibrarySearchPanel:
                                  height=theme.BTN_MD, width=104, icon="add",
                                  disabled_reason="Select a verified local card first")
         self.add_button.pack(side="right")
+        # Collection and Best/Base/All apply to Search and Suggestions alike.
+        # The bar is placed by _place_card_filters (results toolbar or its own row).
+        self.card_filter_header = header
+        self.filters = CardFilterBar(self.root, self.svc, self.view, on_change=self._card_filters_changed)
+        self._filters_slot = None
         self.model = TableModel(
             columns=_sign_columns(),
             rows=(),
@@ -489,6 +513,7 @@ class LibrarySearchPanel:
             "Search Library for a usable card",
             "Type at least 3 letters and press Enter. Real faces are preferred; safe generic faces can also be signed.",
         )
+        self._place_card_filters()
 
     def toggle_refine(self) -> None:
         self.refine_visible["value"] = not self.refine_visible["value"]
@@ -506,21 +531,89 @@ class LibrarySearchPanel:
         self._reshow_catalog()
 
     def toggle_best(self) -> None:
-        self.view["best_only"] = not bool(self.view.get("best_only", True))
+        """Best card <-> All versions (Base card is chosen on the switch)."""
+        from .card_filters import set_view_pick
+        set_view_pick(self.view, "all" if view_pick(self.view) == "best" else "best")
         self._sync_shop_toggles()
-        self._reshow_catalog()
+        self._card_filters_changed("card_pick")
 
     def _sync_shop_toggles(self) -> None:
         verified = bool(self.view.get("verified_only", False))
-        best = bool(self.view.get("best_only", True))
         # One look for every active filter: tonal accent when on, ghost when off.
         try:
             self.verified_button.configure(text="Real faces only" if verified else "All faces")
             restyle_button(self.verified_button, "accent" if verified else "ghost")
-            self.best_button.configure(text="Best card" if best else "All versions")
-            restyle_button(self.best_button, "accent" if best else "ghost")
         except Exception:
             pass
+        filters = getattr(self, "filters", None)
+        if filters is not None:
+            filters.sync()
+
+    def _card_filters_changed(self, key: str) -> None:
+        """Search re-queries the Library; Suggestions swap cards for the same players."""
+        self.view["result_page"] = 0
+        mode = self.view.get("discovery_mode", "Search")
+        if mode == "Recommendations":
+            self._repick_suggestions()
+            return
+        if mode != "Search":
+            return
+        has_criteria = bool(
+            (self.query.get() or "").strip() or (self.year.get() or "").strip()
+            or (self.ovr_min.get() or "").strip() or (self.ovr_max.get() or "").strip()
+            or self.view.get("source") or self.view.get("collection") or self.view.get("kind")
+        )
+        # Best <-> All only regroups the hits already on screen.
+        if key == "card_pick" and view_pick(self.view) != "base" and not self._base_hits:
+            self._reshow_catalog()
+        elif has_criteria:
+            self.search()
+        elif key == "card_pick":
+            self._reshow_catalog()
+
+    def _repick_suggestions(self) -> None:
+        # Start from the cards Codex's names first resolved to, so a player a
+        # narrow filter dropped comes back when the filter is widened again.
+        cache = self.view.get("discovery_cache", {}).get("Recommendations", {})
+        rows = tuple(self.view.get("recommendation_cards") or cache.get("rows") or ())
+        if not rows or self.svc.catalog is None:
+            return
+        try:
+            year, minimum, maximum = self.card_constraints()
+        except ValueError as exc:
+            self.show_filter_error(str(exc))
+            return
+        pick, filters = view_pick(self.view), card_filters(self.view)
+        caption = filter_caption(self.view)
+
+        def work(token: Any) -> None:
+            try:
+                kept, dropped = repick_cards(
+                    self.svc.catalog, rows, pick=pick, collection=filters["collection"],
+                    kind=filters["kind"], year=year, ovr_min=minimum, ovr_max=maximum,
+                )
+                prepared = tuple(_annotate_card_face(row) for row in kept)
+            except Exception as exc:  # noqa: BLE001
+                self.svc.executor.on_ui_thread(lambda: set_status(self.svc, f"Could not update suggestions: {exc}"))
+                return
+            if token.cancelled:
+                return
+
+            def done() -> None:
+                if self.view.get("discovery_mode") != "Recommendations":
+                    return
+                detail = ""
+                if dropped:
+                    shown = ", ".join(dropped[:3]) + ("…" if len(dropped) > 3 else "")
+                    detail = f"No {caption or 'matching'} card for {shown}."
+                self.replace_rows(prepared, mode="Recommendations",
+                                  empty_detail=detail or "No suggested player has a card for these filters.")
+                if detail:
+                    set_status(self.svc, detail)
+
+            self.svc.executor.on_ui_thread(done)
+
+        self.svc.executor.submit("add_player.repick", work)
 
     def _on_query_key(self) -> None:
         if (self.query.get() or "") == self.view.get("query", ""):
@@ -570,13 +663,14 @@ class LibrarySearchPanel:
             return
         self._present_catalog(
             self._catalog_hits,
-            capped=len(self._catalog_hits) >= SEARCH_LIMIT,
+            capped=len(self._catalog_hits) >= int(self.view.get("catalog_hits_limit") or SEARCH_LIMIT),
         )
 
     def _present_catalog(
         self, rows: Sequence[Mapping[str, Any]], *, capped: bool
     ) -> None:
         best_only = bool(self.view.get("best_only", True))
+        pick = view_pick(self.view)
         shown = shop_cards(
             rows,
             verified_only=bool(self.view.get("verified_only", True)),
@@ -584,6 +678,7 @@ class LibrarySearchPanel:
             position=(self.pos.get() if hasattr(self, "pos") else "")
             or self.view.get("pos")
             or "",
+            pick=pick,
         )
         # Toast and textbox must use the same list: len(shown) is what replace_rows
         # paints. shop_feedback already refuses a "N cards" lead when shown is 0.
@@ -595,6 +690,7 @@ class LibrarySearchPanel:
                 0,
                 best_only=best_only,
                 capped=capped,
+                pick=pick,
             ),
         )
         message = shop_feedback(
@@ -602,6 +698,7 @@ class LibrarySearchPanel:
             len(shown),
             best_only=best_only,
             capped=capped,
+            pick=pick,
         )
         self.set_feedback(message)
 
@@ -715,6 +812,7 @@ class LibrarySearchPanel:
         self.result_count.configure(text="No cards shown")
         self._paint_empty(headline, detail)
         self.empty_results.pack(fill="x", padx=theme.SP3, pady=(theme.SP1, 0))
+        self._place_card_filters()
 
     def show_result_grid(
         self, rows: Sequence[Mapping[str, Any]] | None = None
@@ -726,6 +824,7 @@ class LibrarySearchPanel:
         )
         if not self.grid.widget.winfo_manager():
             self.grid.pack(fill="both", expand=True, padx=theme.SP2, pady=(0, theme.SP2))
+        self._place_card_filters()
         self.grid.refresh()
 
     def replace_rows(
@@ -795,6 +894,34 @@ class LibrarySearchPanel:
         # Recommendation explanations live beneath the player name.
         pass
 
+    def _place_card_filters(self) -> None:
+        """Toolbar beside Select all while cards show; its own row above an empty list.
+
+        Favourites and signing history are fixed lists, so the filters hide there.
+        The toolbar slot costs no height, which the 1040x720 window needs.
+        """
+        filters = getattr(self, "filters", None)
+        if filters is None:
+            return
+        mode = self.view.get("discovery_mode", "Search")
+        if mode not in ("Search", "Recommendations"):
+            slot = None
+        else:
+            slot = "toolbar" if self.grid.widget.winfo_manager() else "row"
+        if slot == self._filters_slot:
+            return
+        self._filters_slot = slot
+        try:
+            filters.pack_forget()
+            if slot == "toolbar":
+                filters.pack(in_=self.grid.toolbar, side="left", padx=(theme.SP2, 0),
+                             after=self.grid.all_check)
+            elif slot == "row":
+                filters.pack(in_=self.root, fill="x", padx=theme.SP4, pady=(0, theme.SP2),
+                             after=self.card_filter_header)
+        except Exception:
+            self._filters_slot = None
+
     def card_constraints(self) -> tuple[int | None, int | None, int | None]:
         return _card_constraints(self.year.get(), self.ovr_min.get(), self.ovr_max.get())
 
@@ -845,14 +972,16 @@ class LibrarySearchPanel:
             self.show_filter_error(message)
             self.set_feedback(message)
             return
-        if not needle and selected_year is None and minimum is None and maximum is None and not self.view.get("source"):
+        filters = card_filters(self.view)
+        if (not needle and selected_year is None and minimum is None and maximum is None
+                and not self.view.get("source") and not filters["collection"] and not filters["kind"]):
             if (self.pos.get() or "").strip():
                 self.show_filter_error(
                     "Type a player name first. POS only narrows cards already found."
                 )
             else:
                 self.show_filter_error(
-                    "Enter a player name or choose at least one FC/OVR filter."
+                    "Enter a player name, or choose a collection, type or FC/OVR filter."
                 )
             return
         if needle and len(needle) < 3:
@@ -865,8 +994,11 @@ class LibrarySearchPanel:
             return
         self._persist_fields()
         source = self.view.get("source", "")
+        # Browsing a collection or type without a name needs a longer list.
+        limit = SEARCH_LIMIT if needle else BROWSE_LIMIT
         self.search_button.configure(text="Searching…")
-        self.set_feedback(f"Searching for {needle or 'matching cards'}… Current cards stay available below.")
+        self.set_feedback(f"Searching for {needle or filter_caption(self.view) or 'matching cards'}… "
+                          "Current cards stay available below.")
 
         def work(_token: Any) -> None:
             try:
@@ -877,8 +1009,9 @@ class LibrarySearchPanel:
                         year=str(selected_year or ""),
                         ovr_min=minimum,
                         ovr_max=maximum,
-                        limit=SEARCH_LIMIT,
+                        limit=limit,
                         **({"source": source} if source else {}),
+                        **{key: value for key, value in filters.items() if value},
                     )
                 prepared = []
                 for row in matches:
@@ -893,16 +1026,19 @@ class LibrarySearchPanel:
                         return
                     self._catalog_hits = rows
                     self.view["catalog_hits"] = rows
+                    self._base_hits = self.view["catalog_hits_base"] = bool(filters["base_only"])
+                    self.view["catalog_hits_limit"] = limit
                     if not self.root.winfo_exists():
                         self.view.setdefault("discovery_cache", {}).setdefault("Search", {})["rows"] = shop_cards(
                             rows, verified_only=bool(self.view.get("verified_only", True)),
-                            best_only=bool(self.view.get("best_only", True)), position=self.view.get("pos", ""))
+                            best_only=bool(self.view.get("best_only", True)), position=self.view.get("pos", ""),
+                            pick=view_pick(self.view))
                         return
                     self.search_button.configure(text="Search")
                     if self.view.get("discovery_mode", "Search") == "Search":
                         self.view["checked_keys"] = ()
                         self.view["result_page"] = 0
-                    self._present_catalog(rows, capped=len(rows) >= SEARCH_LIMIT)
+                    self._present_catalog(rows, capped=len(rows) >= limit)
                     if self.view.get("discovery_mode", "Search") == "Search":
                         self.grid.scroll.canvas.yview_moveto(0)
 
@@ -954,6 +1090,9 @@ class LibrarySearchPanel:
             "source": self.view.get("source", ""),
             "verified_only": bool(self.view.get("verified_only", True)),
             "best_only": bool(self.view.get("best_only", True)),
+            "card_pick": view_pick(self.view),
+            "collection": str(self.view.get("collection") or ""),
+            "kind": str(self.view.get("kind") or ""),
             "force_age": bool(self.view.get("force_age")),
             "age": str(self.view.get("age") or "25"),
             "checked_keys": tuple(self.model.checked),

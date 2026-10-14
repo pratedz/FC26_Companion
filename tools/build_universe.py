@@ -62,6 +62,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from src import universe  # noqa: E402
+from companion.domain.card_collections import campaign_label  # noqa: E402
 from src.field_map import ATTR_FIELDS, to_le_field  # noqa: E402
 
 csv.field_size_limit(10_000_000)
@@ -1169,7 +1170,10 @@ class Builder:
                         for i in range(1, 5)
                     ) if v is not None and v >= 0
                 ]
-                label = clean_text(card.get("revision")) or clean_text(card.get("rarity")) or "base"
+                # FC26 Ultimate Rewind / Pre-Season reuse older promo names;
+                # the campaign is only knowable here, from the release date.
+                label = (clean_text(campaign_label(card)) or clean_text(card.get("revision"))
+                         or clean_text(card.get("rarity")) or "base")
                 variant = self.unique_variant(pid, row_year, spec.filename, label)
                 display = clean_person_name(card.get("name"))
                 first = clean_person_name(card.get("firstName"))
