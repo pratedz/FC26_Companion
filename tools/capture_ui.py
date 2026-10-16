@@ -310,7 +310,7 @@ def _scenario(name: str, shell: Any, svc: Any) -> str:
                 _type(search.query, "Maldini")
                 search.filters._pick_changed("base")
             else:
-                _type(search.year, "26")
+                search.set_year("26")
                 search.filters._menu_changed("Team of the Year")
             _settle(shell.root, 1.5)
         return "add_player"

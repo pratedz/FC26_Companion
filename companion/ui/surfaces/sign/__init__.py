@@ -49,7 +49,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     root = surface_root(parent)
     view = vm if isinstance(vm, dict) else {}
     defaults = {"query": "", "year": "", "ovr_min": "", "ovr_max": "", "pos": "", "source": "",
-                "verified_only": False, "best_only": True, "formation": INDIVIDUAL_PLAYERS,
+                "verified_only": False, "best_only": False, "card_pick": "all", "formation": INDIVIDUAL_PLAYERS,
                 "force_age": False, "age": "25", "grok_prompt": "", "grok_count": "3",
                 "results_generation": 0, "grok_generation": 0, "selected_key": "", "sign_list": (),
                 "discovery_mode": "Search", "discovery_cache": {}}

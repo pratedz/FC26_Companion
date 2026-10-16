@@ -20,7 +20,10 @@ from ...widgets.primitives import (
 from ...widgets.table import Column, TableModel
 from .._common import set_status
 from .results import CardResults, can_add
-from .card_filters import CardFilterBar, card_filters, filter_caption, repick_cards, view_pick
+from .card_filters import (
+    YEAR_ANY, CardFilterBar, card_filters, filter_caption, reconcile_year, repick_cards,
+    view_pick, year_label, year_value,
+)
 from ....domain.card_collections import describe as describe_collection
 from ....domain.catalog import card_key
 
@@ -59,35 +62,6 @@ SEARCH_LIMIT = 200
 BROWSE_LIMIT = 500
 
 
-def _card_overall(card: Mapping[str, Any]) -> int:
-    raw = card.get("overallrating")
-    if raw in (None, ""):
-        raw = card.get("overall")
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return -1
-
-
-def _card_year(card: Mapping[str, Any]) -> int:
-    raw = card.get("year")
-    if raw in (None, ""):
-        raw = card.get("game_year")
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return -1
-
-
-def _person_key(card: Mapping[str, Any]) -> str:
-    for field in ("person_id", "playerid", "base_player_id"):
-        value = card.get(field)
-        if value not in (None, "", 0):
-            return f"id:{value}"
-    name = str(card.get("name") or card.get("playername") or "").casefold().strip()
-    return f"name:{name}"
-
-
 def _position_tokens(card: Mapping[str, Any]) -> set[str]:
     import re
 
@@ -122,25 +96,11 @@ def shop_cards(
     if token:
         items = [row for row in items if token in _position_tokens(row)]
     pick = pick or ("best" if best_only else "all")
-    if pick == "base":
-        from ....domain.card_collections import PICK_BASE, choose_cards
-        return choose_cards(items, PICK_BASE)
     if pick == "all":
         return tuple(items)
-    best: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    for card in items:
-        key = _person_key(card)
-        current = best.get(key)
-        rank = (_card_overall(card), _card_year(card))
-        if current is None:
-            best[key] = card
-            order.append(key)
-            continue
-        current_rank = (_card_overall(current), _card_year(current))
-        if rank > current_rank:
-            best[key] = card
-    return tuple(best[key] for key in order)
+    # Best ties on OVR and year go to the FUT.GG card over a Live Editor copy.
+    from ....domain.card_collections import PICK_BASE, PICK_BEST, choose_cards
+    return choose_cards(items, PICK_BASE if pick == "base" else PICK_BEST)
 
 
 def shop_feedback(
@@ -173,7 +133,7 @@ def shop_feedback(
     if capped:
         notes.append("Showing the top matches — add a year or OVR to narrow it.")
     if best_only and shown != total:
-        notes.append("All versions lists every year and promo.")
+        notes.append("Pick Base card or All versions above to see other versions.")
     notes.append("Add a usable card to your bag, then Checkout.")
     return lead + ". " + " ".join(notes)
 
@@ -429,8 +389,14 @@ class LibrarySearchPanel:
         self.search_button.pack(side="right", padx=(theme.SP2, 0))
         self.shop_row = ctk.CTkFrame(self.controls, fg_color="transparent")
         self.shop_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP3))
-        self.year = _entry(self.shop_row, "Any year", 76, value=self.view.get("year") or "")
-        self.year.pack(side="left", padx=(0, theme.SP2))
+        self.year_menu = ctk.CTkOptionMenu(
+            self.shop_row, values=[YEAR_ANY], width=96, height=theme.BTN_MD, dynamic_resizing=False,
+            font=ctk.CTkFont(family=theme.FONT, size=theme.T_BODY), command=self._year_changed,
+        )
+        self.year_menu.set(year_label(self.view.get("year")))
+        self.year_menu.pack(side="left", padx=(0, theme.SP2))
+        tooltip(self.year_menu, "Only cards from this FC year. The collection menu lists that year's collections.")
+        self._load_years()
         self.verified_button = button(self.shop_row, "Verified only", self.toggle_verified,
                                       kind="ghost", height=theme.BTN_MD, width=104)
         self.verified_button.pack(side="left", padx=(0, theme.SP2))
@@ -438,6 +404,11 @@ class LibrarySearchPanel:
         self.refine_button = button(self.shop_row, "More filters", self.toggle_refine,
                                     kind="ghost", height=theme.BTN_MD, width=104)
         self.refine_button.pack(side="left")
+        # Card version and collection sit right under the search box: the first
+        # choices a Career player makes (base Icon? TOTY? every promo?).
+        self.filters = CardFilterBar(self.controls, self.svc, self.view,
+                                     on_change=self._card_filters_changed)
+        self.filters.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP3), before=self.shop_row)
         self.refine_row = ctk.CTkFrame(self.controls, fg_color="transparent")
         self.refine_visible = {"value": bool(self.view.get("refine_open") or self.view.get("ovr_min") or
                                               self.view.get("ovr_max") or self.view.get("pos") or self.view.get("source"))}
@@ -461,10 +432,10 @@ class LibrarySearchPanel:
         self.search_feedback = muted_label(self.controls, "", size=theme.T_CAPTION, wraplength=560,
                                            justify="left")
         self._sync_shop_toggles()
-        for field in (self.query, self.year, self.ovr_min, self.ovr_max, self.pos):
+        for field in (self.query, self.ovr_min, self.ovr_max, self.pos):
             field.bind("<Return>", lambda _event: self.search())
             field.bind("<KP_Enter>", lambda _event: self.search())
-        for field in (self.year, self.ovr_min, self.ovr_max):
+        for field in (self.ovr_min, self.ovr_max):
             field.bind("<KeyRelease>", lambda _event: self._persist_fields())
         self.pos.bind("<KeyRelease>", lambda _event: self._on_pos_key())
         self.query.bind("<KeyRelease>", lambda _event: self._on_query_key())
@@ -486,10 +457,11 @@ class LibrarySearchPanel:
                                  height=theme.BTN_MD, width=104, icon="add",
                                  disabled_reason="Select a verified local card first")
         self.add_button.pack(side="right")
-        # Collection and Best/Base/All apply to Search and Suggestions alike.
-        # The bar is placed by _place_card_filters (results toolbar or its own row).
+        # Suggestions hide the search panel, so they get a compact copy of the
+        # card filters, placed by _place_card_filters (results toolbar or a row).
         self.card_filter_header = header
-        self.filters = CardFilterBar(self.root, self.svc, self.view, on_change=self._card_filters_changed)
+        self.filters_compact = CardFilterBar(self.root, self.svc, self.view,
+                                             on_change=self._card_filters_changed, compact=True)
         self._filters_slot = None
         self.model = TableModel(
             columns=_sign_columns(),
@@ -545,12 +517,67 @@ class LibrarySearchPanel:
             restyle_button(self.verified_button, "accent" if verified else "ghost")
         except Exception:
             pass
-        filters = getattr(self, "filters", None)
-        if filters is not None:
-            filters.sync()
+        self._sync_filter_bars()
+
+    def _sync_filter_bars(self) -> None:
+        for name in ("filters", "filters_compact"):
+            bar = getattr(self, name, None)
+            if bar is not None:
+                bar.sync()
+        self._sync_year_menu()
+
+    def _sync_year_menu(self) -> None:
+        menu = getattr(self, "year_menu", None)
+        if menu is not None:
+            menu.set(year_label(self.view.get("year")))
+
+    def _load_years(self) -> None:
+        catalog = getattr(self.svc, "catalog", None)
+        if catalog is None or not hasattr(catalog, "years"):
+            return
+
+        def work(token: Any) -> None:
+            try:
+                years = tuple(catalog.years())
+            except Exception:  # noqa: BLE001 - the menu keeps Any year
+                return
+            if token.cancelled or not years:
+                return
+
+            def done() -> None:
+                try:
+                    if self.root.winfo_exists():
+                        self.year_menu.configure(values=[YEAR_ANY, *(year_label(str(y)) for y in years)])
+                except Exception:
+                    pass
+
+            self.svc.executor.on_ui_thread(done)
+
+        try:
+            self.svc.executor.submit("sign.years", work)
+        except Exception:
+            pass
+
+    def _year_text(self) -> str:
+        """The chosen FC year as two digits, or "" for Any year."""
+        return year_value(year_label(self.view.get("year")))
+
+    def _year_changed(self, label: str) -> None:
+        """The Year menu moved: drop a collection or type this year lacks, then search again."""
+        self.view["year"] = year_value(label)
+        note = reconcile_year(self.view, self.filters.by_year)
+        self._sync_filter_bars()
+        self._card_filters_changed("year")
+        if note:
+            self.set_feedback(note)
+
+    def set_year(self, text: str) -> None:
+        """Choose an FC year as the Year menu does; "" means Any year."""
+        self._year_changed(year_label(text))
 
     def _card_filters_changed(self, key: str) -> None:
         """Search re-queries the Library; Suggestions swap cards for the same players."""
+        self._sync_filter_bars()
         self.view["result_page"] = 0
         mode = self.view.get("discovery_mode", "Search")
         if mode == "Recommendations":
@@ -559,7 +586,7 @@ class LibrarySearchPanel:
         if mode != "Search":
             return
         has_criteria = bool(
-            (self.query.get() or "").strip() or (self.year.get() or "").strip()
+            (self.query.get() or "").strip() or self.view.get("year")
             or (self.ovr_min.get() or "").strip() or (self.ovr_max.get() or "").strip()
             or self.view.get("source") or self.view.get("collection") or self.view.get("kind")
         )
@@ -674,7 +701,7 @@ class LibrarySearchPanel:
     def _present_catalog(
         self, rows: Sequence[Mapping[str, Any]], *, capped: bool
     ) -> None:
-        best_only = bool(self.view.get("best_only", True))
+        best_only = bool(self.view.get("best_only", False))
         pick = view_pick(self.view)
         shown = shop_cards(
             rows,
@@ -900,16 +927,16 @@ class LibrarySearchPanel:
         pass
 
     def _place_card_filters(self) -> None:
-        """Toolbar beside Select all while cards show; its own row above an empty list.
+        """Suggestions' compact filters: toolbar while cards show, a row above an empty list.
 
-        Favourites and signing history are fixed lists, so the filters hide there.
-        The toolbar slot costs no height, which the 1040x720 window needs.
+        Search has the full row under its search box. Favourites and signing
+        history are fixed lists, so the filters hide there. The toolbar slot
+        costs no height, which the 1040x720 window needs.
         """
-        filters = getattr(self, "filters", None)
+        filters = getattr(self, "filters_compact", None)
         if filters is None:
             return
-        mode = self.view.get("discovery_mode", "Search")
-        if mode not in ("Search", "Recommendations"):
+        if self.view.get("discovery_mode", "Search") != "Recommendations":
             slot = None
         else:
             slot = "toolbar" if self.grid.widget.winfo_manager() else "row"
@@ -921,6 +948,9 @@ class LibrarySearchPanel:
             if slot == "toolbar":
                 filters.pack(in_=self.grid.toolbar, side="left", padx=(theme.SP2, 0),
                              after=self.grid.all_check)
+                # Packed into a frame created after it: without this raise the
+                # toolbar paints over the controls and they never show.
+                filters.frame.lift(self.grid.widget)
             elif slot == "row":
                 filters.pack(in_=self.root, fill="x", padx=theme.SP4, pady=(0, theme.SP2),
                              after=self.card_filter_header)
@@ -928,7 +958,7 @@ class LibrarySearchPanel:
             self._filters_slot = None
 
     def card_constraints(self) -> tuple[int | None, int | None, int | None]:
-        return _card_constraints(self.year.get(), self.ovr_min.get(), self.ovr_max.get())
+        return _card_constraints(self._year_text(), self.ovr_min.get(), self.ovr_max.get())
 
     def _pack_hint(self, widget: Any, text: str) -> None:
         try:
@@ -1036,7 +1066,7 @@ class LibrarySearchPanel:
                     if not self.root.winfo_exists():
                         self.view.setdefault("discovery_cache", {}).setdefault("Search", {})["rows"] = shop_cards(
                             rows, verified_only=bool(self.view.get("verified_only", True)),
-                            best_only=bool(self.view.get("best_only", True)), position=self.view.get("pos", ""),
+                            best_only=bool(self.view.get("best_only", False)), position=self.view.get("pos", ""),
                             pick=view_pick(self.view))
                         return
                     self.search_button.configure(text="Search")
@@ -1076,7 +1106,6 @@ class LibrarySearchPanel:
     def _persist_fields(self) -> None:
         try:
             self.view["query"] = self.query.get() or ""
-            self.view["year"] = self.year.get() or ""
             self.view["ovr_min"] = self.ovr_min.get() or ""
             self.view["ovr_max"] = self.ovr_max.get() or ""
             self.view["pos"] = self.pos.get() or ""
@@ -1088,13 +1117,13 @@ class LibrarySearchPanel:
         self._persist_fields()
         return {
             "query": self.query.get() or "",
-            "year": self.year.get() or "",
+            "year": self._year_text(),
             "ovr_min": self.ovr_min.get() or "",
             "ovr_max": self.ovr_max.get() or "",
             "pos": self.pos.get() or "",
             "source": self.view.get("source", ""),
             "verified_only": bool(self.view.get("verified_only", True)),
-            "best_only": bool(self.view.get("best_only", True)),
+            "best_only": bool(self.view.get("best_only", False)),
             "card_pick": view_pick(self.view),
             "collection": str(self.view.get("collection") or ""),
             "kind": str(self.view.get("kind") or ""),

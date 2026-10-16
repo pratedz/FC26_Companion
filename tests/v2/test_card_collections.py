@@ -19,7 +19,8 @@ from companion.domain import card_collections as cc
 from companion.domain.add_player import CardRecommendation, resolve_recommendation_report
 from companion.domain.catalog import LocalCatalog
 from companion.ui.surfaces.sign.card_filters import (
-    ANY_COLLECTION, apply_menu_value, menu_value, repick_cards, set_view_pick, view_pick,
+    ANY_COLLECTION, apply_menu_value, collection_menu, menu_value, reconcile_year, repick_cards,
+    set_view_pick, view_pick, year_label, year_value,
 )
 from companion.ui.surfaces.sign.search import _card_row, shop_cards, shop_feedback
 
@@ -266,6 +267,123 @@ def test_suggestions_worker_passes_sign_filters(catalog, monkeypatch):
     assert [int(item.card["obs_id"]) for item in draft.resolved] == [5]
 
 
+# --- Grouped Collection menu and the Year menu --------------------------------
+
+# What a Library listing looks like per FC year (collection names, as the Library reports them).
+LIBRARY_YEARS = {
+    27: ("Base Gold", "Base Silver", "Base Bronze", "Base Icons", "Team of the Week", "Future Stars",
+         "Ones to Watch"),
+    26: ("Base Gold", "Base Silver", "Base Bronze", "Base Icons", "Base & Prime Heroes", "Team of the Week",
+         "Cornerstones", "Team of the Year", "FOF: Path to Glory", "World Tour", "Debut Icons"),
+    25: ("Base Gold", "Base Silver", "Base Bronze"),
+}
+
+
+def test_collection_menu_groups_every_year_in_order():
+    kinds, groups = collection_menu(LIBRARY_YEARS)
+    assert kinds == ("All players", "All Icons", "All Heroes")
+    assert [g.title for g in groups] == ["Base cards", "Every week", "FC26 promos", "FC27 promos"]
+    assert groups[0].names == (cc.BASE_GOLD, cc.BASE_SILVER, cc.BASE_BRONZE, cc.BASE_ICONS, cc.BASE_HEROES)
+    fy26 = groups[2]
+    assert (fy26.year, fy26.names, fy26.split) == (
+        26, ("Cornerstones", "Team of the Year", "FOF: Path to Glory", "World Tour", "Debut Icons"), 0)
+
+
+def test_collection_menu_small_year_and_single_year_scope():
+    kinds, groups = collection_menu(LIBRARY_YEARS, 25)
+    assert kinds == ("All players",)
+    assert [g.title for g in groups] == ["Base cards"]
+    kinds, groups = collection_menu(LIBRARY_YEARS, 27)
+    assert "All Heroes" not in kinds and [g.title for g in groups] == ["Base cards", "Every week", "FC27 promos"]
+    assert groups[-1].names == ("Future Stars", "Ones to Watch")
+
+
+def test_collection_menu_splits_long_promo_lists_into_two_columns():
+    names = cc.PROMO_CAMPAIGNS + cc.OTHER_COLLECTIONS[:5]
+    _kinds, groups = collection_menu({26: names}, 26)
+    promo = groups[-1]
+    assert promo.split == len(cc.PROMO_CAMPAIGNS)
+    assert promo.names[promo.split] == cc.OTHER_COLLECTIONS[0]
+
+
+def test_year_hint_from_a_promo_sets_the_year_menu():
+    view = {"year": ""}
+    apply_menu_value(view, "Cornerstones", year_hint=26)
+    assert (view["collection"], view["year"]) == ("Cornerstones", "26")
+    apply_menu_value(view, "Base Gold", year_hint=None)
+    assert (view["collection"], view["year"]) == ("Base Gold", "26")
+
+
+def test_reconcile_year_clears_what_the_year_lacks():
+    view = {"year": "25", "collection": "Team of the Year", "kind": ""}
+    note = reconcile_year(view, LIBRARY_YEARS)
+    assert view["collection"] == "" and note == "FC 25 has no Team of the Year cards — showing all collections."
+    view = {"year": "25", "collection": "Base Gold", "kind": ""}
+    assert reconcile_year(view, LIBRARY_YEARS) == "" and view["collection"] == "Base Gold"
+    view = {"year": "25", "collection": "", "kind": cc.KIND_ICON}
+    assert reconcile_year(view, LIBRARY_YEARS) == "FC 25 has no Icons — showing all players."
+    assert view["kind"] == ""
+    view = {"year": "25", "collection": "Team of the Year"}
+    assert reconcile_year(view, {}) == "" and view["collection"] == "Team of the Year"
+
+
+def test_year_menu_text_round_trips_and_accepts_legacy_years():
+    assert year_label("26") == "FC 26" and year_label("2026") == "FC 26"
+    assert year_label("") == "Any year" and year_label("junk") == "Any year"
+    assert year_value("FC 26") == "26" and year_value("Any year") == ""
+
+
+def test_catalog_lists_collections_and_years_per_fc_year(catalog):
+    assert catalog.years() == (27, 26)
+    by_year = catalog.collections_by_year()
+    assert list(by_year) == [27, 26]
+    assert by_year[26] == catalog.collections(year="26")
+    assert by_year[27] == catalog.collections(year="27")
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize("size", [(1040, 720), (1280, 820)])
+def test_year_menu_and_grouped_collections_fit_and_follow_the_year(svc, size):
+    import customtkinter as ctk
+    from companion.ui.surfaces.sign import build
+
+    root = ctk.CTk()
+    root.geometry(f"{size[0]}x{size[1]}")
+    host = ctk.CTkFrame(root)
+    host.pack(fill="both", expand=True, padx=16, pady=16)
+    vm = {}
+    surface = build(host, svc, vm)
+    surface.pack(fill="both", expand=True)
+    search = surface.sign_search
+    full = search.filters
+
+    def right(widget):
+        return widget.winfo_rootx() + widget.winfo_width()
+
+    try:
+        root.update()
+        assert search._year_text() == "" and search.year_menu.get() == "Any year"
+        assert search.year_menu._values == ["Any year", "FC 27", "FC 26"]
+        assert right(search.year_menu) <= right(search.shop_row)
+        top = full.collection.build_menu()
+        cascades = [top.entrycget(i, "label") for i in range(top.index("end") + 1) if top.type(i) == "cascade"]
+        assert cascades == ["Base cards", "Every week", "FC26 promos"]  # the fixture has no FC27 promo
+        search.set_year("26")
+        root.update()
+        assert search.year_menu.get() == "FC 26" and vm["year"] == "26"
+        cascades = [g.title for g in full._menu_entries()[1]]
+        assert cascades == ["Base cards", "FC26 promos"]  # the fixture's only Team of the Week is FC27
+        full._menu_changed("Team of the Year")
+        root.update()
+        search.set_year("27")
+        root.update()
+        assert full.collection.get() == ANY_COLLECTION and vm.get("collection", "") == ""
+        assert "FC 27 has no Team of the Year cards" in search.search_feedback.cget("text")
+        assert search.year_menu.get() == "FC 27" and search._year_text() == "27"
+    finally:
+        root.destroy()
+
+
 # --- Sign surface at the shipped window sizes ---------------------------------
 
 @pytest.fixture
@@ -301,38 +419,50 @@ def test_sign_shows_collections_and_filters_in_the_results_toolbar(svc, size):
     surface = build(host, svc, vm)
     surface.pack(fill="both", expand=True)
     search = surface.sign_search
+    def right(widget):
+        return widget.winfo_rootx() + widget.winfo_width()
+
     try:
         root.update()
-        # Before any search the filters sit in their own row so a collection can be browsed.
-        assert search.filters.visible()
-        search.filters._menu_changed("Ultimate Rewind")
+        # Search: the full row under the search box, readable labels, inside the panel.
+        full, compact = search.filters, search.filters_compact
+        assert full.frame.winfo_ismapped() and not compact.frame.winfo_ismapped()
+        assert [w.cget("text") for w in full.pick.segments.values()] == ["Best card", "Base card", "All versions"]
+        assert right(full.collection) <= right(search.controls)
+        # Browse a collection with no name typed, then reset to the empty prompt.
+        full._menu_changed("Ultimate Rewind")
         root.update()
         assert [int(r["_raw"]["obs_id"]) for r in search.model.rows] == [11]
-        search.filters._menu_changed(ANY_COLLECTION)
+        full._menu_changed(ANY_COLLECTION)
         root.update()
-        assert not search.model.rows and search.filters.visible()
+        assert not search.model.rows and full.frame.winfo_ismapped()
         search.query.insert(0, "bukayo saka")
         search.search()
         root.update()
-        toolbar = search.grid.toolbar
-        assert search.filters.frame.pack_info()["in"] == toolbar
-        filters_right = search.filters.frame.winfo_rootx() + search.filters.frame.winfo_width()
-        assert filters_right <= search.grid.sort.winfo_rootx()
-        assert search.grid.sort.winfo_rootx() + search.grid.sort.winfo_width() <= toolbar.winfo_rootx() + toolbar.winfo_width()
-        best = search.model.rows
-        assert [int(r["_raw"]["obs_id"]) for r in best] == [11]
-        subtitle = search.grid._rows[0]["subtitle"].cget("text")
-        assert "Ultimate Rewind · Winter Wildcards" in subtitle
-        search.filters._pick_changed(cc.PICK_BASE)
+        assert [int(r["_raw"]["obs_id"]) for r in search.model.rows] == [11]
+        assert "Ultimate Rewind · Winter Wildcards" in search.grid._rows[0]["subtitle"].cget("text")
+        full._pick_changed(cc.PICK_BASE)
         root.update()
         assert [int(r["_raw"]["obs_id"]) for r in search.model.rows] == [8]
         assert "Base Gold" in search.grid._rows[0]["subtitle"].cget("text")
         assert search.grid.widget.winfo_height() >= 120
+        # The compact copy follows the same state.
+        assert compact.pick.segments[cc.PICK_BASE].cget("text") == "Base"
+        assert view_pick(vm) == cc.PICK_BASE and compact.collection.get() == ANY_COLLECTION
         surface.sign_discovery.select("Favourites")
         root.update()
-        assert not search.filters.visible()
+        assert not full.frame.winfo_ismapped() and not compact.frame.winfo_ismapped()
+        # Suggestions: the compact copy shows in the results toolbar, drawn on top.
         surface.sign_discovery.select("Recommendations")
+        search.replace_rows(search.view["catalog_hits"][:1], mode="Recommendations")
         root.update()
-        assert search.filters.visible()
+        toolbar = search.grid.toolbar
+        assert compact.frame.pack_info()["in"] == toolbar and compact.frame.winfo_ismapped()
+        # Tk draws later siblings on top: the bar must stack above the results
+        # widget that owns the toolbar, or the toolbar hides it.
+        stacking = [str(w) for w in root.tk.splitlist(root.tk.call("winfo", "children", search.root))]
+        assert stacking.index(str(compact.frame)) > stacking.index(str(search.grid.widget))
+        assert right(compact.frame) <= search.grid.sort.winfo_rootx()
+        assert right(search.grid.sort) <= right(toolbar)
     finally:
         root.destroy()

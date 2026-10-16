@@ -101,6 +101,25 @@ def _norm(value: str) -> str:
     )
 
 
+def _name_match(folded: str, *columns: str) -> tuple[str, list[str]]:
+    """SQL for a name prefix or any later word.
+
+    Queries shorter than 5 letters used to match only the start of the full
+    name, so ``kane`` missed Harry Kane and ``bale`` missed Gareth Bale.
+    A longer query still matches inside a word, so ``mbapp`` reaches Mbappé.
+    """
+    patterns = [f"{folded}%", f"% {folded}%"]
+    if len(folded) >= 5:
+        patterns.append(f"%{folded}%")
+    parts: list[str] = []
+    args: list[str] = []
+    for column in columns:
+        for pattern in patterns:
+            parts.append(f"{column} LIKE ?")
+            args.append(pattern)
+    return "(" + " OR ".join(parts) + ")", args
+
+
 def _integer(value: Any) -> int | None:
     if value in (None, "") or isinstance(value, bool):
         return None
@@ -495,9 +514,9 @@ class LocalCatalog:
             folded = _norm(spec.text)
             if len(folded) < 3:
                 raise CatalogError("Type at least 3 letters of the player name.")
-            like = f"{folded}%" if len(folded) < 5 else f"%{folded}%"
-            where.append("(p.name_norm LIKE ? OR lower(p.display_name) LIKE ?)")
-            args.extend((like, like))
+            clause, likes = _name_match(folded, "p.name_norm", "lower(p.display_name)")
+            where.append(clause)
+            args.extend(likes)
         if spec.year:
             year = _year_number(spec.year)
             if year is None:
@@ -584,6 +603,28 @@ class LocalCatalog:
             )
         return ()
 
+    def collections_by_year(self) -> dict[int, tuple[str, ...]]:
+        """Collections in the Library for each FC year (unknown years omitted), newest year first."""
+        from .card_collections import collections_for_labels
+        for path, table in ((self.universe_path, "observation"), (self.catalog_path, "cards")):
+            if path is None or not path.is_file():
+                continue
+            try:
+                with self._connect(path) as con:
+                    labels = self._labels(con, path, table)
+            except sqlite3.Error:
+                continue
+            grouped: dict[int, list[str]] = {}
+            for label, label_year in labels:
+                if label_year >= 0:
+                    grouped.setdefault(label_year, []).append(label)
+            return {year: collections_for_labels(grouped[year]) for year in sorted(grouped, reverse=True)}
+        return {}
+
+    def years(self) -> tuple[int, ...]:
+        """FC years that have at least one card in the Library, newest first."""
+        return tuple(self.collections_by_year())
+
     def _universe_person_variants(
         self, path: Path, person_id: int, limit: int
     ) -> tuple[dict[str, Any], ...]:
@@ -626,9 +667,9 @@ class LocalCatalog:
             folded = _norm(spec.text)
             if len(folded) < 3:
                 raise CatalogError("Type at least 3 letters of the player name.")
-            like = f"{folded}%" if len(folded) < 5 else f"%{folded}%"
-            where.append("(name_norm LIKE ? OR revision_norm LIKE ?)")
-            args.extend((like, like))
+            clause, likes = _name_match(folded, "name_norm", "revision_norm")
+            where.append(clause)
+            args.extend(likes)
         if spec.year:
             where.append("year IN (?,?)")
             number = _year_number(spec.year)

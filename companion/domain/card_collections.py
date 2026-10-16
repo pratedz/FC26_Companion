@@ -358,16 +358,24 @@ def pick_rank(card: Mapping[str, Any], pick: str) -> tuple[Any, ...]:
 
 
 def choose_cards(rows: Sequence[Mapping[str, Any]], pick: str) -> tuple[dict[str, Any], ...]:
-    """One card per player for Best/Base; every card for All.  Keeps first-seen order."""
+    """Choose Best/Base independently for each player and game year.
+
+    A player can have a distinct Best or Base card in every FC release.  The
+    year is therefore part of the selection key; cards from the same year are
+    still collapsed to the strongest (or preferred base) source row.
+    """
     items = [dict(row) for row in rows if isinstance(row, Mapping)]
     if pick == PICK_ALL:
         return tuple(items)
     if pick == PICK_BASE:
         items = [row for row in items if classify(row).base]
-    chosen: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
+    chosen: dict[tuple[str, int], dict[str, Any]] = {}
+    order: list[tuple[str, int]] = []
     for card in items:
-        key = person_key(card)
+        # Keep one representative per player-year.  Missing years remain a
+        # single bucket so incomplete legacy rows do not multiply endlessly.
+        year = card_year(card)
+        key = (person_key(card), year)
         current = chosen.get(key)
         if current is None:
             chosen[key] = card
@@ -378,6 +386,11 @@ def choose_cards(rows: Sequence[Mapping[str, Any]], pick: str) -> tuple[dict[str
 
 
 _FILLER_WORDS = {"fof", "festival", "of", "football", "the", "fut", "uefa", "&", "/"}
+#: Short names that repeat the collection ("TOTY" under Team of the Year).
+_ABBREVIATIONS = {
+    "Team of the Week": {"totw"}, "Team of the Year": {"toty"}, "Team of the Season": {"tots"},
+    "Player of the Month": {"potm"}, "Road to the Final": {"rttf"},
+}
 
 
 def describe(card: Mapping[str, Any]) -> str:
@@ -397,6 +410,7 @@ def describe(card: Mapping[str, Any]) -> str:
         return re.sub(r"(es|s)$", "", _fold(word).strip(":()"))
 
     known = {stem(word) for word in info.collection.split()} | _FILLER_WORDS
+    known |= _ABBREVIATIONS.get(info.collection, set())
     extra = [word for word in label.split() if stem(word) not in known]
     detail = " ".join(extra).replace("(", "").replace(")", "").strip(" :-")
     return f"{info.collection} · {detail}" if detail else info.collection

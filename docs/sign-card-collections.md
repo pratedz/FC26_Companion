@@ -1,14 +1,22 @@
 # Sign card collections
 
 Sign shows which collection every Library card belongs to and filters by it.
-The results toolbar holds two controls, shared by Search and Suggestions:
+Search shows the controls in a row under the search box. Suggestions has a
+compact copy in its results toolbar. Both edit the same view state.
 
-- **Collection menu**: All cards, All players / All Icons / All Heroes, then
-  every collection present in the Library. Core collections come first
-  (TOTW, Base Icons, Base & Prime Heroes, Base Gold/Silver/Bronze, ...), then
-  the FC26 promo campaigns in release order, then smaller campaigns.
-- **Best / Base / All**: one card per player (highest rated), one card per
-  player (the plain card), or every version.
+- **Best card / Base card / All versions**: one card per player and year
+  (highest rated), one card per player and year (the plain card), or every
+  version. All versions is the default.
+- **Year**: Any year, or one FC year in the Library (newest first). The
+  collection list follows the year, and a year change drops a collection or
+  type that year does not have, with a note saying so.
+- **Collection menu**: All collections, then All players / All Icons /
+  All Heroes (only when that year has them), then groups:
+  - *Base cards*: Base Gold, Base Silver, Base Bronze, Base Icons, Base & Prime Heroes.
+  - *Every week*: TOTW and the other core weekly collections.
+  - *FC{yy} promos*, one group per year: the main campaigns in release order,
+    then smaller campaigns in a second column when the list is long. Picking a
+    promo from a year's group also sets the Year.
 
 In Suggestions the AI still chooses the players; the filters choose which of
 their cards is offered, and changing a filter swaps cards without a new AI call.

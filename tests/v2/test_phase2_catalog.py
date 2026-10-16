@@ -61,6 +61,36 @@ def _universe(path: Path) -> Path:
     return path
 
 
+def test_short_surname_finds_harry_kane_and_gareth_bale(tmp_path: Path) -> None:
+    path = _universe(tmp_path / "universe.sqlite")
+    con = sqlite3.connect(path)
+    con.execute("INSERT INTO person VALUES(202126,'Harry Kane','harry kane',1)")
+    con.execute("INSERT INTO person VALUES(173731,'Gareth Bale','gareth bale',1)")
+    con.execute(
+        "INSERT INTO observation VALUES(" + ",".join("?" for _ in range(38)) + ")",
+        (3, 202126, 26, "futgg", "f26", "fut", "Rare", "1",
+         "Harry Kane", 90, 90, 25, None, None, None, "ST", 1, "Bayern",
+         2, "Bundesliga", 14, "England", 188, 86, 1, 4, 4, 0, 0, 0, 0, None,
+         "{}", "{}", "granular", 0, 0, "source_id"),
+    )
+    con.execute(
+        "INSERT INTO observation VALUES(" + ",".join("?" for _ in range(38)) + ")",
+        (4, 173731, 26, "futgg", "f26", "fut", "Rare", "2",
+         "Gareth Bale", 85, 85, 23, None, None, None, "RW", 1, "Madrid",
+         2, "LaLiga", 50, "Wales", 185, 81, 2, 4, 3, 0, 0, 0, 0, None,
+         "{}", "{}", "granular", 0, 0, "source_id"),
+    )
+    con.commit()
+    con.close()
+    catalog = LocalCatalog(universe_path=path)
+    kane = catalog.search("kane", year="26")
+    bale = catalog.search("bale", year="26")
+    assert any(row["name"] == "Harry Kane" for row in kane)
+    assert any(row["name"] == "Gareth Bale" for row in bale)
+    assert catalog.search("harry kane", year="26")[0]["name"] == "Harry Kane"
+    assert catalog.search("gareth bale", year="26")[0]["name"] == "Gareth Bale"
+
+
 def test_search_filters_and_preserves_career_identity(tmp_path: Path) -> None:
     catalog = LocalCatalog(universe_path=_universe(tmp_path / "universe.sqlite"))
     hits = catalog.search(

@@ -16,7 +16,7 @@ Layering (strict downward dependency):
 
 from __future__ import annotations
 
-__version__ = "2.11.2"
+__version__ = "2.11.7"
 PROTOCOL_V = 3
 # Must match ingame/le_companion/version.lua. A Companion build older than the
 # installed worker refuses the live session, so the app looks disconnected
