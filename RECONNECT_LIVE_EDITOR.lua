@@ -4,7 +4,7 @@ local ok, result = pcall(function()
   if type(c) ~= "table" or type(c.configure) ~= "function" then
     error("LE Companion v2 is not loaded")
   end
-  c.configure({ queue_dir = [==[C:/Users/prated/Desktop/FC 26 LE v26.3.5/LE_Profile_Executor/queue]==] })
+  c.configure({}) -- rereads the repaired config.json; does not run jobs
   local function host_true(value)
     return value == true or tonumber(value) == 1
   end

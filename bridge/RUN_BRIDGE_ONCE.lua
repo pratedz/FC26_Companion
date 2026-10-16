@@ -11,7 +11,7 @@
 ]]
 
 -- INSTALL replaces this single line (do not add a second QUEUE_DIR):
-local QUEUE_DIR = "C:/Users/prated/Desktop/FC 26 LE v26.3.5/LE_Profile_Executor/queue"
+local QUEUE_DIR = "C:/Users/prated/Desktop/FC26_Companion_src/queue"
 
 local function path_join(a, b)
     if not a or a == "" then return b end

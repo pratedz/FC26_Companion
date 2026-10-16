@@ -288,10 +288,7 @@ def test_runtime_scenarios_a_through_l_and_retry(tmp_path, trace):
     assert ensure_squad_fresh(svc) is not None
 
     blob = "\n".join(trace)
-    out = (
-        __import__("pathlib").Path(r"C:\Users\prated\Downloads\companion analyse\outcomes")
-        / "08_sync_runtime_trace.txt"
-    )
+    out = tmp_path / "08_sync_runtime_trace.txt"
     out.write_text(blob + "\n", encoding="utf-8")
     assert "[SYNC]" in blob
     assert "queue reason=" in blob

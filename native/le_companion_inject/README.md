@@ -1,5 +1,10 @@
 # LECompanionInject.dll (inject-side)
 
+> **Legacy (v1 only).** This DLL implements the v1 text-file queue protocol
+> (protocol 2) used by `LE_Profile_Executor`. The current FC26 Companion (v2)
+> does not use it: v2 talks to the resident Lua core `ingame/le_companion/`
+> over the JSON protocol 3 (`docs/PROTOCOL.md`, `docs/schema/`).
+
 Native Windows DLL implementing the companion **queue protocol** (arm / drain /
 result markers). Part of dual-mode LE_Profile_Executor.
 
