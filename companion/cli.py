@@ -205,6 +205,38 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if report["healthy"] else 1
 
 
+def cmd_gamelog(args: argparse.Namespace) -> int:
+    """Recent Live Editor log entries (read-only). Worker lines + errors by default."""
+    from .app.commands import game_log
+    from .domain.game_log import FILTER_ALL, FILTER_ERRORS, FILTER_WORKER, format_row
+
+    mode = FILTER_ERRORS if args.errors else FILTER_ALL if args.all else FILTER_WORKER
+    svc = build_services(args.root, inline=True)
+    view, summary = game_log.read_recent(svc, mode=mode, lines=max(1, int(args.lines)))
+    if args.json:
+        _print({
+            "file": view.file_name,
+            "logs_dir": view.logs_dir,
+            "source": view.source,
+            "filter": mode,
+            "message": view.message,
+            "summary": summary.to_dict() if summary is not None else None,
+            "entries": [e.to_dict() for e in reversed(view.entries)],
+        })
+        return 0 if view.file_name else 3
+    if not view.file_name:
+        print(view.message or "No Live Editor log found.", file=sys.stderr)
+        return 3
+    print(f"# {Path(view.logs_dir) / view.file_name}  filter={mode}  (oldest first)")
+    for entry in reversed(view.entries):
+        print(format_row(entry))
+    if not view.entries:
+        print("(no matching entries)")
+    if summary is not None:
+        print(f"# {summary.detail}")
+    return 0
+
+
 def cmd_assets(args: argparse.Namespace) -> int:
     from .app.commands import legacy_assets
     from .app.commands.apply import _persist_result
@@ -446,6 +478,11 @@ def build_parser() -> argparse.ArgumentParser:
         if name != "reports":
             sp.add_argument("--timeout", type=float, default=45.0)
             sp.add_argument("--no-wait", action="store_true")
+    sp = add("gamelog", cmd_gamelog, "recent Live Editor log entries (worker lines + errors)")
+    sp.add_argument("--errors", action="store_true", help="only error lines")
+    sp.add_argument("--all", action="store_true", help="every line, not just worker lines")
+    sp.add_argument("--lines", type=int, default=50, help="how many entries (default 50)")
+    sp.add_argument("--json", action="store_true", help="machine-readable output")
     add("queue", cmd_queue, "list pending and claimed jobs")
     add("sweep", cmd_sweep, "report jobs a dead session abandoned")
     add("force-drain", cmd_force_drain, "print the Lua Engine escape-hatch snippet")
