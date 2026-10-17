@@ -430,7 +430,14 @@ GOLDEN_EXPORT = json.loads(r"""
 
 
 def test_export_squad_output_is_unchanged_by_the_refactor(core):
-    assert json.loads(_export(core)) == GOLDEN_EXPORT
+    out = json.loads(_export(core))
+    # team_shirts (core 2.6.39) is the one intended addition: every club link
+    # row, collected during the export's existing teamplayerlinks pass.
+    shirts = out["data"].pop("team_shirts")
+    assert out == GOLDEN_EXPORT
+    by_id = {p["playerid"]: p["jerseynumber"] for p in GOLDEN_EXPORT["data"]["players"]}
+    assert {r["playerid"]: r["jerseynumber"] for r in shirts} == by_id
+    assert all(r["senior"] is True for r in shirts)
 
 
 def test_export_squad_one_shot_walks_each_table_once(core):

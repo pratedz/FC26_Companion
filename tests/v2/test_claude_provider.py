@@ -450,7 +450,7 @@ def test_planner_hint_lookups_are_deduped_and_concurrent(monkeypatch):
     planner.session_propose_worker(
         SimpleNamespace(cancelled=False),
         plan=SimpleNamespace(selection_revision="r"),
-        session=SimpleNamespace(recipe=SimpleNamespace(prompt="p"), warnings=(), targets=()),
+        session=SimpleNamespace(recipe=SimpleNamespace(prompt="p", excluded_families=(), named_jerseys=()), warnings=(), targets=()),
         catalog=object(),
         on_success=done.append,
         on_error=lambda exc: (_ for _ in ()).throw(exc),

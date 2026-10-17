@@ -350,6 +350,37 @@ end
 -- export_squad
 -------------------------------------------------------------------------------
 
+-- Every teamplayerlinks row of the club, including players missing from the
+-- senior list (loaned out, reserves). The shirt write check in set_fields
+-- scans exactly these rows, so the planner must see the same shirts.
+-- Every teamplayerlinks row of the club, so Python's shirt map matches the
+-- in-game shirt check (which scans all of the club's link rows, not only the
+-- senior list). The export walks collect {playerid, jerseynumber} pairs in
+-- st.team_links during their existing pass over teamplayerlinks; this only
+-- adds senior/loaned/name, and the host calls run for non-senior rows only.
+function ops.team_shirts(team_links, senior_ids)
+    if type(team_links) ~= "table" then return nil end
+    local loaned_fn, name_fn = rawget(_G, "IsPlayerLoanedOut"), rawget(_G, "GetPlayerName")
+    local out = {}
+    for i = 1, #team_links do
+        local link = team_links[i]
+        local row = { playerid = link[1], jerseynumber = link[2] or 0,
+                      senior = (senior_ids or {})[link[1]] == true }
+        if not row.senior then
+            if type(loaned_fn) == "function" then
+                local ok, value = pcall(loaned_fn, row.playerid)
+                if ok then row.loaned = value == true or tonumber(value) == 1 end
+            end
+            if type(name_fn) == "function" then
+                local ok, name = pcall(name_fn, row.playerid)
+                if ok and name then row.name = tostring(name) end
+            end
+        end
+        out[#out + 1] = row
+    end
+    return out
+end
+
 ops.handlers["export_squad"] = function(op, job, ctx)
     -- One call with no deadline: the same phases the live squad mirror
     -- (mirror.lua) spreads across native ticks, run back to back here. The
@@ -452,7 +483,7 @@ function ops.squad_export_begin(op, job, ctx, opts)
         op = op, job = job, ctx = ctx, opts = opts or {},
         teamid = teamid, phase = "ids", iters = {},
         players = {}, free_agents = {},
-        squad_ids = {}, jersey_by_id = {},
+        squad_ids = {}, jersey_by_id = {}, team_links = {},
         edited_names = edited_names,
         template_ids = {}, free_ids = {},
         free_candidates = {}, seen_free = {}, free_checks = 0,
@@ -638,7 +669,9 @@ SQUAD_PHASES.links = function(st, deadline)
         if tid == teamid and pid and pid > 0 then
             squad_ids[pid] = true
             if has_jersey then
-                jersey_by_id[pid] = tonumber(links:get("jerseynumber", rec)) or 0
+                local shirt = tonumber(links:get("jerseynumber", rec)) or 0
+                jersey_by_id[pid] = shirt
+                st.team_links[#st.team_links + 1] = { pid, shirt }
             end
         end
     end, deadline)
@@ -666,8 +699,10 @@ SQUAD_PHASES.jersey = function(st, deadline)
     local r = squad_walk(st, "jersey", links, function(rec)
         local tid = tonumber(links:get("teamid", rec))
         local pid = tonumber(links:get("playerid", rec))
-        if tid == teamid and pid and squad_ids[pid] then
-            jersey_by_id[pid] = tonumber(links:get("jerseynumber", rec)) or 0
+        if tid == teamid and pid and pid > 0 then
+            local shirt = tonumber(links:get("jerseynumber", rec)) or 0
+            if squad_ids[pid] then jersey_by_id[pid] = shirt end
+            st.team_links[#st.team_links + 1] = { pid, shirt }
         end
     end, deadline)
     if r == "next" then st.phase = "members_check" end
@@ -849,10 +884,16 @@ SQUAD_PHASES.finish = function(st)
         end
     end
 
+    local team_shirts = nil
+    if next(st.team_links) ~= nil then
+        local shirts_ok, rows = pcall(ops.team_shirts, st.team_links, st.squad_ids)
+        if shirts_ok then team_shirts = rows end
+    end
+
     st.result = ok_result({
         teamid = teamid, teamname = teamname, players = players,
         free_agents = free_agents, free_agent_diagnostics = st.diagnostics,
-        count = #players,
+        count = #players, team_shirts = team_shirts,
     }, { targets = #players, found = #players })
     return "next"
 end

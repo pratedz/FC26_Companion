@@ -417,6 +417,16 @@ def ingest_squad_data(
         current = svc.store.snapshot().squad
         if current.save_uid == save_uid and current.teamid == teamid:
             free_agents = list(current.free_agents)
+    # Every teamplayerlinks row of the club (core 2.6.39+). A mirror without it
+    # keeps the last map of the same save and club, like free agents.
+    team_shirts: Sequence[Mapping[str, Any]] = ()
+    raw_shirts = data.get("team_shirts")
+    if isinstance(raw_shirts, list):
+        team_shirts = [row for row in raw_shirts if isinstance(row, Mapping)]
+    elif source == "mirror":
+        current = svc.store.snapshot().squad
+        if current.save_uid == save_uid and current.teamid == teamid:
+            team_shirts = list(current.team_shirts)
     if not players:
         if source == "mirror":
             return False
@@ -446,6 +456,7 @@ def ingest_squad_data(
             taken=svc.clock.now(),
             free_agents=free_agents,
             game_names=game_names,
+            team_shirts=team_shirts,
         )
     )
     if source == "export":
@@ -469,6 +480,7 @@ def ingest_squad_data(
                 "teamid": teamid,
                 "players": list(players),
                 "free_agents": list(free_agents),
+                "team_shirts": list(team_shirts),
             },
             taken_ts=svc.clock.now_ts(),
             taken_utc=svc.clock.stamp(),

@@ -143,6 +143,8 @@ class SquadSynced:
     # shows the signed name instead (squad._with_signed_names). Names check
     # compares these in-game names against verified signing receipts.
     game_names: tuple[tuple[int, str], ...] = ()
+    # Every teamplayerlinks row of the club; empty when the loaded core predates it.
+    team_shirts: Sequence[Mapping[str, Any]] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -45,6 +45,7 @@ from ..widgets.primitives import (
 from ..widgets.table import Column, DataGrid, TableModel, inclusive_span
 from ._common import set_status
 from .planner_controller import PlannerController, REQUEST_PRESETS, load_requests, save_request
+from .planner_shirts import shirt_conflict_text
 
 try:  # pragma: no cover
     import customtkinter as ctk
@@ -255,37 +256,20 @@ def _open_template_planner(svc: Any, plan: SquadPlan) -> None:
 
 
 def _with_squad_shirts(svc: Any, plan: SquadPlan) -> SquadPlan:
-    """Remember every current shirt so a requested number can move its wearer."""
-    book: dict[int, int] = {}
-    names: dict[int, str] = {}
+    """Every shirt the club wears now, from the latest squad export.
+
+    Uses the complete club link list when the core exports it (players who
+    are loaned out still wear their number), else the senior list. Called on
+    open and again on every Build/Rebuild and shirt fix.
+    """
+    from ...domain.squad_shirts import with_shirt_map
+
     try:
-        players = svc.store.snapshot().squad.players
+        squad = svc.store.snapshot().squad
+        players, team_shirts = tuple(squad.players or ()), tuple(getattr(squad, "team_shirts", ()) or ())
     except Exception:
-        players = ()
-    for row in players:
-        if not isinstance(row, dict):
-            continue
-        try:
-            pid = int(row.get("playerid") or row.get("id"))
-        except (TypeError, ValueError):
-            continue
-        if pid <= 0:
-            continue
-        try:
-            number = int(row.get("jerseynumber") or 0)
-        except (TypeError, ValueError):
-            number = 0
-        book[pid] = number if 1 <= number <= 99 else 0
-        names[pid] = str(row.get("name") or pid)
-    for member in plan.members:
-        if member.playerid not in book:
-            try:
-                number = int(member.base.get("jerseynumber") or 0)
-            except (TypeError, ValueError):
-                number = 0
-            book[member.playerid] = number if 1 <= number <= 99 else 0
-        names.setdefault(member.playerid, member.name)
-    return replace(plan, shirt_book=book, shirt_names=names)
+        players, team_shirts = (), ()
+    return with_shirt_map(plan, players, team_shirts)
 
 
 def _open_session_planner(
@@ -418,14 +402,22 @@ def _open_session_planner(
         svc, state, preview_host, matrix_host, status_lbl, subtitle, propose_btn),
         kind="secondary", height=38, width=120)
     propose_btn.pack(side="right", padx=(0, 8))
+    # Packed next to Apply only while some players are blocked (see _sync_session_apply).
+    state["apply_rest_btn"] = button(action_row, "Apply the rest…", lambda: _apply_rest(svc, state, win),
+                                     kind="secondary", height=38, width=130)
     body = ctk.CTkFrame(win, fg_color="transparent")
     body.pack(fill="both", expand=True, padx=16, pady=(0, 12))
     chip_host, preview_host, matrix_host = mount_review(body, state, lambda: _mark_review_dirty(state))
     state.update(apply_btn=apply_btn, propose_btn=propose_btn)
     def repair_player(pid):
-        state["retry_playerids"] = {int(pid)}
-        _start_session_propose(svc, state, preview_host, matrix_host, status_lbl, subtitle, propose_btn)
+        # "Fix this" for a rejected AI proposal: one player, one request.
+        if not _start_targeted_repair(svc, state, int(pid), status_lbl, subtitle, matrix_host):
+            state["retry_playerids"] = {int(pid)}
+            _start_session_propose(svc, state, preview_host, matrix_host, status_lbl, subtitle, propose_btn)
     state["repair_player"] = repair_player
+    state["fix_shirt"] = lambda pid: _fix_shirt_issue(svc, state, int(pid), status_lbl, subtitle, matrix_host)
+    state["swap_shirt"] = lambda pid: _fix_shirt_issue(svc, state, int(pid), status_lbl, subtitle, matrix_host,
+                                                      swap=True)
     win._planner_state = state
     def close():
         controller.close(getattr(svc, "executor", None))
@@ -570,6 +562,7 @@ def session_propose_worker(
                 total,
             ),
             **({"cache": cache} if cache is not None else {}),
+            **_shirt_kwargs(plan, session),
         )
         if getattr(token, "cancelled", False):
             return
@@ -592,6 +585,76 @@ def session_propose_worker(
         )
         if on_success:
             on_success(staged)
+    except Exception as exc:  # noqa: BLE001
+        if not getattr(token, "cancelled", False) and on_error:
+            on_error(exc)
+
+
+def _shirt_kwargs(plan: SquadPlan, session: SquadSession) -> dict[str, Any]:
+    """The club shirt map for the AI, only when it may propose shirts."""
+    from ...domain.squad_session import ai_shirts_wanted, shirt_map_for_ai
+
+    if not ai_shirts_wanted(session.recipe):
+        return {}
+    shirt_map = shirt_map_for_ai(plan)
+    return {"shirt_map": shirt_map} if shirt_map else {}
+
+
+def player_issue_text(plan: SquadPlan, playerid: int) -> str:
+    """The rejection text for one player, without the name prefix."""
+    member = next((m for m in plan.members if m.playerid == int(playerid)), None)
+    if member is None:
+        return ""
+    prefix = member.name + ":"
+    lines = [issue[len(prefix):].replace("Rebuild this plan.", "").strip()
+             for issue in plan.blocking_issues if issue.startswith(prefix)]
+    return " ".join(line for line in lines if line) or "the proposal was missing or invalid"
+
+
+def targeted_repair_worker(
+    token: Any,
+    *,
+    plan: SquadPlan,
+    session: SquadSession,
+    playerid: int,
+    reason: str,
+    on_success: Any = None,
+    on_error: Any = None,
+    cache: Any = None,
+) -> None:
+    """Re-ask the AI for ONE player with the rejection fed back.
+
+    Only that player's row is sent, the cache is bypassed for him, and his
+    staged result is spliced into the reviewed plan; every other player,
+    shirt decision and note stays exactly as it was.
+    """
+    try:
+        if getattr(token, "cancelled", False):
+            return
+        from ...domain.squad_plan import splice_player
+        from ...integrations.grok import propose_squad_players
+
+        pid = int(playerid)
+        rows = [dict(row) for row in propose_payload(plan, session) if int(row["playerid"]) == pid]
+        if not rows:
+            raise ValueError("This player is not part of the current plan.")
+        rows[0]["library_hint"] = rows[0].get("library_hint") or plan.library_hints.get(pid, "")
+        patches, reasons, hints = propose_squad_players(
+            players=rows,
+            selection_revision=plan.selection_revision,
+            request=session.recipe.prompt,
+            recipe=session.recipe,
+            cancel_check=lambda: bool(getattr(token, "cancelled", False)),
+            repair_notes={pid: reason},
+            **({"cache": cache} if cache is not None else {}),
+            **_shirt_kwargs(plan, session),
+        )
+        if getattr(token, "cancelled", False):
+            return
+        single = stage_per_player_plan(plan.keeping([pid]), session, {pid: patches.get(pid, {})},
+                                       reasons=reasons, library_hints=hints)
+        if on_success:
+            on_success(splice_player(plan, single, pid))
     except Exception as exc:  # noqa: BLE001
         if not getattr(token, "cancelled", False) and on_error:
             on_error(exc)
@@ -718,8 +781,12 @@ def _sync_session_apply(state: dict[str, Any]) -> None:
             "Codex is still writing each build."
         ),
     )
+    _sync_apply_rest(state, plan)
     if state.get("review_root"):
-        btn.configure(text="Applied" if state.get("phase") == "applied" else "Apply changes…")
+        shirts = len(getattr(plan, "shirt_issues", ()) or ())
+        btn.configure(text="Applied" if state.get("phase") == "applied" else
+                      f"Apply, skip {shirts} shirt{'s' if shirts != 1 else ''}…" if ready and shirts else
+                      "Apply changes…")
         active = bool(state.get("busy") or state.get("interpreting") or state.get("applying"))
         control_state = "disabled" if active else "normal"
         repair_needed = bool(getattr(plan, "blocking_issues", ()) and not state.get("edits_dirty"))
@@ -730,6 +797,35 @@ def _sync_session_apply(state: dict[str, Any]) -> None:
         for control in (state.get("prompt_entry"), state.get("request_presets"), *state.get("team_controls", ())):
             if control is not None:
                 control.configure(state=control_state)
+
+
+def apply_rest_available(state: dict[str, Any]) -> bool:
+    """Some players are blocked, but the rest of the reviewed plan is valid."""
+    from ...domain.squad_plan import plan_without_blocked
+
+    plan = state.get("plan")
+    if (plan is None or state.get("phase") != "review" or state.get("applying") or state.get("busy")
+            or state.get("edits_dirty") or not getattr(plan, "blocking_issues", ())):
+        return False
+    try:
+        plan_without_blocked(plan)
+    except JobValidationError:
+        return False
+    return True
+
+
+def _sync_apply_rest(state: dict[str, Any], plan: Any) -> None:
+    btn = state.get("apply_rest_btn")
+    if btn is None:
+        return
+    try:
+        if apply_rest_available(state):
+            if not btn.winfo_manager():
+                btn.pack(side="right", padx=(0, 8), after=state["apply_btn"])
+        elif btn.winfo_manager():
+            btn.pack_forget()
+    except Exception:
+        pass
 
 
 def _start_interpret(
@@ -973,11 +1069,19 @@ def _start_session_propose(
     previous = state["plan"]
     retry_ids = state.pop("retry_playerids", None)
     if retry_ids is None:
-        retry_ids = {member.playerid for member in previous.members
-                     if any(issue.startswith(member.name + ":") for issue in previous.blocking_issues)}
+        # Any problem counts: rejected fields, shirt conflicts and staging
+        # notes. Otherwise Rebuild returns the identical failing design.
+        from ...domain.squad_plan import issue_playerids
+        retry_ids = issue_playerids(previous)
     cache = state.get("proposal_cache")
     if retry_ids and cache is not None:
         cache.invalidate_players(retry_ids)
+    if svc is not None:
+        # Re-read the club's shirts from the latest squad snapshot every build.
+        original = _with_squad_shirts(svc, original)
+        if controller is not None:
+            controller.original_plan = original
+        state["original_plan"] = original
     excluded, pins = _snapshot_preview_edits(state)
     request = state["prompt_entry"].get().strip() if state.get("prompt_entry") is not None else state.get("prompt", "")
     if not request:
@@ -1263,6 +1367,9 @@ def _render_matrix(host: Any, plan: SquadPlan) -> None:
     for issue in plan.blocking_issues:
         muted_label(host, issue, size=11, color=theme.WARNING,
                     wraplength=520, justify="left").pack(anchor="w")
+    for shirt_issue in plan.shirt_issues:
+        muted_label(host, f"{_name_of(plan, shirt_issue.playerid)}: {shirt_issue.message}", size=11,
+                    color=theme.WARNING, wraplength=520, justify="left").pack(anchor="w")
     if plan.chips:
         chip_row = ctk.CTkFrame(host, fg_color="transparent")
         chip_row.pack(fill="x", pady=(0, theme.SP2))
@@ -1400,12 +1507,100 @@ def _set_plan(
     if state.get("review_root"):
         from .planner_review import render_players
         render_players(state)
-        if plan.blocking_issues:
-            _plan_progress(state, "Build incomplete. Use Repair affected players, or select a player and Repair this player.")
-        else:
-            _plan_progress(state, "Review each player, then Apply changes.", mode="ready")
+        text, mode = _review_progress(plan)
+        _plan_progress(state, text, mode=mode)
     else:
         _render_matrix(matrix_host, plan)
+
+
+def _review_progress(plan: SquadPlan) -> tuple[str, str]:
+    """Plain status for a built plan, naming what still needs a choice."""
+    shirts = len(plan.shirt_issues)
+    shirt_text = f"{shirts} shirt number{'s' if shirts != 1 else ''}"
+    if plan.blocking_issues:
+        text = "Some players need a fix. Select one and press Fix this, or use Apply the rest."
+        return (text + (f" {shirt_text} also need a choice." if shirts else "")), "idle"
+    if shirts:
+        return (f"{shirt_text} need a choice. Apply skips only those, or select the player and Fix this."), "ready"
+    return "Review each player, then Apply changes.", "ready"
+
+
+def _start_targeted_repair(svc: Any, state: dict[str, Any], pid: int,
+                           status_lbl: Any, subtitle: Any, matrix_host: Any) -> bool:
+    """Fix one rejected player with a single AI request. False if not possible."""
+    plan, session = state.get("plan"), state.get("session")
+    if (plan is None or session is None or state.get("phase") != "review" or state.get("edits_dirty")
+            or state.get("busy") or state.get("applying") or pid not in plan.playerids):
+        return False
+    from ...integrations.ai_provider import block_reason
+
+    blocked = block_reason()
+    if blocked:
+        set_status(svc, blocked)
+        return True
+    controller = state.get("controller")
+    generation = controller.begin() if controller is not None else None
+    name = next((m.name for m in plan.members if m.playerid == pid), str(pid))
+    state["busy"] = True
+    _plan_progress(state, f"Fixing {name} only…", mode="wait")
+    _sync_session_apply(state)
+
+    def on_success(fixed: SquadPlan) -> None:
+        def ui() -> None:
+            if controller is not None and not controller.accepts(generation):
+                return
+            state["busy"] = False
+            if controller is not None:
+                controller.last_proposal = fixed
+            _set_plan(state, fixed, matrix_host, status_lbl, subtitle, f"Fixed {name}. Review, then Apply.")
+            _sync_session_apply(state)
+            set_status(svc, f"{name} was rebuilt; the other players were not changed.")
+        _ui(svc, ui)
+
+    def on_error(exc: BaseException) -> None:
+        def err() -> None:
+            if controller is not None and not controller.accepts(generation):
+                return
+            state["busy"] = False
+            _plan_progress(state, f"Couldn't fix {name}: {exc}", mode="idle")
+            _sync_session_apply(state)
+            set_status(svc, f"Couldn't fix {name}: {exc}")
+        _ui(svc, err)
+
+    reason = player_issue_text(plan, pid)
+
+    def work(token: Any) -> None:
+        targeted_repair_worker(token, plan=plan, session=session, playerid=pid, reason=reason,
+                               on_success=on_success, on_error=on_error, cache=state.get("proposal_cache"))
+
+    try:
+        _submit(svc, "squad.grok.repair", work, state=state)
+    except Exception as exc:  # noqa: BLE001
+        state["busy"] = False
+        _sync_session_apply(state)
+        set_status(svc, f"Could not start the fix: {exc}")
+    return True
+
+
+def _fix_shirt_issue(svc: Any, state: dict[str, Any], pid: int, status_lbl: Any, subtitle: Any,
+                     matrix_host: Any, *, swap: bool = False) -> None:
+    """Deterministic shirt fix for one player; no AI call, shown before Apply."""
+    from ...domain.squad_shirts import fix_shirt, swap_shirt
+
+    if state.get("busy") or state.get("applying"):
+        return
+    plan = _with_squad_shirts(svc, state["plan"])
+    try:
+        fixed, note = (swap_shirt if swap else fix_shirt)(plan, pid)
+    except ValueError as exc:
+        set_status(svc, str(exc))
+        return
+    controller = state.get("controller")
+    if controller is not None:
+        controller.last_proposal = fixed
+    _set_plan(state, fixed, matrix_host, status_lbl, subtitle, note)
+    _sync_session_apply(state)
+    set_status(svc, note + " Review it, then Apply.")
 
 
 def _apply_preset(
@@ -1580,18 +1775,46 @@ def _apply(svc: Any, state: dict, win: Any) -> None:
         set_status(svc, "Rebuild after changing the selection or targets.")
         return
     if plan.blocking_issues:
-        set_status(svc, "Rebuild this plan: " + " ".join(plan.blocking_issues))
+        hint = " Use Apply the rest to write everything else." if apply_rest_available(state) else ""
+        set_status(svc, "Fix the affected players first: " + " ".join(plan.blocking_issues) + hint)
         return
     if not plan.template and not plan.overrides and not plan.jersey_numbers:
         set_status(svc, "Stage a template or per-player review before Apply.")
         return
-    if plan.player_count > 1 and not _confirm_apply(win, plan):
+    # Shirt problems never block: Apply writes everything else and says so.
+    skipped = [f"{_name_of(plan, issue.playerid)}: shirt skipped. {issue.message}" for issue in plan.shirt_issues]
+    if (plan.player_count > 1 or skipped) and not _confirm_apply(win, plan, skipped=skipped):
         set_status(svc, "Squad plan Apply cancelled.")
         return
+    state["apply_plan"] = None
     _run_apply(svc, state, win)
 
 
-def _confirm_apply(win: Any, plan: SquadPlan) -> bool:
+def _name_of(plan: SquadPlan, pid: int) -> str:
+    return next((m.name for m in plan.members if m.playerid == int(pid)), "") or str(
+        plan.shirt_names.get(int(pid)) or pid)
+
+
+def _apply_rest(svc: Any, state: dict, win: Any) -> None:
+    """Apply every valid item and skip only the blocked players' fields and bad shirts."""
+    from ...domain.squad_plan import plan_without_blocked
+
+    if state.get("applying") or not apply_rest_available(state):
+        set_status(svc, "Nothing else can be applied right now.")
+        return
+    try:
+        rest, skipped = plan_without_blocked(state["plan"])
+    except JobValidationError as exc:
+        set_status(svc, str(exc))
+        return
+    if not _confirm_apply(win, rest, skipped=skipped):
+        set_status(svc, "Squad plan Apply cancelled.")
+        return
+    state["apply_plan"] = rest
+    _run_apply(svc, state, win)
+
+
+def _confirm_apply(win: Any, plan: SquadPlan, *, skipped: Sequence[str] = ()) -> bool:
     """One deliberate click instead of typing APPLY; Undo covers the rest."""
     ensure_ctk()
     chosen = {"ok": False}
@@ -1611,6 +1834,13 @@ def _confirm_apply(win: Any, plan: SquadPlan) -> bool:
     if shirts:
         scope += f" · {shirts} shirt number{'s' if shirts != 1 else ''}"
     text_label(body, scope, size=13).pack(anchor="w", pady=(8, 0))
+    if skipped:
+        text_label(body, f"Skipped for now ({len(skipped)})", size=13, bold=True).pack(anchor="w", pady=(10, 0))
+        for line in list(skipped)[:8]:
+            muted_label(body, line, size=11, wraplength=400, justify="left",
+                        color=theme.WARNING).pack(anchor="w")
+        if len(skipped) > 8:
+            muted_label(body, f"… and {len(skipped) - 8} more", size=11).pack(anchor="w")
     muted_label(
         body,
         "Keep Career Mode open while it writes. If anything changed in your save since "
@@ -1680,7 +1910,7 @@ def _run_apply(svc: Any, state: dict, win: Any, *, refreshed: bool = False) -> N
     from ...app.commands.apply import ApplyError
     from ...app.commands.squad_plan_recovery import SquadRefreshNeeded
 
-    plan: SquadPlan = state["plan"]
+    plan: SquadPlan = state.get("apply_plan") or state["plan"]
     controller = state.get("controller")
     generation = controller.generation if controller is not None else None
     _hide_recovery(state)
@@ -1719,6 +1949,14 @@ def _run_apply(svc: Any, state: dict, win: Any, *, refreshed: bool = False) -> N
                     state["phase"] = "verifying"
                     text = "Player writes finished. Waiting for read-back verification."
                     _plan_progress(state, text, mode="wait")
+                elif receipt.get("shirt_conflicts") and not receipt.get("shirts_fixed_by") \
+                        and receipt.get("status") == "applied":
+                    # Everything else is written; only refused shirts remain.
+                    # Never replay them blindly: re-plan against a fresh squad.
+                    state["phase"] = "attention"
+                    text = shirt_conflict_text(receipt["shirt_conflicts"])
+                    _plan_progress(state, text, mode="idle")
+                    _show_recovery(state, "Fix shirts", lambda: _fix_failed_shirts(svc, state, win, receipt["plan_id"]))
                 else:
                     state["phase"] = "attention"
                     _plan_progress(state, text, mode="idle")
@@ -1789,6 +2027,27 @@ def _refresh_then_apply(svc: Any, state: dict, win: Any, timeout_s: float = 90.0
         win.after(500, poll)
     except Exception:
         state["applying"] = False
+
+
+def _fix_failed_shirts(svc: Any, state: dict, win: Any, plan_id: str) -> None:
+    """Refresh, re-plan only the refused shirts, confirm, queue a small shirt job."""
+    from .planner_shirts import fix_shirts_flow
+
+    _hide_recovery(state)
+    state["applying"] = True
+    _sync_session_apply(state)
+    _plan_progress(state, "Reading your squad, then re-planning the refused shirts…", mode="wait")
+
+    def done(message: str) -> None:
+        state["applying"] = False
+        queued = message.startswith("Shirt fix queued")
+        _plan_progress(state, message, mode="ready" if queued else "idle")
+        if not queued:
+            _show_recovery(state, "Fix shirts", lambda: _fix_failed_shirts(svc, state, win, plan_id))
+        _sync_session_apply(state)
+        set_status(svc, message)
+
+    fix_shirts_flow(svc, plan_id, win, on_done=done)
 
 
 def _resume_plan(svc: Any, state: dict, win: Any, plan_id: str) -> None:
