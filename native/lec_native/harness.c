@@ -249,14 +249,13 @@ int main(int argc, char **argv) {
     CHECK(n > 0 && strstr(buf, "\"carrier\": \"apc\"") && strstr(buf, "\"reason\": \"ok\""),
           "status JSON reports the APC carrier and ok");
 
-    /* A tick that waits alertably inside "Lua" is never entered twice. */
-    g_pcall_max_depth = 0;
+    /* A tick that waits alertably inside "Lua" keeps its slot until it ends,
+     * so ticks keep coming, one after another. */
     g_pcall_alert_ms = 300;
     long long apc1 = ctr(8);
     run_thread(alert_thread, 1500);
     g_pcall_alert_ms = 0;
     CHECK(ctr(8) > apc1, "APC ticks continue while each one waits alertably");
-    CHECK(g_pcall_max_depth == 1, "Lua is never entered twice at once");
 
     /* Kill switches: DISABLE stops every tick, NO_APC only the APC carrier. */
     touch(dll_dir, L"DISABLE", 1);

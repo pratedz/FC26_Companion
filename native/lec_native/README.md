@@ -27,6 +27,12 @@ nothing piles up, and after 10 s `reason` becomes `no_carrier`. The app then
 shows "Instant mode: off — … jobs run when you open Team Management", which is
 the 2.6.42 one-visit behaviour.
 
+**The APC carrier is off by default** (core 2.6.42 review): an alertable wait
+can sit deep inside game code, and LE's single `lua_State` has no lock against
+its console or hotkey scripts. `native.lua` calls `lec_native_no_apc` right
+after `lec_native_open` unless `config.json` says `"native_apc": true`, so the
+status shows `apc.enabled: false` and only the timer carrier is armed.
+
 ## How it gets in
 
 LE has no native plugin API. `GetPlugin` only looks up game objects. LE's

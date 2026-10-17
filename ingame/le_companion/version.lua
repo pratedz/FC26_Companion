@@ -30,7 +30,7 @@ WHY THIS MODULE EXISTS
 local version = {}
 
 -- Semantic version of the resident core. Bump on any behaviour change.
-version.VERSION = "2.6.42"
+version.VERSION = "2.6.43"
 
 -- Wire protocol contract number. Job envelopes carry `"schema": 3`; results
 -- carry `"schema": 3`. This is PROTOCOL v3 (docs/V2_ARCHITECTURE.md §3), one
@@ -102,7 +102,7 @@ version.CAPABILITIES = {
     hub_latch         = true,   -- 2.6.42: hub readiness survives screen/notification events
     ui_event_jobs     = true,   -- 2.6.42: reads and field edits also run on those events
     db_name_verify    = true,   -- 2.6.42: signing names proven from the DB, not LE's name cache
-    native_apc        = true,   -- 2.6.42: lec_native 1.1 can tick through an APC on the Career thread
+    native_apc        = false,  -- 2.6.42: lec_native 1.1 has an APC carrier; off unless config.json enables it
 }
 
 --[[ Hard limits. Every one of these is a number that broke something once.
@@ -158,6 +158,7 @@ version.LIMITS = {
     hub_drain_budget_ms  = 4000,
     hub_drain_max_jobs   = 16,
     ui_pump_every_ms     = 1000,
+    ui_job_budget_ms     = 250,   -- a screen-event drain skips jobs with a larger budget_ms
     quiet_ms             = 1000,
 }
 

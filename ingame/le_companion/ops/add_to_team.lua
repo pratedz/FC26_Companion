@@ -953,17 +953,22 @@ local function stored_name_ok(pid, player, strategy, native_ids)
     if not durable_name_ok(pid, player.names or {}) then
         return false, "name_not_applied", "editedplayernames row is missing or stale"
     end
-    if player.detach_name_dictionary ~= false then
-        for _, field in ipairs(DICT_FIELDS) do
-            if dict[field] ~= 0 then
-                return false, "name_detach_not_stored", field .. " reads "
-                    .. tostring(dict[field]) .. ", expected 0"
-            end
+    -- Career renders the editedplayernames row only once the dictionary ids
+    -- are detached; with them attached it still shows the dummy's name, so a
+    -- custom name is never proven without the detach.
+    if player.detach_name_dictionary == false then
+        return false, "name_not_detached",
+            "custom name stored, but the dictionary ids were kept, so FC still shows the old name"
+    end
+    for _, field in ipairs(DICT_FIELDS) do
+        if dict[field] ~= 0 then
+            return false, "name_detach_not_stored", field .. " reads "
+                .. tostring(dict[field]) .. ", expected 0"
         end
-        if dict.usercaneditname ~= 1 then
-            return false, "name_detach_not_stored", "usercaneditname reads "
-                .. tostring(dict.usercaneditname) .. ", expected 1"
-        end
+    end
+    if dict.usercaneditname ~= 1 then
+        return false, "name_detach_not_stored", "usercaneditname reads "
+            .. tostring(dict.usercaneditname) .. ", expected 1"
     end
     return true
 end
@@ -1189,8 +1194,7 @@ local function finish_member_name(player, mstate, verify, ctx, state)
     record_name_proof(mstate, mstate.playerid, expected)
     local consumed_ok, consume_reason = consume_now(ctx, mstate, state, mstate.playerid)
     if not consumed_ok then
-        return fail(consume_reason == "consumed_slot_unavailable" and consume_reason
-                or "consumed_slot_write_failed",
+        return fail(consume_reason or "consumed_slot_write_failed",
             "name stored but the free-agent slot could not be reserved", state)
     end
     mstate.name_done = true
@@ -1965,8 +1969,7 @@ function M.step(op, job, ctx)
         record_name_proof(state, state.playerid, expected)
         local consumed_ok, consume_reason = consume_now(ctx, state, state, state.playerid)
         if not consumed_ok then
-            return fail(consume_reason == "consumed_slot_unavailable" and consume_reason
-                    or "consumed_slot_write_failed",
+            return fail(consume_reason or "consumed_slot_write_failed",
                 "name stored but the free-agent slot could not be reserved", state)
         end
         state.step = 11

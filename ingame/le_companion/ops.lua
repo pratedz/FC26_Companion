@@ -1185,8 +1185,12 @@ ops.handlers["transfer"] = function(op, job, ctx)
         -- GetTeamIdFromPlayerId keeps answering from LE's cache after the
         -- release. The user-squad helper does not, so it is the deciding
         -- read-back when the player left the team we manage.
+        -- The squad proof needs the player to have been in the squad before
+        -- the call: by the database when it is readable, by the cache only
+        -- when it is not (an already-released player must not "verify").
         local user_team = resolve_user_teamid()
-        if user_team and (before_team == user_team or was_senior == true) then
+        if user_team and (was_senior == true
+            or (was_senior == nil and before_team == user_team)) then
             local still_here = in_user_senior_squad(playerid)
             if still_here == false then
                 data.verified = true

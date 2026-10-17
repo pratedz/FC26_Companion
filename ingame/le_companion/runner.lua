@@ -9,11 +9,13 @@ SI-8: drain is bounded by drain_budget_ms and drain_max_jobs.
     ENTERING_TEAM_MANAGEMENT) sets it; simulation, save, load, match, season
     and unknown events clear it (no host call, no disk IO, as before); hub
     screen and notification events (events.BENIGN_NAMES) leave it alone.
-  * Job classes: "read", "light" (plain field and career-value edits) and
-    "heavy" (moves players between clubs, creates rows, rewrites names). A
-    settled hub event runs every class with hub_drain_budget_ms; a quiet
-    native tick runs read and light jobs; a hub screen event (throttled) runs
-    read and light jobs except whole-table reads (export_squad, db.dump).
+  * Job classes: "read", "light" (keyed players-table field writes without
+    upsert, growth_sync, budget) and "heavy" (everything else: transfers,
+    releases, row inserts, roster/name tables, bulk edits, Career structs).
+    A settled hub event runs every class with hub_drain_budget_ms; a quiet
+    native tick runs read and light jobs; a hub screen event (throttled, and
+    only when no other Career event is open around it) runs read and light
+    jobs within ui_job_budget_ms, except whole-table reads.
 ]]
 
 local util = require("util")
@@ -110,11 +112,12 @@ local CLASS_READ_OPS = {
     ["diag.ping"] = true, ["db.dump"] = true, ["export_squad"] = true,
     ["snapshot"] = true, ["injury.scan"] = true,
 }
-local CLASS_LIGHT_OPS = {
-    ["set_fields"] = true, ["bulk_edit"] = true, ["career.set"] = true,
-    ["growth_sync"] = true, ["injury.cure"] = true,
-}
 
+-- "light" is deliberately narrow: a keyed field write on the players table
+-- (no row insert), a growth mirror, or the transfer budget. Everything that
+-- inserts rows (upsert), touches roster/name tables (teamplayerlinks shirt
+-- swaps, editedplayernames), walks a whole table (bulk_edit) or writes
+-- Career structs and game memory (career.set, injury.cure) is "heavy".
 local function op_class(op)
     local name = type(op) == "table" and op.op or ""
     if CLASS_READ_OPS[name]
@@ -122,7 +125,12 @@ local function op_class(op)
         or (name == "budget" and (op.action or "get") == "get") then
         return "read"
     end
-    if CLASS_LIGHT_OPS[name] or name == "budget" then return "light" end
+    if name == "set_fields" then
+        local tname = op.table or "players"
+        if tname == "players" and not op.upsert then return "light" end
+        return "heavy"
+    end
+    if name == "growth_sync" or name == "budget" then return "light" end
     return "heavy"
 end
 
@@ -159,7 +167,9 @@ end
 --- May a drain with `filter` run this queued or claimed job?
 --- filter nil: every job; true / "read": the bootstrap-read allow-list;
 --- "light": read and light jobs; "ui": read and light jobs without a
---- whole-table walk.
+--- whole-table walk and within LIMITS.ui_job_budget_ms (the screen-event
+--- drain deadline is only checked between jobs, so a long job would run to
+--- its own budget inside one hub click).
 local function job_allowed(job_id, filter)
     if filter == nil then return true end
     if filter == true or filter == "read" then return is_bootstrap_read(job_id) end
@@ -167,7 +177,12 @@ local function job_allowed(job_id, filter)
     if not path or not util.exists(path) then path = status.jobs_path(job_id) end
     local job = path and read_job(path) or nil
     if job_class(job) == "heavy" then return false end
-    if filter == "ui" and has_slow_read(job) then return false end
+    if filter == "ui" then
+        if has_slow_read(job) then return false end
+        local cap = version.LIMITS.ui_job_budget_ms or 250
+        local budget = tonumber(job.budget_ms) or version.LIMITS.default_budget_ms or 200
+        if budget > cap then return false end
+    end
     return true
 end
 
@@ -1067,16 +1082,22 @@ function runner.on_career(event_id, phase)
 
     -- Hub screens and notifications (DATA_READY, LEAVING_TEAM_MANAGEMENT,
     -- PLAYER_ADDED_TO_TEAM, ...) keep the latch. Lua state only, except the
-    -- throttled read/edit drain after a post event on a settled hub.
+    -- throttled read/edit drain after a post event on a settled hub, and only
+    -- when no other Career event is still open around this one: DATA_READY
+    -- also fires nested inside other events (e.g. ABOUT_TO_INIT_MODE pre ->
+    -- DATA_READY -> post), and a screen still loading or a transfer still
+    -- completing must never see a write.
     if not hub and events.is_benign(event_id) then
         if events.changes_squad(event_id) then
             runner._cache_dirty = true
             if mirror then mirror.mark_dirty("career_event") end
         end
-        if post and not runner._busy and not runner._handling_hub then
+        if post and runner._open_events == 0
+            and not runner._busy and not runner._handling_hub then
             return runner.pump_on_ui_event(event_id)
         end
-        return runner._busy and "nested" or "benign"
+        if runner._busy then return "nested" end
+        return post and "inside_event" or "benign"
     end
 
     -- An allow-list is safer than guessing which simulation events are busy.
@@ -1307,6 +1328,11 @@ function runner.tick_native_writes()
     runner._native_write_at = now
     if not has_queued_work() then return "idle" end
     if not in_career_mode() then return "idle" end
+    -- LE's table objects snapshot first_record / written_records when they
+    -- are opened; start every drain from fresh handles so a row the game
+    -- added since the last hub event is never missed.
+    require("db").reset()
+    runner._cache_dirty = false
     local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
     return runner.pump("native_tick", deadline, "light")
 end
@@ -1328,18 +1354,23 @@ function runner.pump_on_ui_event(event_id)
     end
     runner._ui_pump_at = now
     if not has_queued_work() then return "idle" end
-    if not probe_in_cm() then return "idle" end
-    if runner._cache_dirty then
-        require("db").reset()
-        runner._cache_dirty = false
+    if not probe_in_cm() then
+        -- No Career save loaded any more (no Career-exit event exists): the
+        -- latch must not outlive the save. Lua state only.
+        runner._hub_ready = false
+        runner._career_seen = false
+        runner._simulating = true
+        _G.LEC_CAREER_SEEN = false
+        return "career_required"
     end
+    -- Fresh table handles for every drain (see tick_native_writes).
+    require("db").reset()
+    runner._cache_dirty = false
     local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
     runner._pump_wrote = false
-    local pumped = runner.pump("ui:" .. events.name(event_id), deadline, "ui")
-    if not util.expired(deadline) then
-        util.pcall_named("mirror", runner.tick_mirror, "ui", deadline)
-    end
-    return pumped
+    -- No mirror slice here: the mirror's team probe stays on settled hub
+    -- events and quiet ticks.
+    return runner.pump("ui:" .. events.name(event_id), deadline, "ui")
 end
 
 --- Live squad mirror (mirror.lua): one budgeted slice. Same gates as native
@@ -1391,18 +1422,18 @@ end
 function runner.on_native_tick()
     -- Simulation days and menus: return before any host call or file IO.
     if runner._simulating or not runner._hub_ready then return "paused" end
-    -- Re-entered from inside a job or a hub drain (a host call can wait
-    -- alertably and run an APC tick there): never start new work.
+    -- Re-entered from inside a job or a hub drain: never start new work.
     if runner._busy or runner._handling_hub then return "busy" end
+    -- A screen is still changing: wait until the hub has been quiet. Checked
+    -- before anything else so no tick does disk IO mid-event.
+    local quiet = (version.LIMITS.quiet_ms or 1000) / 1000
+    if event_open() or not quiet_for(quiet) then return "settling" end
     if not runner._native_live then
         runner._native_live = true
         remember_timer({ Enabled = true, native = true })
         emit("fast_read timer armed (lec_native)")
         advertise_timer(true)
     end
-    -- A screen is still changing: wait until the hub has been quiet.
-    local quiet = (version.LIMITS.quiet_ms or 1000) / 1000
-    if event_open() or not quiet_for(quiet) then return "settling" end
     util.pcall_named("fast_read", runner.tick_fast_read)
     util.pcall_named("native_writes", runner.tick_native_writes)
     util.pcall_named("mirror", runner.tick_mirror, "native")

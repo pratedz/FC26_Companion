@@ -390,3 +390,15 @@ def test_le_cache_rebuild_after_a_day_advance_then_agrees(game):
     game.run("le_cache_clear()")  # what LE does on DAY_PASSED
     assert game.eval(f"GetPlayerName({dummies[0]})") == "Neymar Jr"
     assert game.eval(f"GetTeamIdFromPlayerId({dummies[0]})") == TEAM
+
+
+def test_custom_name_with_attached_ids_is_never_reported_signed(game):
+    dummies = _setup_club_and_dummies(game, 1)
+    member = _member(dummies[0], "Sergio", "Ramos")
+    member["player"]["detach_name_dictionary"] = False
+    game.submit(ULID_SIGN, _sign_op([member]))
+    game.team_management()
+    result = game.result(ULID_SIGN)
+    assert result is not None
+    assert result["state"] in ("partial", "failed")
+    assert result["failures"][0]["reason"] == "name_not_detached"

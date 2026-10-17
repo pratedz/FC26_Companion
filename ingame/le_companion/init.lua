@@ -107,7 +107,7 @@ LEC.config = {
     native_tick_writes = true,  -- native tick may run read/light jobs on a quiet hub
     mirror = true,              -- keep <queue>/mirror/squad.json current on a settled hub
     ui_event_jobs = true,       -- 2.6.42: hub screen events may run read/light jobs
-    native_apc = true,          -- 2.6.42: lec_native may tick through an APC
+    native_apc = false,         -- 2.6.42: lec_native's APC carrier; config.json "native_apc": true enables it
 }
 
 local function read_install_config()

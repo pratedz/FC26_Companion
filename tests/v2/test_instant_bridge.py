@@ -106,8 +106,9 @@ class Core:
         return int(self.eval("host_calls"))
 
     def job(self, job_id: str, *ops: dict, **extra) -> Path:
+        # 200 ms is the app's default job budget (companion/domain/job.py).
         body = {"schema": 3, "job_id": job_id, "label": "test", "ops": list(ops),
-                "budget_ms": 5000, **extra}
+                "budget_ms": 200, **extra}
         path = self.queue / "jobs" / f"{job_id}.json"
         path.write_text(json.dumps(body), encoding="utf-8")
         return path
@@ -287,12 +288,18 @@ def test_nested_events_inside_a_job_do_not_revoke(core):
         ([{"op": "budget", "action": "get"}], "read"),
         ([{"op": "assets.legacy", "action": "check"}], "read"),
         ([{"op": "set_fields"}], "light"),
-        ([{"op": "bulk_edit"}], "light"),
-        ([{"op": "career.set"}], "light"),
+        ([{"op": "set_fields", "table": "players"}], "light"),
         ([{"op": "growth_sync"}], "light"),
-        ([{"op": "injury.cure"}], "light"),
         ([{"op": "budget", "action": "set"}], "light"),
         ([{"op": "diag.ping"}, {"op": "set_fields"}], "light"),
+        # Review 2026-10-17: row inserts, roster/name tables, table walks and
+        # Career structs are heavy.
+        ([{"op": "set_fields", "upsert": True}], "heavy"),
+        ([{"op": "set_fields", "table": "editedplayernames", "upsert": True}], "heavy"),
+        ([{"op": "set_fields", "table": "teamplayerlinks"}], "heavy"),
+        ([{"op": "bulk_edit"}], "heavy"),
+        ([{"op": "career.set"}], "heavy"),
+        ([{"op": "injury.cure"}], "heavy"),
         ([{"op": "add_to_team"}], "heavy"),
         ([{"op": "transfer", "action": "release"}], "heavy"),
         ([{"op": "transfer", "action": "list_player"}], "heavy"),
@@ -370,6 +377,78 @@ def test_ui_event_runs_nothing_while_a_signing_awaits_its_event(core):
     assert core.queued(ULIDS[0])
 
 
+def test_screen_event_inside_another_open_event_never_drains(core):
+    # DATA_READY also fires nested inside other events (seen in the LE log:
+    # ABOUT_TO_INIT_MODE pre -> DATA_READY x2 -> post) and inside a Team
+    # Management entry or a transfer completing. Nothing may run there; the
+    # outer event's own post (no event open any more) may.
+    core.hub()
+    for i, outer in enumerate((ADDED_TO_TEAM, 85, TEAM_MANAGEMENT)):
+        job = ULIDS[i]
+        core.job(job, LIGHT)
+        core.at(101.0 + 2 * i)
+        core.event(outer, "pre")
+        core.reset_io()
+        core.event(DATA_READY, "pre")
+        assert core.event(DATA_READY, "post") == "inside_event"
+        assert core.io() == [] and core.host_calls() == 0
+        assert core.queued(job)
+        core.event(outer, "post")
+        assert core.done(job), outer
+
+
+def test_ui_event_skips_jobs_with_a_large_budget(core):
+    # The screen-event deadline is checked between jobs only, so a job is
+    # allowed there only when its own budget is small.
+    core.hub()
+    core.job(ULIDS[0], LIGHT, budget_ms=5000)
+    core.job(ULIDS[1], LIGHT, budget_ms=200)
+    core.at(101.0)
+    core.event(DATA_READY, "post")
+    assert core.done(ULIDS[1])
+    assert core.queued(ULIDS[0])
+    core.at(102.0)
+    core.hub(TEAM_MANAGEMENT)
+    assert core.done(ULIDS[0])
+
+
+def test_leaving_career_clears_the_latch_on_the_next_screen_event(core):
+    core.hub()
+    core.job(ULIDS[0], LIGHT)
+    core.run("in_cm = false")       # back on the main menu: no exit event exists
+    core.at(101.0)
+    assert core.event(DATA_READY, "post") == "career_required"
+    assert not core.ready()
+    assert core.queued(ULIDS[0])
+    core.reset_io()
+    core.at(103.0)
+    assert core.event(DATA_READY, "post") == "hub_required"
+    assert core.io() == [] and core.host_calls() == 0
+
+
+def test_every_screen_event_or_tick_drain_starts_from_fresh_db_handles(core):
+    core.run(
+        """
+        db_resets = 0
+        local db = package.loaded["db"]
+        local real = db.reset
+        db.reset = function(...) db_resets = db_resets + 1; return real(...) end
+        """
+    )
+    core.hub()
+    core.job(ULIDS[0], LIGHT)
+    before = core.eval("db_resets")
+    core.at(101.0)
+    core.event(DATA_READY, "post")
+    assert core.done(ULIDS[0])
+    assert core.eval("db_resets") == before + 1
+    core.job(ULIDS[1], LIGHT)
+    core.at(104.0)
+    assert core.eval("LEC.runner.on_native_tick()") == "ok"
+    assert core.done(ULIDS[1])
+    assert core.eval("db_resets") == before + 2
+
+
 def test_ui_event_drains_are_throttled(core):
     core.hub()
     core.job(ULIDS[0], READ)
@@ -413,7 +492,7 @@ def test_ui_event_is_not_a_drain_before_the_hub_or_after_leaving_career(core):
     core.job(ULIDS[1], READ)
     core.run("in_cm = false")
     core.at(101.0)
-    assert core.event(DATA_READY, "post") == "idle"
+    assert core.event(DATA_READY, "post") == "career_required"
     assert core.queued(ULIDS[1])
 
 
@@ -522,14 +601,18 @@ def test_native_tick_during_simulation_is_paused_and_silent(core):
 def test_session_advertises_the_2_6_42_contract(core):
     core.hub()
     session = json.loads((core.queue / "session.json").read_text(encoding="utf-8"))
-    assert session["core_version"] == "2.6.42"
+    from companion import CORE_VERSION
+
+    assert session["core_version"] == CORE_VERSION
     caps = session["capabilities"]
-    for key in ("hub_latch", "ui_event_jobs", "db_name_verify", "native_apc",
-                "mirror_after_write"):
+    for key in ("hub_latch", "ui_event_jobs", "db_name_verify", "mirror_after_write"):
         assert caps.get(key) is True, key
+    # The APC carrier is off unless config.json enables it (review 2026-10-17).
+    assert caps.get("native_apc") is False
     limits = session["limits"]
     assert limits["hub_drain_budget_ms"] >= 1000
     assert limits["ui_pump_every_ms"] >= 250
+    assert 0 < limits["ui_job_budget_ms"] <= 500
     assert limits["quiet_ms"] >= 500
 
 

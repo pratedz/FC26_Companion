@@ -599,7 +599,7 @@ def test_names_sync_trusts_the_stored_identity_over_a_stale_le_cache(host):
     assert host.eval("player_row(701).usercaneditname") == 1
 
 
-def test_names_sync_undoes_a_detach_whose_identity_does_not_read_back(host):
+def test_names_sync_undoes_a_refused_detach(host):
     _squad(host, 5, 0)
     _signed(host, 701, detached=False)
     original = host.eval("player_row(701).firstnameid")
@@ -617,8 +617,44 @@ def test_names_sync_undoes_a_detach_whose_identity_does_not_read_back(host):
     res = host.drive("ops.names_sync", "step", _sync_op(_sync_entry(701, "Diego Maradona")))
     row = res["data"]["players"][0]
     assert row["status"] == "failed"
+    assert row["reason"] == "verify_mismatch"   # the detach write itself did not read back
     assert row["restored"] is True
     assert host.eval("player_row(701).firstnameid") == original
+
+
+def test_names_sync_reports_a_stored_identity_that_does_not_read_back(host):
+    """The final stored-identity check (2.6.42) is a real gate, not a formality."""
+    _squad(host, 5, 0)
+    _signed(host, 701, detached=False)
+    # Everything writes and reads back, but the row is gone by the final check.
+    host.run(
+        """
+        local add = require("ops.add_to_team")
+        local real = add.helpers.durable_name_ok
+        DURABLE_CALLS = 0
+        add.helpers.durable_name_ok = function(...)
+            DURABLE_CALLS = DURABLE_CALLS + 1
+            if DURABLE_CALLS >= 3 then return false, 0 end
+            return real(...)
+        end
+        """
+    )
+    res = host.drive("ops.names_sync", "step", _sync_op(_sync_entry(701, "Diego Maradona")))
+    row = res["data"]["players"][0]
+    assert row["status"] == "failed"
+    assert row["reason"] == "name_not_stored"
+    assert row["restored"] is True
+
+
+def test_names_sync_never_proves_a_custom_name_with_attached_ids(host):
+    _squad(host, 5, 0)
+    _signed(host, 701, detached=False)
+    res = host.drive("ops.names_sync", "step",
+                     _sync_op(_sync_entry(701, "Diego Maradona", detach_name_dictionary=False)))
+    row = res["data"]["players"][0]
+    assert row["status"] == "failed"
+    assert row["reason"] == "name_not_detached"
+    assert host.eval("player_row(701).firstnameid") != 0
 
 
 def test_names_sync_native_identity_writes_dictionary_ids(host):

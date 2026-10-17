@@ -131,15 +131,16 @@ local function visible_ok(entry, name)
     return false
 end
 
---- The identity FC renders, read from the database (2.6.42).
+--- The identity FC renders, read from the database (2.6.42). A custom name
+--- shows only once the dictionary ids are detached, so with them attached
+--- (detach_name_dictionary = false) it is never proven.
 local function stored_ok(entry, dict)
     dict = dict or dictionary_state(entry.playerid)
     if not dict then return false end
     if entry.strategy == "native_ids" then
         return native_applied(dict, entry.native_ids)
     end
-    return H.durable_name_ok(entry.playerid, entry.names)
-        and (entry.detach == false or is_detached(dict))
+    return H.durable_name_ok(entry.playerid, entry.names) and is_detached(dict)
 end
 
 local function note_cache(entry)
@@ -320,8 +321,13 @@ local function verify_visible(state)
     if pending == 0 then return finish(state) end
     for _, entry in ipairs(state.players or {}) do
         if entry.status == "written" then
-            entry.status, entry.reason = "failed", "name_not_stored"
-            entry.detail = "the name was written but the stored identity did not read back"
+            if entry.strategy ~= "native_ids" and entry.detach == false then
+                entry.status, entry.reason = "failed", "name_not_detached"
+                entry.detail = "custom name stored, but the dictionary ids were kept, so FC still shows the old name"
+            else
+                entry.status, entry.reason = "failed", "name_not_stored"
+                entry.detail = "the name was written but the stored identity did not read back"
+            end
             if entry.detached_now then
                 local restored, restored_written = H.restore_name_dict(entry.playerid, entry.prev_nameids)
                 add_count(state, "fields_written", restored_written or 0)

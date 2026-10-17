@@ -107,12 +107,17 @@ function native.load(core_dir, cfg, runner)
         native.reason = "open_failed:" .. tostring(open_err)
         return false
     end
-    -- Optional (1.1.0+): an older DLL simply has no APC carrier to stop.
+    -- Optional (1.1.0+): the APC carrier stays off unless config.json says
+    -- "native_apc": true. Turned off right after open, before any Career
+    -- event could give it a thread. An older DLL has no carrier to stop.
     local no_apc = package.loadlib(path, "lec_native_no_apc")
-    native.apc = type(no_apc) == "function"
-    if native.apc and type(cfg) == "table" and cfg.native_apc == false then
-        pcall(no_apc)
-        native.apc = false
+    native.apc = false
+    if type(no_apc) == "function" then
+        if type(cfg) == "table" and cfg.native_apc == true then
+            native.apc = true
+        else
+            pcall(no_apc)
+        end
     end
     native._mark_career = mark
     native._mark_hotkey = hotkey

@@ -723,3 +723,29 @@ def test_first_live_native_tick_advertises_timer_once_and_only_on_hub(core):
     core.eval("LEC.native.tick()")
     assert timer_phases() == ["fast_read_timer"]
     assert _session(core)["capabilities"]["fast_read_timer"] is True
+
+
+@pytest.mark.parametrize(
+    "cfg, calls, apc",
+    [("{}", 1, False), ("{ native_apc = false }", 1, False), ("{ native_apc = true }", 0, True)],
+)
+def test_apc_carrier_is_off_unless_config_turns_it_on(native_rt, tmp_path, cfg, calls, apc):
+    # Core 2.6.42 review: the APC carrier stays off by default. native.load
+    # switches it off right after open, before any Career event.
+    lua = native_rt
+    lua.execute(
+        """
+        dll.no_apc = 0
+        fake_exports.lec_native_no_apc = function() dll.no_apc = dll.no_apc + 1 end
+        """
+    )
+    ok, loaded = _load(lua, _core_dir_with_dll(tmp_path), cfg=cfg)
+    assert ok is True and loaded is True
+    assert lua.globals().dll.no_apc == calls
+    assert lua.globals().native.apc is apc
+
+
+def test_old_dll_without_the_apc_export_still_loads(native_rt, tmp_path):
+    ok, loaded = _load(native_rt, _core_dir_with_dll(tmp_path), cfg="{ native_apc = true }")
+    assert ok is True and loaded is True
+    assert native_rt.globals().native.apc is False

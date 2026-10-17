@@ -254,6 +254,32 @@ def test_repair_whose_name_does_not_store_fails_and_keeps_potential(lua):
     )
     res = _repair(lua, _repair_op(712))
     assert res["ok"] is False
+    assert res["reason"] == "repair_name_dictionary_failed"
+    assert lua.eval("TABLES.players.rows[11].potential") == 41
+
+
+def test_repair_final_stored_identity_check_is_a_real_gate(lua):
+    lua.execute(f"add_player(714, {TEAM}, {FREE})")
+    # The detach reads back during the write, then the row reads 0 again by
+    # the final check (another writer, or FC rejecting the edit later).
+    lua.execute(
+        """
+        local t = TABLES.players
+        local real_get = t.GetRecordFieldValue
+        local reads = 0
+        t.GetRecordFieldValue = function(self, rec, field)
+            local v = real_get(self, rec, field)
+            if field == "usercaneditname" and self.rows[rec].playerid == 714 and v == 1 then
+                reads = reads + 1
+                if reads > 1 then return 0 end
+            end
+            return v
+        end
+        """
+    )
+    res = _repair(lua, _repair_op(714))
+    assert res["ok"] is False
+    assert res["reason"] == "name_not_stored"
     assert lua.eval("TABLES.players.rows[11].potential") == 41
 
 

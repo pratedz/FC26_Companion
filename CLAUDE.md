@@ -63,15 +63,21 @@ keeps every job-derived path inside `queue/` (SI-7).
   and any unknown id, clears it and does no game or disk I/O. Readiness is
   re-checked between ops and jobs. This keeps the 2.6.36/2.6.37
   calendar-freeze fix — see `C:\Users\prated\Desktop\Fc26 LE\diagnosis\Career progression fix.md`.
-- **Job classes (2.6.42, `runner.job_class`)**: `read`, `light` (set_fields,
-  bulk_edit, career.set, growth_sync, injury.cure, budget set) and `heavy`
-  (add_to_team, transfer incl. release, create_player, names.sync,
-  repair/restore_partial_add, asset export, anything unknown). A settled hub
-  event runs every class for up to `hub_drain_budget_ms` (one visit finishes
-  the queue); a quiet native tick runs read + light; a hub screen post event
-  (throttled, `ui_pump_every_ms`) runs read + light except the whole-table
-  reads `export_squad` / `db.dump` (0.2-3.2 s freezes). Heavy jobs wait for
-  Team Management.
+- **Job classes (2.6.42, `runner.job_class`)**: `read`, `light` (only a keyed
+  players-table `set_fields` without `upsert`, `growth_sync`, `budget` set) and
+  `heavy` (everything else: add_to_team, transfer incl. release, create_player,
+  names.sync, repair/restore_partial_add, asset export, set_fields upserts or
+  on teamplayerlinks/editedplayernames, bulk_edit, career.set, injury.cure,
+  anything unknown). A settled hub event runs every class for up to
+  `hub_drain_budget_ms` (one visit finishes the queue). A quiet native tick
+  runs read + light. A hub screen post event (throttled, `ui_pump_every_ms`)
+  runs read + light only when no other Career event is open around it
+  (DATA_READY also fires nested inside other events), only jobs with
+  `budget_ms <= ui_job_budget_ms`, never `export_squad` / `db.dump`, and
+  clears the latch when IsInCM says the save is gone (there is no
+  Career-exit event). Every screen-event or tick drain starts with
+  `db.reset()`: LE's table objects snapshot `first_record` /
+  `written_records` when opened. Heavy jobs wait for Team Management.
 - **`GetPlayerName` / `GetTeamIdFromPlayerId` are Live Editor's cache**, built
   on first use and cleared only by LE's native `DAY_PASSED` /
   `POST_LOAD_PREPARE` listeners (FCLiveEditor.DLL v26.3.6, MasterManager
@@ -104,10 +110,12 @@ is open or within `LIMITS.quiet_ms` of one, writes only after 1.5 s of quiet
 with no job awaiting a post-transfer event. Two carriers: a thread timer
 (needs a message pump — FC's Career thread has none, measured 2026-10-17) and
 (1.1.0) one user APC at a time via `QueueUserAPC`, which Windows runs only
-inside that thread's own alertable waits. `native_status.json` reports
-`carrier` (`timer`/`apc`/`none`) and `reason: "no_carrier"` when neither
-reaches the thread; whether FC's thread waits alertably is not yet measured
-in game. It calls LE's own `lua_gettop/settop/load/pcallk` by RVA **only after
+inside that thread's own alertable waits. **The APC carrier is off by
+default** (alertable waits can sit deep inside game code; LE's lua_State has
+no lock): `native.lua` calls `lec_native_no_apc` unless `config.json` has
+`"native_apc": true`. `native_status.json` reports `carrier`
+(`timer`/`apc`/`none`) and `reason: "no_carrier"` when nothing reaches the
+thread. It calls LE's own `lua_gettop/settop/load/pcallk` by RVA **only after
 matching LE v26.3.6's code bytes** (`le_sig.h`); any other LE build leaves it
 idle. Status -> app "Instant mode" (doctor/Health/status). Kill switches:
 `native/DISABLE`, `<queue>/native_disable`, `config.json "native": false` /
@@ -122,7 +130,7 @@ A new LE version needs the RVAs re-located (see `native/lec_native/README.md`).
   `CORE_VERSION`, `SIGN_CORE_MIN`.
 - `ingame/le_companion/version.lua`: `version.VERSION` must equal
   `CORE_VERSION` (enforced by `tests/v2/test_automation_workspace.py`).
-  Both are `2.6.42` (hub latch, job classes, DB name proof, APC carrier). Bump both on any core change.
+  Both are `2.6.43` (2.6.42 hub latch, job classes, DB name proof, APC carrier; 2.6.43 review fixes). Bump both on any core change.
 - Deployed `README.txt` carries per-release notes (written by the deploy step).
 
 ## Commands
