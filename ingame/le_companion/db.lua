@@ -170,6 +170,10 @@ end
 
 function Handle:records()
     self:refresh()
+    -- LE keeps one valid-record cursor per table object. Every new walk moves
+    -- it, so count walks: a paused walk (the live squad mirror) compares this
+    -- to know nobody else iterated the table in between.
+    self.iter_gen = (self.iter_gen or 0) + 1
     -- Live Editor tables expose a stateful valid-record iterator. It is the
     -- same API used by the proven v1 exporter and avoids constructing record
     -- addresses for deleted/unused slots. Calling GetRecord(index) on those

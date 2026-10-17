@@ -508,7 +508,7 @@ def _finish_part(svc: Any, job: Job, result: JobResult) -> None:
         _persist_result(svc, result)
         if result.outcome is ApplyOutcome.APPLIED and not job.dry_run and all(op.op == "set_fields" for op in job.ops):
             from .squad import invalidate
-            invalidate(svc, reason=f"{job.label or job.job_id} applied")
+            invalidate(svc, reason=f"{job.label or job.job_id} applied", job_id=job.job_id)
     svc.executor.on_ui_thread(publish)
 
 

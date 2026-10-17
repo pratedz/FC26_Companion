@@ -11,6 +11,9 @@ local version = require("version")
 local status = require("status")
 local ops = require("ops")
 local events = require("events")
+-- Optional: a missing or broken mirror.lua must never stop the core.
+local mirror_ok, mirror = pcall(require, "mirror")
+if not mirror_ok or type(mirror) ~= "table" then mirror = nil end
 
 local runner = {}
 runner._cfg = nil
@@ -22,6 +25,10 @@ runner._career_seen = false
 runner._simulating = false
 runner._timer_gave_up = false
 runner._cache_dirty = true
+-- Bumped whenever a job is claimed or resumed. Jobs walk the same native
+-- table cursors as the squad mirror, so a paused mirror build restarts.
+runner._pump_gen = 0
+runner.mirror = mirror
 
 local FAST_READ_WAKE = "_fast_read"
 local FAST_READ_MS = 200
@@ -29,6 +36,7 @@ local FAST_READ_MS = 200
 function runner.configure(cfg, log)
     runner._cfg = cfg
     runner._log = log
+    if mirror then mirror.configure(cfg, log, runner) end
 end
 
 local function emit(msg)
@@ -79,6 +87,29 @@ local function is_bootstrap_read(job_id)
         if not safe then return false end
     end
     return #job.ops > 0
+end
+
+-- Same read-only set as companion/app/commands/apply.py::_is_write_job, so
+-- every job the app invalidates the squad for is named in the next mirror.
+local MIRROR_READ_ONLY_OPS = {
+    ["diag.ping"] = true, ["assets.legacy"] = true, ["db.dump"] = true,
+    ["export_squad"] = true, ["snapshot"] = true, ["injury.scan"] = true,
+}
+
+local function job_may_write(job)
+    if type(job) ~= "table" or type(job.ops) ~= "table" or job.dry_run then return false end
+    for i = 1, #job.ops do
+        local op = job.ops[i]
+        if not MIRROR_READ_ONLY_OPS[type(op) == "table" and op.op or ""] then return true end
+    end
+    return false
+end
+
+-- A job that may have written ran (any outcome): the squad mirror rebuilds.
+local function note_write_job(job)
+    if mirror and job_may_write(job) then
+        mirror.note_write(job.job_id)
+    end
 end
 
 local function has_bootstrap_read()
@@ -687,9 +718,11 @@ function runner.run_one(job_id, pump_reason)
     end
 
     if runner._log and runner._log.capture_open then runner._log.capture_open() end
+    runner._pump_gen = runner._pump_gen + 1
     local ok, result = util.capture(function()
         return execute_job(job, context)
     end)
+    note_write_job(job)
     if not ok then
         attempts = attempt_count(job_id) + 1
         write_attempts(job_id, attempts)
@@ -866,6 +899,7 @@ function runner.on_init_done()
     runner._simulating = true
     runner._cache_dirty = true
     _G.LEC_CAREER_SEEN = false
+    if mirror then mirror.on_unsettled() end
     -- File markers only. Do not start the read timer or touch the database:
     -- LEInitDone fires on the main menu, before Career Mode.
     status.write_session({
@@ -907,6 +941,12 @@ function runner.on_career(event_id, phase)
         runner._simulating = true
         runner._cache_dirty = true
         _G.LEC_CAREER_SEEN = false
+        -- The pre phase of a hub event is a screen change, not a change to
+        -- the squad. Everything else (simulation, day advance, save, load)
+        -- makes the mirror rebuild on the next settled hub. Lua state only.
+        if mirror and (post or not events.is_hub(event_id)) then
+            mirror.on_unsettled()
+        end
         return "paused"
     end
 
@@ -929,7 +969,13 @@ function runner.on_career(event_id, phase)
         runner._awaiting_event = false
         runner.start_fast_read_timer()
         local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
-        return runner.pump("event:" .. events.name(event_id), deadline)
+        local pumped = runner.pump("event:" .. events.name(event_id), deadline)
+        -- Without the native plugin this is the mirror's only chance to run:
+        -- whatever is left of the same drain budget.
+        if not util.expired(deadline) then
+            util.pcall_named("mirror", runner.tick_mirror, "hub", deadline)
+        end
+        return pumped
     end)
     runner._handling_hub = false
     if not ok then
@@ -938,6 +984,7 @@ function runner.on_career(event_id, phase)
         runner._simulating = true
         runner._cache_dirty = true
         _G.LEC_CAREER_SEEN = false
+        if mirror then mirror.on_unsettled() end
         emit("hub callback failed: " .. tostring(result.message or result))
         return "failed"
     end
@@ -1088,6 +1135,35 @@ function runner.tick_native_writes()
     return runner.pump("native_tick", deadline)
 end
 
+--- Live squad mirror (mirror.lua): one budgeted slice. Same gates as native
+--- writes minus the quiet period (it only reads the game): never during
+--- simulation, off-hub, inside a job, inside another hub callback, or while a
+--- job waits for a post-transfer Career event. source "hub" is the settled
+--- hub event itself, which owns _handling_hub.
+function runner.tick_mirror(source, deadline)
+    if not mirror then return "off" end
+    if cfg().mirror == false then return "off" end
+    if runner._simulating then return "sim_paused" end
+    if not runner._hub_ready then return "hub_required" end
+    if runner._busy then return "busy" end
+    if runner._handling_hub and source ~= "hub" then return "busy" end
+    if runner._awaiting_event then return "awaiting_event" end
+    if not cfg().queue_dir or cfg().queue_dir == "" then return "no_queue" end
+    -- Host calls below can raise nested Career events; _busy makes a nested
+    -- hub callback a no-op, as it does for a job.
+    runner._busy = true
+    local ok, result = util.capture(function()
+        return mirror.tick(source, deadline)
+    end)
+    runner._busy = false
+    if not ok then
+        mirror.fail("threw")
+        emit("mirror tick failed: " .. tostring(result.message or result))
+        return "failed"
+    end
+    return result
+end
+
 function runner.on_native_tick()
     -- Simulation days and menus: return before any host call or file IO.
     if runner._simulating or not runner._hub_ready then return "paused" end
@@ -1099,6 +1175,7 @@ function runner.on_native_tick()
     end
     util.pcall_named("fast_read", runner.tick_fast_read)
     util.pcall_named("native_writes", runner.tick_native_writes)
+    util.pcall_named("mirror", runner.tick_mirror, "native")
     return "ok"
 end
 

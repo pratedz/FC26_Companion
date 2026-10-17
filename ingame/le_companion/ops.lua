@@ -351,6 +351,75 @@ end
 -------------------------------------------------------------------------------
 
 ops.handlers["export_squad"] = function(op, job, ctx)
+    -- One call with no deadline: the same phases the live squad mirror
+    -- (mirror.lua) spreads across native ticks, run back to back here. The
+    -- split does not change the output.
+    local st, early = ops.squad_export_begin(op, job, ctx)
+    if not st then return early end
+    ops.squad_export_step(st, nil)
+    return st.result
+end
+
+-- Resumable squad export ------------------------------------------------------
+--
+-- export_squad and the live squad mirror share every line below. The export
+-- runs all phases in one call. The mirror runs them in slices of a few
+-- milliseconds per native tick, and drops the build when another reader moved
+-- a table cursor it was walking or the Career hub stopped being ready.
+
+-- Check the budget clock every N records (and after every built row). The
+-- clock is far cheaper than one host field read, so N stays small.
+local SQUAD_CLOCK_EVERY = 4
+local SQUAD_FREE_AGENT_TEAM_ID = 111592
+local SQUAD_FREE_AGENT_KEEP = 20
+local SQUAD_FREE_AGENT_CHECK_CAP = 120
+
+local function squad_host_yes(value)
+    return value == true or tonumber(value) == 1
+end
+
+--- Add the player ids a host helper returns to the `destination` set.
+--- Returns how many new ids were added.
+local function collect_ids(fn_name, arg, destination)
+    local fn = rawget(_G, fn_name)
+    if type(fn) ~= "function" then return 0 end
+    local ok, values
+    if arg == nil then ok, values = pcall(fn) else ok, values = pcall(fn, arg) end
+    if not ok or type(values) ~= "table" then return 0 end
+    local count = 0
+    for key, value in pairs(values) do
+        local pid = tonumber(value)
+        if not pid or pid <= 0 then pid = tonumber(key) end
+        if pid and pid > 0 and not destination[pid] then
+            destination[pid] = true
+            count = count + 1
+        end
+    end
+    return count
+end
+ops.squad_collect_ids = collect_ids
+
+--- Squad membership from the cheap host helpers only (no table walk).
+--- The mirror fingerprints this same set.
+function ops.squad_helper_ids(teamid)
+    local ids = {}
+    -- Helpers are the normal, cheap path. Only if this host exposes neither
+    -- helper does the export use teamplayerlinks, and even then it reads
+    -- fields known to be present on the table (never the missing `leagueid`).
+    collect_ids("GetUserSeniorTeamPlayerIDs", nil, ids)
+    if next(ids) == nil and teamid then
+        collect_ids("GetPlayerIDSForTeam", teamid, ids)
+        collect_ids("GetPlayerIDsForTeam", teamid, ids)
+    end
+    return ids
+end
+
+--- Start an export. Returns the build state, or nil plus the final result
+--- when it can already answer (save not ready, no user team).
+--- opts.players_only  skip the free-agent probe (the mirror does not use it)
+--- opts.dedupe        ignore a player id seen twice in one walk
+--- opts.still_valid   function; false abandons a paused walk ("stale")
+function ops.squad_export_begin(op, job, ctx, opts)
     -- Do not touch a Career table while FC is still moving through its loading
     -- screens. Live Editor returns numeric 0 for "no user club"; Lua considers
     -- 0 truthy, so it must be rejected explicitly rather than as a nil check.
@@ -359,7 +428,7 @@ ops.handlers["export_squad"] = function(op, job, ctx)
     local ready_fn = rawget(_G, "LEC_CAREER_SAVE_READY")
     local save_ready = type(ready_fn) == "function" and ready_fn() == true
     if not save_ready then
-        return fail_result(
+        return nil, fail_result(
             "career_required",
             "Career Mode save is not loaded",
             { targets = 0 }
@@ -372,125 +441,274 @@ ops.handlers["export_squad"] = function(op, job, ctx)
     end
     if not teamid or teamid <= 0 then
         if job.dry_run then
-            return ok_result({ dry_run = true, players = {}, teamid = nil }, { targets = 0 })
+            return nil, ok_result({ dry_run = true, players = {}, teamid = nil }, { targets = 0 })
         end
-        return fail_result("no_team", "Career Mode is not ready: no user team id yet", { targets = 0 })
+        return nil, fail_result("no_team", "Career Mode is not ready: no user team id yet", { targets = 0 })
     end
     teamid = math.floor(teamid)
 
-    local players, free_agents = {}, {}
-    local squad_ids, jersey_by_id = {}, {}
     local edited_names = {}
-    local diagnostics = {
-        template_candidates = 0,
-        accepted = 0,
-        rejected_not_free = 0,
-        rejected_presigned_or_loaned = 0,
-        rejected_rating_or_retirement = 0,
-        host_checks_unavailable = 0,
+    return {
+        op = op, job = job, ctx = ctx, opts = opts or {},
+        teamid = teamid, phase = "ids", iters = {},
+        players = {}, free_agents = {},
+        squad_ids = {}, jersey_by_id = {},
+        edited_names = edited_names,
+        template_ids = {}, free_ids = {},
+        free_candidates = {}, seen_free = {}, free_checks = 0,
+        seen_players = {},
+        diagnostics = {
+            template_candidates = 0,
+            accepted = 0,
+            rejected_not_free = 0,
+            rejected_presigned_or_loaned = 0,
+            rejected_rating_or_retirement = 0,
+            host_checks_unavailable = 0,
+        },
     }
+end
 
-    local function host_yes(value)
-        return value == true or tonumber(value) == 1
+-- A paused walk may only continue when nobody else walked the table and its
+-- row count is unchanged. still_valid (the mirror) adds hub readiness and
+-- "no job ran in between": jobs walk the same native cursor.
+local function squad_walk_current(st, it)
+    local h = it.h
+    if h.iter_gen ~= it.gen then return false end
+    if type(h.refresh) == "function" then
+        h:refresh()
+        if h.written_records ~= it.written then return false end
     end
+    local check = st.opts.still_valid
+    if type(check) == "function" and not check() then return false end
+    return true
+end
 
-    local function collect_ids(fn_name, arg, destination)
-        local fn = rawget(_G, fn_name)
-        if type(fn) ~= "function" then return 0 end
-        local ok, values
-        if arg == nil then ok, values = pcall(fn) else ok, values = pcall(fn, arg) end
-        if not ok or type(values) ~= "table" then return 0 end
-        local count = 0
-        for key, value in pairs(values) do
-            local pid = tonumber(value)
-            if not pid or pid <= 0 then pid = tonumber(key) end
-            if pid and pid > 0 and not destination[pid] then
-                destination[pid] = true
-                count = count + 1
-            end
+--- The valid-record pass (`for prec in ph:records()` in the one-shot export),
+--- with the loop unrolled so the iterator can pause on `deadline` and resume
+--- on a later call. `visit` returns true after an expensive record (a built
+--- row), which checks the clock at once. Returns "next" when the walk
+--- finished, "more" when the budget ran out, "stale" when the paused walk
+--- cannot be trusted any more.
+local function squad_walk(st, key, h, visit, deadline)
+    local it = st.iters[key]
+    if it == nil then
+        it = { h = h, fn = h:records() }
+        it.gen = h.iter_gen
+        it.written = h.written_records
+        st.iters[key] = it
+    elseif not squad_walk_current(st, it) then
+        return "stale"
+    end
+    local n = 0
+    while true do
+        local rec = it.fn()
+        if rec == nil then
+            st.iters[key] = nil
+            return "next"
         end
-        return count
-    end
-
-    -- Helpers are the normal, cheap path. Only if this host exposes neither
-    -- helper do we use teamplayerlinks, and even then read fields known to be
-    -- present on the table (never the missing `leagueid` field).
-    collect_ids("GetUserSeniorTeamPlayerIDs", nil, squad_ids)
-    if next(squad_ids) == nil then
-        collect_ids("GetPlayerIDSForTeam", teamid, squad_ids)
-        collect_ids("GetPlayerIDsForTeam", teamid, squad_ids)
-    end
-    if next(squad_ids) == nil then
-        local links = db.open("teamplayerlinks")
-        if links then
-            local has_jersey = db.field("teamplayerlinks", "jerseynumber") ~= nil
-            for rec in links:records() do
-                local tid = tonumber(links:get("teamid", rec))
-                local pid = tonumber(links:get("playerid", rec))
-                if tid == teamid and pid and pid > 0 then
-                    squad_ids[pid] = true
-                    if has_jersey then
-                        jersey_by_id[pid] = tonumber(links:get("jerseynumber", rec)) or 0
-                    end
-                end
-            end
-        end
-    end
-
-    -- Shirt numbers live on teamplayerlinks even when the squad id list came
-    -- from GetUserSeniorTeamPlayerIDs. Without this pass every shirt is 0.
-    if next(jersey_by_id) == nil and db.field("teamplayerlinks", "jerseynumber") ~= nil then
-        local links = db.open("teamplayerlinks")
-        if links then
-            for rec in links:records() do
-                local tid = tonumber(links:get("teamid", rec))
-                local pid = tonumber(links:get("playerid", rec))
-                if tid == teamid and pid and squad_ids[pid] then
-                    jersey_by_id[pid] = tonumber(links:get("jerseynumber", rec)) or 0
-                end
+        local heavy = visit(rec)
+        if deadline ~= nil then
+            n = n + 1
+            if heavy or n % SQUAD_CLOCK_EVERY == 0 then
+                local check = st.opts.still_valid
+                if type(check) == "function" and not check() then return "stale" end
+                if util.clock() >= deadline then return "more" end
             end
         end
     end
+end
 
-    if next(squad_ids) == nil then
-        return {
-            ok = false,
-            deferred = true,
-            awaiting_event = true,
-            reason = "db_not_ready",
-            detail = "team " .. tostring(teamid) .. " membership is not readable yet",
+local function squad_not_ready(teamid)
+    return {
+        ok = false,
+        deferred = true,
+        awaiting_event = true,
+        reason = "db_not_ready",
+        detail = "team " .. tostring(teamid) .. " membership is not readable yet",
+        counts = { targets = 0, found = 0 },
+        progress = {
+            step = 1, attempts = 0, started_at = util.now(),
+            reason = "db_not_ready", teamid = teamid,
             counts = { targets = 0, found = 0 },
-            progress = {
-                step = 1, attempts = 0, started_at = util.now(),
-                reason = "db_not_ready", teamid = teamid,
-                counts = { targets = 0, found = 0 },
-            },
-        }
-    end
+        },
+    }
+end
 
-    -- Known low-rated IDs are only a fallback. The free-agent team list is the
-    -- real pool: a save can sign the hardcoded names away, which is why the
-    -- counter was stuck around 9. Live checks still reject anyone who is no
-    -- longer free, loaned, presigned, retiring, or above 75 overall.
-    local FREE_AGENT_TEAM_ID = 111592
-    local FREE_AGENT_KEEP = 20
-    local FREE_AGENT_CHECK_CAP = 120
-    local template_ids = {}
-    local free_ids = {}
-    local raw_template = type(op.free_agent_candidates) == "table" and op.free_agent_candidates or {}
-    for i = 1, math.min(#raw_template, 30) do
-        local pid = tonumber(raw_template[i])
-        if pid and pid > 0 and pid <= 459999 and not squad_ids[pid] then
-            template_ids[math.floor(pid)] = true
+local function squad_current_free_teamid(st, pid)
+    local diagnostics = st.diagnostics
+    local exists_fn = rawget(_G, "PlayerExists")
+    local team_fn = rawget(_G, "GetTeamIdFromPlayerId")
+    if type(exists_fn) ~= "function" or type(team_fn) ~= "function" then
+        diagnostics.host_checks_unavailable = diagnostics.host_checks_unavailable + 1
+        return nil
+    end
+    local ok_exists, raw_exists = pcall(exists_fn, pid)
+    if not ok_exists or not squad_host_yes(raw_exists) then return nil end
+    local ok_team, raw_teamid = pcall(team_fn, pid)
+    local live_tid = ok_team and tonumber(raw_teamid) or nil
+    if live_tid == 0 or live_tid == 111592 then return live_tid end
+    diagnostics.rejected_not_free = diagnostics.rejected_not_free + 1
+    return nil
+end
+
+local function squad_clean_free_candidate(st, pid, prec)
+    local diagnostics, ph = st.diagnostics, st.ph
+    for _, fn_name in ipairs({ "IsPlayerPresigned", "IsPlayerLoanedOut" }) do
+        local fn = rawget(_G, fn_name)
+        if type(fn) ~= "function" then
+            diagnostics.host_checks_unavailable = diagnostics.host_checks_unavailable + 1
+            return false
+        end
+        local ok, active = pcall(fn, pid)
+        if not ok then
+            diagnostics.host_checks_unavailable = diagnostics.host_checks_unavailable + 1
+            return false
+        end
+        if squad_host_yes(active) then
+            diagnostics.rejected_presigned_or_loaned = diagnostics.rejected_presigned_or_loaned + 1
+            return false
         end
     end
-    collect_ids("GetPlayerIDSForTeam", FREE_AGENT_TEAM_ID, free_ids)
-    collect_ids("GetPlayerIDsForTeam", FREE_AGENT_TEAM_ID, free_ids)
+    local rating = tonumber(ph:get("overallrating", prec))
+    if db.field("players", "isretiring") == nil then
+        diagnostics.host_checks_unavailable = diagnostics.host_checks_unavailable + 1
+        return false
+    end
+    local retiring = tonumber(ph:get("isretiring", prec))
+    if not rating or rating > 75 or retiring == nil or retiring ~= 0 then
+        diagnostics.rejected_rating_or_retirement = diagnostics.rejected_rating_or_retirement + 1
+        return false
+    end
+    return true, rating
+end
+
+local function squad_add_free_candidate(st, pid, prec)
+    local diagnostics, ph = st.diagnostics, st.ph
+    if st.seen_free[pid] or st.free_checks >= SQUAD_FREE_AGENT_CHECK_CAP then return end
+    if not pid or pid <= 0 or pid > 459999 or st.squad_ids[pid] then return end
+    local rating_now = tonumber(ph:get("overallrating", prec))
+    if not rating_now or rating_now > 75 then
+        diagnostics.rejected_rating_or_retirement = diagnostics.rejected_rating_or_retirement + 1
+        return
+    end
+    st.free_checks = st.free_checks + 1
+    diagnostics.template_candidates = diagnostics.template_candidates + 1
+    local live_tid = squad_current_free_teamid(st, pid)
+    if not live_tid then return end
+    local clean, rating = squad_clean_free_candidate(st, pid, prec)
+    if not clean then return end
+    st.seen_free[pid] = true
+    local entry = {
+        playerid = pid, teamid = live_tid, overallrating = rating,
+        source = "free_agent_template",
+    }
+    if type(rawget(_G, "GetPlayerName")) == "function" then
+        local ok, name = pcall(_G.GetPlayerName, pid)
+        if ok and name then entry.name = tostring(name) end
+    end
+    st.free_candidates[#st.free_candidates + 1] = entry
+    diagnostics.accepted = diagnostics.accepted + 1
+end
+
+local SQUAD_PHASES = {}
+
+SQUAD_PHASES.ids = function(st)
+    st.squad_ids = ops.squad_helper_ids(st.teamid)
+    st.phase = next(st.squad_ids) == nil and "links" or "jersey_check"
+    return "next"
+end
+
+-- Fallback membership from teamplayerlinks when no helper answered.
+SQUAD_PHASES.links = function(st, deadline)
+    local links = st.links_h
+    if links == nil then
+        links = db.open("teamplayerlinks")
+        if not links then
+            st.phase = "jersey_check"
+            return "next"
+        end
+        st.links_h = links
+        st.has_jersey = db.field("teamplayerlinks", "jerseynumber") ~= nil
+    end
+    local teamid, squad_ids, jersey_by_id = st.teamid, st.squad_ids, st.jersey_by_id
+    local has_jersey = st.has_jersey
+    local r = squad_walk(st, "links", links, function(rec)
+        local tid = tonumber(links:get("teamid", rec))
+        local pid = tonumber(links:get("playerid", rec))
+        if tid == teamid and pid and pid > 0 then
+            squad_ids[pid] = true
+            if has_jersey then
+                jersey_by_id[pid] = tonumber(links:get("jerseynumber", rec)) or 0
+            end
+        end
+    end, deadline)
+    if r == "next" then st.phase = "jersey_check" end
+    return r
+end
+
+-- Shirt numbers live on teamplayerlinks even when the squad id list came
+-- from GetUserSeniorTeamPlayerIDs. Without this pass every shirt is 0.
+SQUAD_PHASES.jersey_check = function(st)
+    st.phase = "members_check"
+    if next(st.jersey_by_id) == nil and db.field("teamplayerlinks", "jerseynumber") ~= nil then
+        local links = db.open("teamplayerlinks")
+        if links then
+            st.jersey_h = links
+            st.phase = "jersey"
+        end
+    end
+    return "next"
+end
+
+SQUAD_PHASES.jersey = function(st, deadline)
+    local links = st.jersey_h
+    local teamid, squad_ids, jersey_by_id = st.teamid, st.squad_ids, st.jersey_by_id
+    local r = squad_walk(st, "jersey", links, function(rec)
+        local tid = tonumber(links:get("teamid", rec))
+        local pid = tonumber(links:get("playerid", rec))
+        if tid == teamid and pid and squad_ids[pid] then
+            jersey_by_id[pid] = tonumber(links:get("jerseynumber", rec)) or 0
+        end
+    end, deadline)
+    if r == "next" then st.phase = "members_check" end
+    return r
+end
+
+SQUAD_PHASES.members_check = function(st)
+    if next(st.squad_ids) == nil then
+        st.result = squad_not_ready(st.teamid)
+        st.phase = "done"
+    else
+        st.phase = "prep"
+    end
+    return "next"
+end
+
+SQUAD_PHASES.prep = function(st)
+    local op, squad_ids = st.op, st.squad_ids
+    if not st.opts.players_only then
+        -- Known low-rated IDs are only a fallback. The free-agent team list is
+        -- the real pool: a save can sign the hardcoded names away, which is why
+        -- the counter was stuck around 9. Live checks still reject anyone who is
+        -- no longer free, loaned, presigned, retiring, or above 75 overall.
+        local raw_template = type(op.free_agent_candidates) == "table" and op.free_agent_candidates or {}
+        for i = 1, math.min(#raw_template, 30) do
+            local pid = tonumber(raw_template[i])
+            if pid and pid > 0 and pid <= 459999 and not squad_ids[pid] then
+                st.template_ids[math.floor(pid)] = true
+            end
+        end
+        collect_ids("GetPlayerIDSForTeam", SQUAD_FREE_AGENT_TEAM_ID, st.free_ids)
+        collect_ids("GetPlayerIDsForTeam", SQUAD_FREE_AGENT_TEAM_ID, st.free_ids)
+    end
 
     local ph = db.open("players")
     if not ph then
-        return fail_result("players_table_unavailable", "could not open players table")
+        st.result = fail_result("players_table_unavailable", "could not open players table")
+        st.phase = "done"
+        return "next"
     end
+    st.ph = ph
     -- Collect planning values with the normal Club refresh. Build can reuse
     -- this single save-bound read instead of queuing another player snapshot
     -- and waiting for a second Career/menu event. Resolve the schema once.
@@ -513,11 +731,13 @@ ops.handlers["export_squad"] = function(op, job, ctx)
     }) do
         if db.field("players", fname) then planning_fields[#planning_fields + 1] = fname end
     end
+    st.planning_fields = planning_fields
     local teamname = ""
     if type(rawget(_G, "GetTeamName")) == "function" then
-        local ok, value = pcall(_G.GetTeamName, teamid)
+        local ok, value = pcall(_G.GetTeamName, st.teamid)
         if ok and value then teamname = tostring(value) end
     end
+    st.teamname = teamname
 
     -- GetPlayerName can remain cached until the Career screen is reopened.
     -- The Companion writes a player's requested name into editedplayernames,
@@ -525,102 +745,50 @@ ops.handlers["export_squad"] = function(op, job, ctx)
     -- desktop Player tab in sync as soon as Refresh squad completes.
     local names = db.open("editedplayernames")
     if names and db.field("editedplayernames", "playerid") then
-        local has_first = db.field("editedplayernames", "firstname") ~= nil
-        local has_surname = db.field("editedplayernames", "surname") ~= nil
-        local has_common = db.field("editedplayernames", "commonname") ~= nil
-        for rec in names:records() do
-            local pid = tonumber(names:get("playerid", rec))
-            if pid and squad_ids[pid] then
-                local common = has_common and tostring(names:get("commonname", rec) or "") or ""
-                local first = has_first and tostring(names:get("firstname", rec) or "") or ""
-                local surname = has_surname and tostring(names:get("surname", rec) or "") or ""
-                local display = common ~= "" and common
-                    or (first .. " " .. surname):gsub("^%s+", ""):gsub("%s+$", "")
-                if display ~= "" then edited_names[pid] = display end
-            end
-        end
+        st.names_h = names
+        st.has_first = db.field("editedplayernames", "firstname") ~= nil
+        st.has_surname = db.field("editedplayernames", "surname") ~= nil
+        st.has_common = db.field("editedplayernames", "commonname") ~= nil
+        st.phase = "names"
+    else
+        st.phase = "players"
     end
+    return "next"
+end
 
-    local function current_free_teamid(pid)
-        local exists_fn = rawget(_G, "PlayerExists")
-        local team_fn = rawget(_G, "GetTeamIdFromPlayerId")
-        if type(exists_fn) ~= "function" or type(team_fn) ~= "function" then
-            diagnostics.host_checks_unavailable = diagnostics.host_checks_unavailable + 1
-            return nil
+SQUAD_PHASES.names = function(st, deadline)
+    local names, squad_ids, edited_names = st.names_h, st.squad_ids, st.edited_names
+    local has_first, has_surname, has_common = st.has_first, st.has_surname, st.has_common
+    local r = squad_walk(st, "names", names, function(rec)
+        local pid = tonumber(names:get("playerid", rec))
+        if pid and squad_ids[pid] then
+            local common = has_common and tostring(names:get("commonname", rec) or "") or ""
+            local first = has_first and tostring(names:get("firstname", rec) or "") or ""
+            local surname = has_surname and tostring(names:get("surname", rec) or "") or ""
+            local display = common ~= "" and common
+                or (first .. " " .. surname):gsub("^%s+", ""):gsub("%s+$", "")
+            if display ~= "" then edited_names[pid] = display end
         end
-        local ok_exists, raw_exists = pcall(exists_fn, pid)
-        if not ok_exists or not host_yes(raw_exists) then return nil end
-        local ok_team, raw_teamid = pcall(team_fn, pid)
-        local live_tid = ok_team and tonumber(raw_teamid) or nil
-        if live_tid == 0 or live_tid == 111592 then return live_tid end
-        diagnostics.rejected_not_free = diagnostics.rejected_not_free + 1
-        return nil
-    end
+    end, deadline)
+    if r == "next" then st.phase = "players" end
+    return r
+end
 
-    local function clean_free_candidate(pid, prec)
-        for _, fn_name in ipairs({ "IsPlayerPresigned", "IsPlayerLoanedOut" }) do
-            local fn = rawget(_G, fn_name)
-            if type(fn) ~= "function" then
-                diagnostics.host_checks_unavailable = diagnostics.host_checks_unavailable + 1
-                return false
-            end
-            local ok, active = pcall(fn, pid)
-            if not ok then
-                diagnostics.host_checks_unavailable = diagnostics.host_checks_unavailable + 1
-                return false
-            end
-            if host_yes(active) then
-                diagnostics.rejected_presigned_or_loaned = diagnostics.rejected_presigned_or_loaned + 1
-                return false
-            end
-        end
-        local rating = tonumber(ph:get("overallrating", prec))
-        if db.field("players", "isretiring") == nil then
-            diagnostics.host_checks_unavailable = diagnostics.host_checks_unavailable + 1
-            return false
-        end
-        local retiring = tonumber(ph:get("isretiring", prec))
-        if not rating or rating > 75 or retiring == nil or retiring ~= 0 then
-            diagnostics.rejected_rating_or_retirement = diagnostics.rejected_rating_or_retirement + 1
-            return false
-        end
-        return true, rating
-    end
-
-    local free_candidates, seen_free = {}, {}
-    local free_checks = 0
-    local function add_free_candidate(pid, prec)
-        if seen_free[pid] or free_checks >= FREE_AGENT_CHECK_CAP then return end
-        if not pid or pid <= 0 or pid > 459999 or squad_ids[pid] then return end
-        local rating_now = tonumber(ph:get("overallrating", prec))
-        if not rating_now or rating_now > 75 then
-            diagnostics.rejected_rating_or_retirement = diagnostics.rejected_rating_or_retirement + 1
-            return
-        end
-        free_checks = free_checks + 1
-        diagnostics.template_candidates = diagnostics.template_candidates + 1
-        local live_tid = current_free_teamid(pid)
-        if not live_tid then return end
-        local clean, rating = clean_free_candidate(pid, prec)
-        if not clean then return end
-        seen_free[pid] = true
-        local entry = {
-            playerid = pid, teamid = live_tid, overallrating = rating,
-            source = "free_agent_template",
-        }
-        if type(rawget(_G, "GetPlayerName")) == "function" then
-            local ok, name = pcall(_G.GetPlayerName, pid)
-            if ok and name then entry.name = tostring(name) end
-        end
-        free_candidates[#free_candidates + 1] = entry
-        diagnostics.accepted = diagnostics.accepted + 1
-    end
-
-    -- One valid-record pass remains necessary for safe DB record addresses,
-    -- but all native free-agent checks are bounded to the explicit 30 IDs.
-    for prec in ph:records() do
+-- One valid-record pass remains necessary for safe DB record addresses, but
+-- all native free-agent checks are bounded to the explicit 30 IDs.
+SQUAD_PHASES.players = function(st, deadline)
+    local ph, squad_ids, players = st.ph, st.squad_ids, st.players
+    local edited_names, jersey_by_id = st.edited_names, st.jersey_by_id
+    local planning_fields, teamid, teamname = st.planning_fields, st.teamid, st.teamname
+    local template_ids, free_ids = st.template_ids, st.free_ids
+    local seen_players = st.opts.dedupe and st.seen_players or nil
+    local r = squad_walk(st, "players", ph, function(prec)
         local pid = tonumber(ph:get("playerid", prec))
         if pid and squad_ids[pid] then
+            if seen_players then
+                if seen_players[pid] then return end
+                seen_players[pid] = true
+            end
             local entry = {
                 playerid = pid, teamid = teamid, teamname = teamname,
                 jerseynumber = jersey_by_id[pid] or 0,
@@ -640,35 +808,35 @@ ops.handlers["export_squad"] = function(op, job, ctx)
                 if ok and position then entry.position = tostring(position) end
             end
             players[#players + 1] = entry
+            return true
         elseif pid and (template_ids[pid] or free_ids[pid]) then
-            add_free_candidate(pid, prec)
+            squad_add_free_candidate(st, pid, prec)
+            return true
         end
-    end
+    end, deadline)
+    if r == "next" then st.phase = "finish" end
+    return r
+end
 
+SQUAD_PHASES.finish = function(st)
+    local players, free_agents, free_candidates = st.players, st.free_agents, st.free_candidates
+    local teamid, teamname = st.teamid, st.teamname
     table.sort(free_candidates, function(a, b)
         if a.overallrating == b.overallrating then return a.playerid < b.playerid end
         return a.overallrating < b.overallrating
     end)
-    for i = 1, math.min(FREE_AGENT_KEEP, #free_candidates) do free_agents[i] = free_candidates[i] end
+    for i = 1, math.min(SQUAD_FREE_AGENT_KEEP, #free_candidates) do free_agents[i] = free_candidates[i] end
 
+    st.phase = "done"
     if #players == 0 then
-        return {
-            ok = false, deferred = true, awaiting_event = true,
-            reason = "db_not_ready",
-            detail = "team " .. tostring(teamid) .. " membership is not readable yet",
-            counts = { targets = 0, found = 0 },
-            progress = {
-                step = 1, attempts = 0, started_at = util.now(),
-                reason = "db_not_ready", teamid = teamid,
-                counts = { targets = 0, found = 0 },
-            },
-        }
+        st.result = squad_not_ready(teamid)
+        return "next"
     end
 
-    local out_path = op.out_path
+    local out_path = st.op.out_path
     if type(out_path) == "string" and out_path ~= "" then
         local allowed = false
-        local roots = (ctx.cfg and ctx.cfg.allowed_write_roots) or {}
+        local roots = (st.ctx.cfg and st.ctx.cfg.allowed_write_roots) or {}
         local norm = util.normalize(out_path)
         for i = 1, #roots do
             local root = util.normalize(roots[i]):lower()
@@ -681,11 +849,32 @@ ops.handlers["export_squad"] = function(op, job, ctx)
         end
     end
 
-    return ok_result({
+    st.result = ok_result({
         teamid = teamid, teamname = teamname, players = players,
-        free_agents = free_agents, free_agent_diagnostics = diagnostics,
+        free_agents = free_agents, free_agent_diagnostics = st.diagnostics,
         count = #players,
     }, { targets = #players, found = #players })
+    return "next"
+end
+
+--- Advance an export. deadline nil runs to the end (export_squad). Returns
+--- "done" (st.result is the handler result), "more" (budget spent, call
+--- again later) or "stale" (a paused walk was invalidated; start over).
+function ops.squad_export_step(st, deadline)
+    while st.phase ~= "done" do
+        local phase = SQUAD_PHASES[st.phase]
+        if phase == nil then
+            st.result = fail_result("export_phase", "unknown export phase " .. tostring(st.phase))
+            st.phase = "done"
+            break
+        end
+        local r = phase(st, deadline)
+        if r ~= "next" then return r end
+        if deadline ~= nil and st.phase ~= "done" and util.clock() >= deadline then
+            return "more"
+        end
+    end
+    return "done"
 end
 
 -------------------------------------------------------------------------------

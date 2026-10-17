@@ -1271,7 +1271,10 @@ class Shell:
         ]
         if auto_sync:
             from ..app.commands.squad import ensure_squad_fresh
+            from ..app.commands.squad_mirror import poll_mirror
 
+            # Mirror first: a fresh live mirror makes the export unnecessary.
+            steps.append(("mirror", lambda: poll_mirror(self.svc)))
             steps.append(("squad", lambda: ensure_squad_fresh(self.svc)))
             from ..app.commands.signed_portraits import sync as sync_portraits
             steps.append(("portraits", lambda: sync_portraits(self.svc)))
@@ -1281,6 +1284,13 @@ class Shell:
             except Exception as exc:  # noqa: BLE001
                 log.exception("shell poll step %s failed", name)
                 self._report_poll_error(exc)
+        if self.active == "club":
+            # The "Live · updated N s ago" line ages with this 1 s poll; no
+            # timer of its own (UI animation loops froze v1).
+            try:
+                self.svc.executor.on_ui_thread(self._tick_club_live)
+            except Exception:
+                pass
         from ..app.commands.sync_trace import sync_debug_enabled, sync_log
 
         if sync_debug_enabled():
@@ -1298,6 +1308,17 @@ class Shell:
                 f"players={len(state.squad.players)} stale={state.squad.stale} "
                 f"sync_active={_sync_squad_active(state)} failures={memory.failures} retry_after={retry}",
             )
+
+    def _tick_club_live(self) -> None:
+        widget = self._surfaces.get("club")
+        refresh = getattr(widget, "refresh_live_indicator", None) if widget else None
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                from ..core.log import get_logger
+
+                get_logger("ui.club").exception("club live indicator refresh failed")
 
     # ---- lifecycle ------------------------------------------------------
 

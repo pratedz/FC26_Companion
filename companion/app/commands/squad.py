@@ -82,6 +82,13 @@ def ensure_squad_fresh(svc: Services) -> str | None:
         memory.last_error = ""
         _trace_skip(svc, "fresh")
         return None
+    from .squad_mirror import awaiting_mirror
+
+    if awaiting_mirror(svc):
+        # A write just landed and the live mirror is about to show it. An
+        # export now would block the game for seconds to read the same rows.
+        _trace_skip(svc, "mirror_pending")
+        return None
     reason = _queue_reason(svc)
     try:
         ticket = sync_squad(svc)
@@ -360,26 +367,62 @@ def _ingest(svc: Services, result: JobResult) -> None:
             )
         )
         return
-    players: Sequence[Mapping[str, Any]] = ()
-    free_agents: Sequence[Mapping[str, Any]] = ()
-    teamid: int | None = None
+    data: Mapping[str, Any] = {}
     for op in result.ops:
         if op.op == "export_squad":
             data = dict(op.data)
-            raw = data.get("players")
-            if isinstance(raw, list):
-                players = [_with_squad_age(p) for p in raw if isinstance(p, Mapping)]
-            raw_free = data.get("free_agents")
-            if isinstance(raw_free, list):
-                free_agents = [
-                    p for p in raw_free if isinstance(p, Mapping)
-                ]
-            tid = data.get("teamid")
-            teamid = int(tid) if isinstance(tid, (int, float)) else None
+    fallback_teamid: int | None = None
+    env_tid = result.env.get("user_teamid")
+    if isinstance(env_tid, (int, float)):
+        fallback_teamid = int(env_tid)
+    ingest_squad_data(
+        svc,
+        data,
+        save_uid=str(result.env.get("save_uid", "")),
+        session_id=result.session_id or live.session_id,
+        job_id=result.job_id,
+        fallback_teamid=fallback_teamid,
+    )
+
+
+def ingest_squad_data(
+    svc: Services,
+    data: Mapping[str, Any],
+    *,
+    save_uid: str,
+    session_id: str,
+    job_id: str = "",
+    fallback_teamid: int | None = None,
+    source: str = "export",
+) -> bool:
+    """Publish one export_squad ``data`` payload: store, save snapshot, target.
+
+    The only squad ingest. An export_squad result and the core's live squad
+    mirror (``squad_mirror.py``) both land here, so Club, Player and the
+    planner see the same rows whichever produced them. A mirror carries no
+    free-agent probe; it keeps the last probe of the same save and club.
+    Returns False when ``data`` had no players (nothing was replaced).
+    """
+    players: Sequence[Mapping[str, Any]] = ()
+    free_agents: Sequence[Mapping[str, Any]] = ()
+    raw = data.get("players")
+    if isinstance(raw, list):
+        players = [_with_squad_age(p) for p in raw if isinstance(p, Mapping)]
+    tid = data.get("teamid")
+    teamid = int(tid) if isinstance(tid, (int, float)) else None
+    raw_free = data.get("free_agents")
+    if isinstance(raw_free, list):
+        free_agents = [p for p in raw_free if isinstance(p, Mapping)]
+    elif source == "mirror":
+        current = svc.store.snapshot().squad
+        if current.save_uid == save_uid and current.teamid == teamid:
+            free_agents = list(current.free_agents)
     if not players:
+        if source == "mirror":
+            return False
         _note_squad_result(
             svc,
-            job_id=result.job_id,
+            job_id=job_id,
             ok=False,
             reason="no squad players",
         )
@@ -389,17 +432,15 @@ def _ingest(svc: Services, result: JobResult) -> None:
                 "and try Refresh squad; no cached squad was replaced."
             )
         )
-        return
-    save_uid = str(result.env.get("save_uid", ""))
+        return False
     if teamid is None:
-        env_tid = result.env.get("user_teamid")
-        teamid = int(env_tid) if isinstance(env_tid, (int, float)) else None
+        teamid = fallback_teamid
     game_names = _game_names(players)
     players = _with_signed_names(svc, players, save_uid=save_uid)
     svc.store.dispatch(
         E.SquadSynced(
             save_uid=save_uid,
-            session_id=result.session_id or live.session_id,
+            session_id=session_id,
             teamid=teamid,
             players=players,
             taken=svc.clock.now(),
@@ -407,12 +448,16 @@ def _ingest(svc: Services, result: JobResult) -> None:
             game_names=game_names,
         )
     )
-    _note_squad_result(svc, job_id=result.job_id, ok=True)
+    if source == "export":
+        _note_squad_result(svc, job_id=job_id, ok=True)
+        # An export reads after every write queued before it: nothing is owed.
+        svc.squad_sync.mirror.pending_writes.clear()
+        svc.squad_sync.mirror.waiting_since_ts = None
     from .sync_trace import sync_log
 
     sync_log(
         "SQUAD",
-        f"success players={len(players)} session_id={result.session_id or live.session_id or '-'} "
+        f"success source={source} players={len(players)} session_id={session_id or '-'} "
         f"save_uid={save_uid or '-'} teamid={teamid if teamid is not None else '-'}",
     )
     if svc.db is not None:
@@ -420,7 +465,7 @@ def _ingest(svc: Services, result: JobResult) -> None:
             save_uid=save_uid,
             kind="squad",
             payload={
-                "session_id": result.session_id or live.session_id,
+                "session_id": session_id,
                 "teamid": teamid,
                 "players": list(players),
                 "free_agents": list(free_agents),
@@ -430,11 +475,14 @@ def _ingest(svc: Services, result: JobResult) -> None:
             stale=False,
         )
     _reconcile_target(svc, players, teamid)
-    svc.store.dispatch(
-        E.StatusSet(f"Squad ready — {len(players)} live player(s) read.")
-    )
+    if source == "export":
+        # The mirror updates quietly; a status line per change would be noise.
+        svc.store.dispatch(
+            E.StatusSet(f"Squad ready — {len(players)} live player(s) read.")
+        )
     from .signed_portraits import sync as sync_portraits
     svc.executor.submit("signed-portraits", lambda _token: sync_portraits(svc))
+    return True
 
 
 def _reconcile_target(
@@ -469,12 +517,18 @@ def _reconcile_target(
         svc.store.dispatch(E.TargetCleared())
 
 
-def invalidate(svc: Services, reason: str = "") -> None:
+def invalidate(svc: Services, reason: str = "", *, job_id: str = "") -> None:
     """Any successful write job invalidates the squad view.
 
     The UI renders staleness rather than silently showing an old number — a
-    value you did not just read is never presented as current.
+    value you did not just read is never presented as current. With
+    ``job_id`` the live squad mirror may clear it, but only with a mirror
+    built after that job ran (it lists the job in ``writes_seen``).
     """
+    if job_id:
+        from .squad_mirror import note_pending_write
+
+        note_pending_write(svc, job_id)
     svc.store.dispatch(E.SquadInvalidated(reason=reason))
     if svc.db is not None:
         uid = svc.store.snapshot().squad.save_uid or None
@@ -491,5 +545,11 @@ def is_stale(svc: Services) -> bool:
         return True
     if sq.stale or sq.taken is None:
         return True
+    from .squad_mirror import mirror_tracking
+
+    # While the core keeps the live mirror current, age alone proves nothing:
+    # an unchanged squad simply produces no new file.
+    if mirror_tracking(svc):
+        return False
     age = sq.age_seconds(svc.clock.now())
     return age is None or age > TTL_SECONDS

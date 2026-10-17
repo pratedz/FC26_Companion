@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
+from ...app.commands.squad_mirror import apply_mirror_tracking, live_indicator_text
 from ...app.presenters import liveness_view, squad_view
 from .. import theme
 from ..widgets.primitives import (
@@ -23,6 +24,7 @@ from ..widgets.primitives import (
     set_disabled,
     text_label,
     tooltip,
+    update_pill,
 )
 from ..widgets.states import loading_row, skeleton_table
 from ..widgets.table import Column, DataGrid, TableModel
@@ -53,7 +55,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     live = liveness_view(state.bridge.liveness)
     # Explicit clock so age/TTL captions are real (tests inject fixed now via clock).
     now = svc.clock.now() if getattr(svc, "clock", None) is not None else None
-    squad = squad_view(state, now=now)
+    squad = club_squad_view(svc, state, now)
     worker = _worker_status()
 
     sync_pending = any(
@@ -96,6 +98,11 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     return root
 
 
+def club_squad_view(svc: Any, state: Any, now: Any) -> dict[str, Any]:
+    """squad_view, minus the TTL "aged" flag while the live mirror tracks."""
+    return apply_mirror_tracking(squad_view(state, now=now), svc)
+
+
 def club_phase(*, has_players: bool, sync_pending: bool) -> str:
     """setup, reading, or board. Shared by build() and tests."""
     if has_players:
@@ -129,7 +136,7 @@ def refresh_club_selection(svc: Any, view: dict[str, Any]) -> bool:
         view["recently_added"] = False
         set_status(svc, "These players belong to another Career save or club. Refresh and select this squad.")
         return False
-    if squad_view(state, now=svc.clock.now()).get("stale") or not squad.taken or not uid or scope != (uid, tid):
+    if club_squad_view(svc, state, svc.clock.now()).get("stale") or not squad.taken or not uid or scope != (uid, tid):
         view["checked_ids"] = []
         return False
     roster_ids = {int(row.get("playerid") or row.get("id")) for row in squad.players
@@ -489,6 +496,33 @@ def _build_squad(
         ovr=avg_ovr,
     )
     identity.pack(side="left", fill="x", expand=True)
+
+    # "Live · updated 3 s ago" beside the caption while the core's live squad
+    # mirror has just updated. The shell's 1 s poll re-ages it; no timer here.
+    live_badge: dict[str, Any] = {"pill": None, "shown": False}
+    caption_row = getattr(getattr(identity, "caption_label", None), "master", None)
+
+    def refresh_live_indicator() -> None:
+        text = live_indicator_text(svc)
+        badge = live_badge["pill"]
+        if not text:
+            if badge is not None and live_badge["shown"]:
+                badge.pack_forget()
+                live_badge["shown"] = False
+            return
+        if badge is None:
+            if caption_row is None:
+                return
+            badge = pill(caption_row, text, tone="ok")
+            live_badge["pill"] = badge
+        else:
+            update_pill(badge, text, tone="ok")
+        if not live_badge["shown"]:
+            badge.pack(side="left", padx=(theme.SP2, 0))
+            live_badge["shown"] = True
+
+    refresh_live_indicator()
+    root.refresh_live_indicator = refresh_live_indicator
     refresh_is_primary = bool(squad.get("needs_refresh") or squad.get("stale")) and not sync_pending
     button(
         head, "Reading squad…" if sync_pending else "Refresh squad", lambda: _read_squad(svc),
@@ -814,7 +848,7 @@ def _build_squad(
         refresh_club_selection(svc, view)
         state_now = svc.store.snapshot()
         now_at = svc.clock.now() if getattr(svc, "clock", None) is not None else None
-        fresh = squad_view(state_now, now=now_at)
+        fresh = club_squad_view(svc, state_now, now_at)
         pending_now = any(
             (not job.done) and job.label == "Sync squad"
             for job in state_now.jobs.active.values()
@@ -840,6 +874,7 @@ def _build_squad(
             from ...core.log import get_logger
 
             get_logger("ui.club").exception("club caption refresh failed")
+        refresh_live_indicator()
         apply_filter()
         return True
 

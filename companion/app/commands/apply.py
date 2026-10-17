@@ -102,7 +102,7 @@ def submit_job(
             if outcome is ApplyOutcome.APPLIED and _is_write_job(job):
                 from .squad import invalidate
 
-                invalidate(svc, reason=f"{job.label or job_id} applied")
+                invalidate(svc, reason=f"{job.label or job_id} applied", job_id=job_id)
             if on_result is not None:
                 on_result(captured)
 
@@ -541,7 +541,7 @@ def collect_finished(svc: Services) -> list[JobResult]:
                 _commit_recorded_editor_patch(svc, job_id, res)
                 from .squad import invalidate
 
-                invalidate(svc, reason=f"{res.label or job_id} applied")
+                invalidate(svc, reason=f"{res.label or job_id} applied", job_id=job_id)
             out.append(res)
     for job_id in svc.transport.sweep_crashed():
         res = svc.transport.result(job_id)
