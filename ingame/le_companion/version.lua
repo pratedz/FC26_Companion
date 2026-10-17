@@ -30,7 +30,7 @@ WHY THIS MODULE EXISTS
 local version = {}
 
 -- Semantic version of the resident core. Bump on any behaviour change.
-version.VERSION = "2.6.40"
+version.VERSION = "2.6.41"
 
 -- Wire protocol contract number. Job envelopes carry `"schema": 3`; results
 -- carry `"schema": 3`. This is PROTOCOL v3 (docs/V2_ARCHITECTURE.md §3), one
@@ -98,6 +98,7 @@ version.CAPABILITIES = {
     squad_room_check  = true,   -- add_to_team counts squad + loans before any write
     restore_partial_add = true, -- pre-write values captured; partial dummies restorable
     names_sync        = true,   -- names.sync: check & fix signed players' in-game names
+    mirror_after_write = true,  -- 2.6.41: squad.json rebuilt in the hub frame a write job finished in
 }
 
 --[[ Hard limits. Every one of these is a number that broke something once.
@@ -140,6 +141,8 @@ version.LIMITS = {
     mirror_retry_s       = 30,
     mirror_writes_kept   = 16,
     mirror_max_restarts  = 3,
+    -- 2.6.41: one-shot rebuild budget right after a write job (0 = off).
+    mirror_after_write_ms = 5000,
 }
 
 -- Convenience: the op-name set, derived so it can never drift from OP_VERSIONS.

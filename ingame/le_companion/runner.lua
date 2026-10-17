@@ -28,6 +28,7 @@ runner._cache_dirty = true
 -- Bumped whenever a job is claimed or resumed. Jobs walk the same native
 -- table cursors as the squad mirror, so a paused mirror build restarts.
 runner._pump_gen = 0
+runner._pump_wrote = false   -- a write job ran in the current pump
 runner.mirror = mirror
 
 local FAST_READ_WAKE = "_fast_read"
@@ -109,6 +110,7 @@ end
 local function note_write_job(job)
     if mirror and job_may_write(job) then
         mirror.note_write(job.job_id)
+        runner._pump_wrote = true
     end
 end
 
@@ -980,10 +982,18 @@ function runner.on_career(event_id, phase)
         runner._awaiting_event = false
         runner.start_fast_read_timer()
         local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
+        runner._pump_wrote = false
         local pumped = runner.pump("event:" .. events.name(event_id), deadline)
-        -- Without the native plugin this is the mirror's only chance to run:
-        -- whatever is left of the same drain budget.
-        if not util.expired(deadline) then
+        if runner._pump_wrote and not runner._awaiting_event then
+            -- A write job finished on this settled hub. Without the native
+            -- tick the app's follow-up export would wait for the *next* hub
+            -- event (day advances never count), so the Club kept showing the
+            -- old squad for minutes. Rebuild the mirror now: the same read
+            -- the export would do, one frame earlier.
+            util.pcall_named("mirror", runner.settle_mirror, "hub_write")
+        elseif not util.expired(deadline) then
+            -- Without the native plugin this is the mirror's only chance to
+            -- run: whatever is left of the same drain budget.
             util.pcall_named("mirror", runner.tick_mirror, "hub", deadline)
         end
         return pumped
@@ -1172,6 +1182,23 @@ function runner.tick_mirror(source, deadline)
         emit("mirror tick failed: " .. tostring(result.message or result))
         return "failed"
     end
+    return result
+end
+
+--- Finish a mirror rebuild in one go after a write job (2.6.41). Bounded by
+--- LIMITS.mirror_after_write_ms; anything left over continues on later ticks.
+--- Only called from the hub callback, which owns _handling_hub.
+local SETTLE_AGAIN = { building = true, restarted = true, stale = true, incomplete = true }
+
+function runner.settle_mirror(source)
+    local budget = version.LIMITS.mirror_after_write_ms or 5000
+    if budget <= 0 then return "off" end
+    local deadline = util.deadline(budget)
+    local result
+    repeat
+        result = runner.tick_mirror("hub", deadline)
+    until not SETTLE_AGAIN[result] or util.expired(deadline)
+    emit("mirror after write (" .. tostring(source) .. "): " .. tostring(result))
     return result
 end
 

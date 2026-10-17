@@ -38,6 +38,9 @@ from ..services import Services
 # event. v1's single 55-second wall-clock timeout was simply wrong whenever the
 # user was sitting in a menu, because no Career Mode event was coming.
 FOLLOW_SECONDS = 45.0
+# A partial write (e.g. 8 of 11 signings) changed the squad as surely as a
+# full one; leaving it unflagged showed the old squad until the 2 min TTL.
+SQUAD_CHANGING_OUTCOMES = frozenset({ApplyOutcome.APPLIED, ApplyOutcome.PARTIAL})
 # A queue file may take a moment to appear/rename. Do not classify a fresh
 # submission as a ghost just because the app polls between those operations.
 MISSING_QUEUE_GRACE_SECONDS = 60.0
@@ -99,7 +102,7 @@ def submit_job(
             else:
                 svc.store.dispatch(E.JobProgressed(job_id=job_id, result=captured))
             svc.store.dispatch(E.StatusSet(_status_line(captured)))
-            if outcome is ApplyOutcome.APPLIED and _is_write_job(job):
+            if outcome in SQUAD_CHANGING_OUTCOMES and _is_write_job(job):
                 from .squad import invalidate
 
                 invalidate(svc, reason=f"{job.label or job_id} applied", job_id=job_id)
@@ -537,8 +540,9 @@ def collect_finished(svc: Services) -> list[JobResult]:
             from .squad import ingest_result
 
             ingest_result(svc, res)
-            if res.outcome is ApplyOutcome.APPLIED and _is_recorded_write(svc, job_id):
-                _commit_recorded_editor_patch(svc, job_id, res)
+            if res.outcome in SQUAD_CHANGING_OUTCOMES and _is_recorded_write(svc, job_id):
+                if res.outcome is ApplyOutcome.APPLIED:
+                    _commit_recorded_editor_patch(svc, job_id, res)
                 from .squad import invalidate
 
                 invalidate(svc, reason=f"{res.label or job_id} applied", job_id=job_id)

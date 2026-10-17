@@ -405,3 +405,29 @@ def test_shell_polls_the_mirror_before_the_export_coordinator_and_ages_the_indic
     club = (ROOT / "companion" / "ui" / "surfaces" / "club.py").read_text(encoding="utf-8")
     assert "root.refresh_live_indicator = refresh_live_indicator" in club
     assert "after(" not in club.split("def refresh_live_indicator", 1)[1].split("refresh_is_primary", 1)[0]
+
+
+def test_core_that_rebuilds_after_writes_holds_the_export_without_native(tmp_path):
+    """Core 2.6.41 publishes the mirror in the write's own hub frame, so a
+    follow-up export (which needs a second hub event) is only a fallback."""
+    svc = _svc(tmp_path, native=False)
+    live = svc.transport.liveness()
+    caps = dict(live.capabilities or {}, hub_ready=True, mirror_after_write=True)
+    svc.transport.set_liveness(replace(live, capabilities=caps))
+    refresh_liveness(svc)
+    _write_mirror(svc, _mirror())
+    assert sm.poll_mirror(svc) == "ingested"
+    invalidate(svc, reason="signing applied", job_id="01JWRITE00000000000000000A")
+    assert sm.awaiting_mirror(svc) is True
+    assert ensure_squad_fresh(svc) is None
+    assert svc.transport.submitted == []
+    svc.clock.advance(sm.grace_seconds(svc) + 1)
+    assert ensure_squad_fresh(svc) is not None
+
+
+def test_older_core_without_native_falls_back_to_the_export_at_once(tmp_path):
+    svc = _svc(tmp_path, native=False)
+    _write_mirror(svc, _mirror())
+    assert sm.poll_mirror(svc) == "ingested"
+    invalidate(svc, reason="signing applied", job_id="01JWRITE00000000000000000A")
+    assert sm.awaiting_mirror(svc) is False

@@ -81,7 +81,7 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         section_header(
             root,
             "Reading your squad",
-            subtitle="Keep Career Mode open. The list appears when the live export finishes.",
+            subtitle="The list appears when FC runs the read. " + _GAME_TRIGGER_HINT,
         )
         banner = panel(root, level=1)
         banner.pack(fill="x", pady=(0, theme.SP3))
@@ -96,6 +96,21 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
             root, svc, live, squad, worker, view, sync_pending=sync_pending,
         )
     return root
+
+
+# Jobs (and squad reads) run only on these two FC screens; the user cannot
+# know that, and a day advance looked like it should have been enough.
+_GAME_TRIGGER_HINT = "In FC, open Squad (Team Management) or go back to the Career hub; advancing days does not trigger it."
+
+
+def _mirror_due(svc: Any) -> bool:
+    """The core is about to publish the squad a write just changed."""
+    try:
+        from ...app.commands.squad_mirror import awaiting_mirror
+
+        return awaiting_mirror(svc)
+    except Exception:  # noqa: BLE001 - a stand-in services object
+        return False
 
 
 def club_squad_view(svc: Any, state: Any, now: Any) -> dict[str, Any]:
@@ -540,11 +555,19 @@ def _build_squad(
         svc=svc,
     )
 
+    mirror_due = bool(squad.get("stale")) and _mirror_due(svc)
     if not live["armed"] or squad.get("stale") or sync_pending:
         sync_strip = panel(root, level=1)
         sync_strip.pack(fill="x", pady=(0, theme.SP3))
         if sync_pending:
-            loading_row(sync_strip, "Reading squad… Keep Career Mode open.").pack(
+            loading_row(sync_strip, "Reading squad… waiting for FC.").pack(
+                anchor="w", padx=theme.SP4, pady=(theme.SP3, 0)
+            )
+            muted_label(sync_strip, _GAME_TRIGGER_HINT, size=theme.T_SMALL).pack(
+                anchor="w", padx=theme.SP4, pady=(theme.SP1, theme.SP3)
+            )
+        elif mirror_due:
+            loading_row(sync_strip, "Updating squad from the game…").pack(
                 anchor="w", padx=theme.SP4, pady=theme.SP3
             )
         elif not live["armed"]:
@@ -562,7 +585,7 @@ def _build_squad(
             pill(row, "Stale", tone="warn").pack(side="left")
             muted_label(
                 row,
-                "This squad may be out of date. Refresh when Career Mode is ready.",
+                "This squad may be out of date. Refresh, then open Squad in FC to run the read.",
                 size=theme.T_SMALL,
             ).pack(side="left", padx=(theme.SP2, 0))
 

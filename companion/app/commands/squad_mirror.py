@@ -262,12 +262,26 @@ def grace_seconds(svc: Services) -> float:
     return max(GRACE_MIN_SECONDS, min(GRACE_MAX_SECONDS, 2.0 * build + 10.0))
 
 
+def rebuilds_after_write(svc: Services) -> bool:
+    """True when the live core writes a mirror in the hub frame a write ran in.
+
+    Core 2.6.41+ advertises ``mirror_after_write``. It needs no native tick,
+    so the squad changed by a signing, release or edit arrives without a
+    second hub event.
+    """
+    live = svc.store.snapshot().bridge.liveness
+    caps = live.capabilities or {}
+    if not live.armed or not live.session_id:
+        return False
+    return bool(caps.get("mirror_after_write")) and bool(caps.get("hub_ready"))
+
+
 def awaiting_mirror(svc: Services) -> bool:
     """Hold the export fallback while a post-write mirror is due."""
     memory = svc.squad_sync.mirror
     if not memory.pending_writes or memory.waiting_since_ts is None:
         return False
-    if not mirror_tracking(svc):
+    if not (mirror_tracking(svc) or rebuilds_after_write(svc)):
         return False
     return (svc.clock.now_ts() - memory.waiting_since_ts) < grace_seconds(svc)
 

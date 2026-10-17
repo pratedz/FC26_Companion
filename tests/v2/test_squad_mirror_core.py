@@ -823,3 +823,51 @@ def test_no_club_yet_probes_once_per_check_interval(core):
     assert outs.count("no_team") == 2
     assert not core.mirror_file.exists()
     assert core.eval("host_calls") - calls <= 6
+
+
+# ---- 2.6.41: the mirror is published in the hub frame a write finished in --
+
+def test_write_job_publishes_the_mirror_in_the_same_hub_event(core):
+    assert core.eval("LEC.native.loaded") is False
+    core.run("FIELD_COST = 0.002")  # the 120 ms drain budget alone cannot finish a walk
+    core.settle_hub()
+    _write_job(core, ULID_A, {
+        "op": "set_fields", "table": "players",
+        "key": {"field": "playerid", "value": 1042},
+        "fields": {"overallrating": 88}, "growth_mirror": "off",
+    })
+    core.advance(2.0)
+    core.hub()  # one event: the write, then the whole mirror
+    m = core.mirror()
+    assert m["writes_seen"] == [ULID_A]
+    assert _row(m, 1042)["overallrating"] == 88
+    assert core.eval("LEC.mirror._build == nil")
+
+
+def test_read_only_job_does_not_force_a_full_mirror(core):
+    core.run("FIELD_COST = 0.002")
+    core.settle_hub()
+    _write_job(core, ULID_A, {"op": "diag.ping"})
+    core.advance(2.0)
+    core.hub()
+    assert not core.mirror_file.exists(), "only the leftover drain slice ran"
+
+
+def test_after_write_rebuild_can_be_turned_off(core):
+    core.run("FIELD_COST = 0.002; require('version').LIMITS.mirror_after_write_ms = 0")
+    core.settle_hub()
+    _write_job(core, ULID_A, {
+        "op": "set_fields", "table": "players",
+        "key": {"field": "playerid", "value": 1042},
+        "fields": {"overallrating": 88}, "growth_mirror": "off",
+    })
+    core.advance(2.0)
+    core.hub()
+    assert not core.mirror_file.exists()
+
+
+def test_session_advertises_mirror_after_write(core):
+    core.hub()
+    session = json.loads((core.queue / "session.json").read_text(encoding="utf-8"))
+    assert session["capabilities"]["mirror_after_write"] is True
+    assert session["limits"]["mirror_after_write_ms"] == 5000
