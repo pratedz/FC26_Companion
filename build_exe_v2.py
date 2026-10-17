@@ -152,7 +152,7 @@ def main() -> int:
 
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", "-q",
-         "pyinstaller", "customtkinter", "pillow", "darkdetect", "openai"]
+         "pyinstaller", "customtkinter", "pillow", "darkdetect", "openai", "anthropic>=1,<2"]
     )
 
     sep = ";" if sys.platform == "win32" else ":"
@@ -182,6 +182,14 @@ def main() -> int:
         "--hidden-import", "PIL._tkinter_finder",
         "--hidden-import", "openai",
         "--collect-submodules", "openai",
+        # Claude (proxy): anthropic 1.x runs on httpx2/httpcore2 (+ truststore).
+        "--hidden-import", "anthropic",
+        "--collect-submodules", "anthropic",
+        "--hidden-import", "httpx2",
+        "--collect-submodules", "httpx2",
+        "--hidden-import", "httpcore2",
+        "--collect-submodules", "httpcore2",
+        "--hidden-import", "truststore",
         "--collect-all", "customtkinter",
         "--collect-all", "darkdetect",
     ]

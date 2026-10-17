@@ -842,7 +842,8 @@ class Shell:
 
         ai = group(
             "AI provider",
-            subtitle="Pick Codex account or OpenAI API key. One choice and one model for Club, Player, and Sign.",
+            subtitle="Pick Codex account, OpenAI API key, or the local Claude proxy. "
+            "One choice for Club, Player, and Sign; Speed trades depth for time.",
         )
         from .widgets.ai_bar import mount_ai_settings
 

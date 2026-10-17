@@ -24,7 +24,8 @@ def test_codex_json_body_sets_stream_true_and_store_false() -> None:
     assert '"stream": true' in dumped
     assert '"store": false' in dumped
     assert body["model"] == "gpt-6-luna"
-    assert body["reasoning"]["effort"] == "high"
+    # Default Speed for Codex/OpenAI is Balanced (medium), adjustable per provider.
+    assert body["reasoning"]["effort"] == "medium"
 
 
 def test_codex_json_object_input_contains_json_even_for_plain_player_prompts() -> None:
