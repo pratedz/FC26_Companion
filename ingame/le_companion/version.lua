@@ -30,7 +30,7 @@ WHY THIS MODULE EXISTS
 local version = {}
 
 -- Semantic version of the resident core. Bump on any behaviour change.
-version.VERSION = "2.6.38"
+version.VERSION = "2.6.39"
 
 -- Wire protocol contract number. Job envelopes carry `"schema": 3`; results
 -- carry `"schema": 3`. This is PROTOCOL v3 (docs/V2_ARCHITECTURE.md §3), one
@@ -94,6 +94,7 @@ version.CAPABILITIES = {
     http_push         = false,  -- SendHTTPRequest blocks the game thread; opt-in
     execute_sql       = false,
     native_tick       = true,   -- 2.6.38: lec_native.dll tick when loaded and verified
+    squad_mirror      = true,   -- 2.6.39: queue/mirror/squad.json kept fresh on a settled hub
     squad_room_check  = true,   -- add_to_team counts squad + loans before any write
     restore_partial_add = true, -- pre-write values captured; partial dummies restorable
     names_sync        = true,   -- names.sync: check & fix signed players' in-game names
@@ -132,6 +133,13 @@ version.LIMITS = {
     log_tail_lines       = 120,
     next_free_id_probes  = 64,
     max_squad_with_loans = 52,
+    -- 2.6.39 squad mirror (mirror.lua defaults to the same values).
+    mirror_tick_ms       = 25,
+    mirror_check_ms      = 1000,
+    mirror_verify_s      = 120,
+    mirror_retry_s       = 30,
+    mirror_writes_kept   = 16,
+    mirror_max_restarts  = 3,
 }
 
 -- Convenience: the op-name set, derived so it can never drift from OP_VERSIONS.
