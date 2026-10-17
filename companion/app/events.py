@@ -139,6 +139,10 @@ class SquadSynced:
     taken: datetime
     session_id: str = ""
     free_agents: Sequence[Mapping[str, Any]] = ()
+    # (playerid, name) exactly as the worker exported it, before the desktop
+    # shows the signed name instead (squad._with_signed_names). Names check
+    # compares these in-game names against verified signing receipts.
+    game_names: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

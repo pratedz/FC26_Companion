@@ -8,6 +8,7 @@ resume re-resolves the database row safely.
 local db = require("db")
 local util = require("util")
 local json = require("json")
+local version = require("version")
 
 local M = {}
 
@@ -267,14 +268,136 @@ end
 -- not an in-flight move. -1 / nil / 0 are the values that still mean "settling".
 local FREE_AGENT_TEAM_ID = 111592
 
-local function squad_link_count(teamid)
-    local links = db.open("teamplayerlinks")
-    if not links or not db.field("teamplayerlinks", "teamid") then return nil end
-    local count = 0
-    for rec in links:records() do
-        if tonumber(links:get("teamid", rec)) == teamid then count = count + 1 end
+local function host_id_set(fn_name, arg)
+    local fn = rawget(_G, fn_name)
+    if type(fn) ~= "function" then return nil end
+    local ok, values
+    if arg == nil then ok, values = pcall(fn) else ok, values = pcall(fn, arg) end
+    if not ok or type(values) ~= "table" then return nil end
+    local out = {}
+    for key, value in pairs(values) do
+        -- Host helpers may return either { id, id } or { [id] = true }.
+        local pid = tonumber(value)
+        if not pid or pid <= 0 then pid = tonumber(key) end
+        if pid and pid > 0 then out[math.floor(pid)] = true end
     end
-    return count
+    return out
+end
+
+--- Count the senior squad the way FC's TransferPlayer refusal does
+--- ("Target Team Squad is Full 42/52, Loaned Out: 10"): players at the club
+--- plus players the club has loaned out, against LIMITS.max_squad_with_loans.
+--
+-- Present players come from the club's teamplayerlinks rows (helper fallback).
+-- A loaned-out player's roster row usually moves to the borrowing club, but
+-- his contract (GetUserSeniorTeamPlayerIDs reads career_playercontract) and
+-- the playerloans row stay with the parent club, so those are the candidates
+-- IsPlayerLoanedOut is asked about. Contract-only players that are NOT loaned
+-- out (e.g. presigned for next season) do not take a place and are ignored.
+-- Returns a plain table; readable=false means "cannot prove there is room".
+local function squad_room(teamid)
+    local limit = math.floor(tonumber((version.LIMITS or {}).max_squad_with_loans) or 52)
+    local info = { readable = false, limit = limit, present = 0, loaned = 0, total = 0, free = 0 }
+    teamid = tonumber(teamid)
+    if not teamid or teamid <= 0 then
+        info.reason = "target team is unknown"
+        return info
+    end
+    teamid = math.floor(teamid)
+    local loan_fn = rawget(_G, "IsPlayerLoanedOut")
+    if type(loan_fn) ~= "function" then
+        info.reason = "IsPlayerLoanedOut host check is unavailable"
+        return info
+    end
+    local present = {}
+    local links = db.open("teamplayerlinks")
+    if links then
+        for rec in links:records() do
+            if tonumber(links:get("teamid", rec)) == teamid then
+                local pid = tonumber(links:get("playerid", rec))
+                if pid and pid > 0 then present[math.floor(pid)] = true end
+            end
+        end
+        info.source = "teamplayerlinks"
+    end
+    if next(present) == nil then
+        for _, helper in ipairs({ "GetPlayerIDSForTeam", "GetPlayerIDsForTeam" }) do
+            local ids = host_id_set(helper, teamid)
+            if ids and next(ids) ~= nil then
+                present, info.source = ids, helper
+                break
+            end
+        end
+    end
+    if next(present) == nil then
+        info.reason = "squad membership is not readable yet"
+        return info
+    end
+    local candidates = {}
+    for pid in pairs(present) do candidates[pid] = true end
+    if user_team() == teamid then
+        for pid in pairs(host_id_set("GetUserSeniorTeamPlayerIDs", nil) or {}) do
+            candidates[pid] = true
+        end
+    end
+    local loans = db.open("playerloans")
+    if loans then
+        for rec in loans:records() do
+            if tonumber(loans:get("teamidloanedfrom", rec)) == teamid then
+                local pid = tonumber(loans:get("playerid", rec))
+                if pid and pid > 0 then candidates[math.floor(pid)] = true end
+            end
+        end
+    end
+    local present_n, loaned_n = 0, 0
+    for pid in pairs(candidates) do
+        local ok, active = pcall(loan_fn, pid)
+        if not ok then
+            info.reason = "IsPlayerLoanedOut could not inspect player " .. tostring(pid)
+            return info
+        end
+        if host_true(active) then
+            loaned_n = loaned_n + 1
+        elseif present[pid] then
+            present_n = present_n + 1
+        end
+    end
+    info.readable = true
+    info.reason = nil
+    info.present, info.loaned = present_n, loaned_n
+    info.total = present_n + loaned_n
+    info.free = limit - info.total
+    return info
+end
+
+local function squad_room_detail(info)
+    return string.format("%d senior + %d on loan = %d of %d",
+        tonumber(info.present) or 0, tonumber(info.loaned) or 0,
+        tonumber(info.total) or 0, tonumber(info.limit) or 52)
+end
+
+--- Fail before ANY write when the senior squad cannot take ``needed`` more
+--- players. A whole batch is rejected rather than signing only the first few:
+--- the receipt contract maps result playerids 1:1 onto request members, and a
+--- silently shortened bag would look like a complete signing.
+local function require_squad_room(state, needed)
+    local info = squad_room(state.teamid)
+    info.needed = needed
+    state.squad_room = info
+    if not info.readable then
+        return fail("squad_check_unavailable",
+            "cannot count the senior squad before writing: " .. tostring(info.reason or "unknown"),
+            state)
+    end
+    if info.free < needed then
+        local detail = squad_room_detail(info)
+        if needed > 1 then
+            detail = string.format("%s; room for %d of %d players",
+                detail, math.max(0, info.free), needed)
+        end
+        return fail("squad_full", detail, state)
+    end
+    return nil
 end
 
 local function unused_jersey(links, teamid)
@@ -296,8 +419,10 @@ end
 
 --- Move one free-agent roster row onto ``teamid``.
 -- TransferPlayer logs "Target Team Squad is Full" and leaves the player on
--- 111592. The roster row itself can still change club; that is how a full
--- senior squad can accept a reviewed free agent without a second native call.
+-- 111592. The roster row itself can still change club. Since the squad-room
+-- precheck this is only a fallback for a refusal while the club provably
+-- still has a free place (finish_transfer re-counts first); it is never used
+-- to push a squad past FC's own limit.
 local function relink_free_agent(pid, teamid)
     local links = db.open("teamplayerlinks")
     if not links then return false, "no_teamplayerlinks", "roster table is unavailable" end
@@ -324,7 +449,7 @@ local function relink_free_agent(pid, teamid)
     return true, "teamplayerlinks", ""
 end
 
---- Returns kind, reason, detail.
+--- Returns kind, reason, detail, squad_room.
 -- kind is "ok" (player is on teamid), "wait" (host id is still unknown),
 -- or "fail". A stable free-agent id never waits: FC already refused the move.
 local function finish_transfer(pid, teamid)
@@ -340,18 +465,21 @@ local function finish_transfer(pid, teamid)
         return "wait", "settling", ""
     end
     if math.floor(actual) == FREE_AGENT_TEAM_ID then
-        local moved, how, detail = relink_free_agent(pid, teamid)
-        if moved then
-            local again, again_source = verify_team_membership(pid, teamid)
-            if again then return "ok", again_source or how or "teamplayerlinks", "" end
+        local room = squad_room(teamid)
+        local detail = ""
+        if room.readable and room.free >= 1 then
+            local moved, how, move_detail = relink_free_agent(pid, teamid)
+            if moved then
+                local again, again_source = verify_team_membership(pid, teamid)
+                if again then return "ok", again_source or how or "teamplayerlinks", "" end
+            end
+            detail = move_detail or ""
         end
-        local count = squad_link_count(teamid)
+        local counts = room.readable and squad_room_detail(room) or "squad size unreadable"
         return "fail", "squad_full",
-            string.format(
-                "FC refused the transfer because the squad is full (%s players). %s",
-                tostring(count or "the current"),
-                (detail ~= "" and detail) or "The free-agent roster row could not be moved."
-            )
+            string.format("FC refused the transfer: %s%s", counts,
+                (detail ~= "" and ("; " .. detail)) or ""),
+            room
     end
     return "fail", "team_not_applied",
         string.format("expected %s, observed %s", tostring(teamid), tostring(actual))
@@ -384,6 +512,31 @@ local function set_map(pid, fields)
     local written, failures, _, applied = db.set_many(
         h, rec, fields, { on_field_error = "continue" })
     return written, failures, applied
+end
+
+--- Read the dummy's current value of every field the signing is about to
+--- write, BEFORE the write. Only the first capture of a field is kept, so a
+--- resumed step can never overwrite a pre-signing value with a card value.
+-- The map travels in the persisted progress (and therefore in a failed
+-- result), which is what lets the desktop offer "Restore free agent" for a
+-- signing that wrote stats but never transferred. Unreadable fields are left
+-- out; the desktop refuses to restore a field it has no original for.
+local function capture_originals(pid, maps, into)
+    local h, rec = player_record(pid)
+    if not rec then return into end
+    for _, map in ipairs(maps) do
+        for field in pairs(map or {}) do
+            if field ~= "playerid" and into[field] == nil then
+                local value = h:get(field, rec)
+                if value ~= nil then into[field] = value end
+            end
+        end
+    end
+    return into
+end
+
+local function record_applied(into, applied)
+    for field, value in pairs(applied or {}) do into[field] = value end
 end
 
 local function protect_potential(fields)
@@ -998,6 +1151,28 @@ local function step_batch(op, job, ctx, state)
         if not tid or tid <= 0 then tid = user_team() end
         if not tid or tid <= 0 then return fail("no_teamid", "could not resolve target team", state) end
         state.teamid = math.floor(tid)
+        -- Squad room before ANY dummy is picked or written. FC refuses
+        -- TransferPlayer at 52 including loans; writing first left free
+        -- agents with a card's stats that never joined (2026-10-15).
+        -- A manual relink member already on the club needs no new place.
+        local needed = 0
+        local j = 1
+        while j <= count do
+            local member = member_at(batch, j) or {}
+            local placed = false
+            if member.relink_only then
+                local pool = type(member.dummy_pool) == "table" and member.dummy_pool or {}
+                local pid = tonumber(pool[1] or member.playerid)
+                placed = pid ~= nil and (verify_team_membership(pid, state.teamid)) == true
+            end
+            if not placed then needed = needed + 1 end
+            j = j + 1
+        end
+        state.squad_needed = needed
+        if needed > 0 then
+            local refused = require_squad_room(state, needed)
+            if refused then return refused end
+        end
         return next_step(state, { teamid = state.teamid, batch = count })
     end
 
@@ -1080,6 +1255,25 @@ local function step_batch(op, job, ctx, state)
 
     -- write_all: fields and faces for every reserved dummy
     if step == 3 then
+        -- A pick that waited for Career events may have let the squad
+        -- change. Count again, still before the first field write.
+        if (tonumber(state.pick_dummy_tries) or 0) > 0 and not state.room_rechecked then
+            local any_written = false
+            local j = 1
+            while j <= count do
+                local mstate = member_at(members, j)
+                if mstate and mstate.fields_written and not mstate.relink_only then
+                    any_written = true
+                end
+                j = j + 1
+            end
+            local needed = tonumber(state.squad_needed) or count
+            if not any_written and needed > 0 then
+                local refused = require_squad_room(state, needed)
+                if refused then return refused end
+            end
+            state.room_rechecked = true
+        end
         local written_total = 0
         local i = 1
         while i <= count do
@@ -1094,15 +1288,21 @@ local function step_batch(op, job, ctx, state)
                 local fields = util.copy(player.fields or {})
                 fields.playerid = nil
                 protect_potential(fields)
-                local written, failures = set_map(pid, fields)
+                local face = type(player.face) == "table" and player.face or {}
+                mstate.original_values = capture_originals(pid, { fields, face },
+                    type(mstate.original_values) == "table" and mstate.original_values or {})
+                mstate.written_values = type(mstate.written_values) == "table"
+                    and mstate.written_values or {}
+                local written, failures, applied = set_map(pid, fields)
+                record_applied(mstate.written_values, applied)
                 if #failures > 0 then
                     return fail(failures[1].reason or "field_write_failed",
                         failures[1].detail or "", state)
                 end
                 mstate.requested_fields = fields
                 written_total = written_total + written
-                local face = type(player.face) == "table" and player.face or {}
-                local fwritten, ffail = set_map(pid, face)
+                local fwritten, ffail, fapplied = set_map(pid, face)
+                record_applied(mstate.written_values, fapplied)
                 if #ffail > 0 then
                     return fail(ffail[1].reason or "face_write_failed",
                         ffail[1].detail or "", state)
@@ -1134,7 +1334,7 @@ local function step_batch(op, job, ctx, state)
                 mstate.transfer_started = true
             end
             if not mstate.transferred then
-                local kind, reason, detail = finish_transfer(pid, state.teamid)
+                local kind, reason, detail, room = finish_transfer(pid, state.teamid)
                 if kind == "ok" then
                     mstate.transferred = true
                     mstate.transfer_via = reason
@@ -1142,6 +1342,7 @@ local function step_batch(op, job, ctx, state)
                 elseif kind == "wait" then
                     waiting = true
                 else
+                    if room then state.squad_room = room end
                     return fail(reason, detail, state)
                 end
             else
@@ -1179,11 +1380,12 @@ local function step_batch(op, job, ctx, state)
                 mstate.team_verified = true
                 mstate.verify_source = source
             else
-                local kind, reason, detail = finish_transfer(mstate.playerid, state.teamid)
+                local kind, reason, detail, room = finish_transfer(mstate.playerid, state.teamid)
                 if kind == "ok" then
                     mstate.team_verified = true
                     mstate.verify_source = reason
                 elseif kind == "fail" then
+                    if room then state.squad_room = room end
                     return fail(reason, detail, state)
                 else
                     all_ok = false
@@ -1338,6 +1540,8 @@ function M.step(op, job, ctx)
         if not tid or tid <= 0 then tid = user_team() end
         if not tid or tid <= 0 then return fail("no_teamid", "could not resolve target team", state) end
         state.teamid = math.floor(tid)
+        local refused = require_squad_room(state, 1)
+        if refused then return refused end
         return next_step(state, { teamid = state.teamid })
     end
 
@@ -1410,7 +1614,12 @@ function M.step(op, job, ctx)
         local fields = util.copy(player.fields or {})
         fields.playerid = nil
         protect_potential(fields)
+        local face = type(player.face) == "table" and player.face or {}
+        state.original_values = capture_originals(state.playerid, { fields, face },
+            type(state.original_values) == "table" and state.original_values or {})
+        state.written_values = type(state.written_values) == "table" and state.written_values or {}
         local written, failures, applied = set_map(state.playerid, fields)
+        record_applied(state.written_values, applied)
         if #failures > 0 then
             return fail(failures[1].reason or "field_write_failed",
                 failures[1].detail or "", state)
@@ -1423,7 +1632,9 @@ function M.step(op, job, ctx)
 
     if step == 4 then
         local face = type(player.face) == "table" and player.face or {}
-        local written, failures = set_map(state.playerid, face)
+        state.written_values = type(state.written_values) == "table" and state.written_values or {}
+        local written, failures, applied = set_map(state.playerid, face)
+        record_applied(state.written_values, applied)
         if #failures > 0 then
             return fail(failures[1].reason or "face_write_failed",
                 failures[1].detail or "", state)
@@ -1455,8 +1666,11 @@ function M.step(op, job, ctx)
             if not called then return fail(reason, detail, state) end
             state.transfer_started = true
         end
-        local kind, reason, detail = finish_transfer(state.playerid, state.teamid)
-        if kind == "fail" then return fail(reason, detail, state) end
+        local kind, reason, detail, room = finish_transfer(state.playerid, state.teamid)
+        if kind == "fail" then
+            if room then state.squad_room = room end
+            return fail(reason, detail, state)
+        end
         if kind == "wait" then
             state.verify_team_tries = (tonumber(state.verify_team_tries) or 0) + 1
             if state.verify_team_tries >= 12 then
@@ -1484,7 +1698,7 @@ function M.step(op, job, ctx)
                 actual_teamid = actual,
             })
         end
-        local kind, reason, detail = finish_transfer(state.playerid, state.teamid)
+        local kind, reason, detail, room = finish_transfer(state.playerid, state.teamid)
         if kind == "ok" then
             state.verify_source = reason
             return next_step(state, {
@@ -1493,7 +1707,10 @@ function M.step(op, job, ctx)
                 actual_teamid = state.teamid,
             })
         end
-        if kind == "fail" then return fail(reason, detail, state) end
+        if kind == "fail" then
+            if room then state.squad_room = room end
+            return fail(reason, detail, state)
+        end
         -- TransferPlayer is async. Wait for Career events before failing; a
         -- hard fail on a -1 host sentinel used to leave face+stats on a late
         -- squad join without reaching the final durable name pass.
@@ -1726,5 +1943,27 @@ function M.step(op, job, ctx)
 
     return fail("bad_resume_step", tostring(step), state)
 end
+
+-- Shared, already-proven helpers for the narrow follow-up ops
+-- (ops/names_sync.lua, ops/restore_partial_add.lua). Exported instead of
+-- copied so the durable-name and membership rules stay in exactly one place.
+M.helpers = {
+    user_team = user_team,
+    host_true = host_true,
+    player_record = player_record,
+    set_map = set_map,
+    verify_team_membership = verify_team_membership,
+    squad_room = squad_room,
+    squad_room_detail = squad_room_detail,
+    consumed_dummy_store = consumed_dummy_store,
+    name_fields = name_fields,
+    name_matches = name_matches,
+    visible_name_matches = visible_name_matches,
+    durable_name_ok = durable_name_ok,
+    write_names = write_names,
+    snapshot_name_dict = snapshot_name_dict,
+    restore_name_dict = restore_name_dict,
+    FREE_AGENT_TEAM_ID = FREE_AGENT_TEAM_ID,
+}
 
 return M

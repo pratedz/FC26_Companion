@@ -61,6 +61,8 @@ version.OP_VERSIONS = {
     ["create_player"] = 1,
     ["add_to_team"]   = 4,
     ["repair_partial_add"] = 2,
+    ["restore_partial_add"] = 1,
+    ["names.sync"]    = 1,
     ["transfer"]      = 1,
     ["budget"]        = 1,
     ["bulk_edit"]     = 2,
@@ -92,6 +94,9 @@ version.CAPABILITIES = {
     http_push         = false,  -- SendHTTPRequest blocks the game thread; opt-in
     execute_sql       = false,
     native_tick       = true,   -- 2.6.38: lec_native.dll tick when loaded and verified
+    squad_room_check  = true,   -- add_to_team counts squad + loans before any write
+    restore_partial_add = true, -- pre-write values captured; partial dummies restorable
+    names_sync        = true,   -- names.sync: check & fix signed players' in-game names
 }
 
 --[[ Hard limits. Every one of these is a number that broke something once.
@@ -106,6 +111,10 @@ version.CAPABILITIES = {
      rows_small_max     db.rows_small() refuses tables bigger than this, because
                         GetDBTableRows on a large table is a 4-5 s stall that
                         allocates ~2.6M Lua tables.
+     max_squad_with_loans  FC's TransferPlayer refuses a signing once senior
+                        squad + loaned-out players reaches this ("Target Team
+                        Squad is Full 42/52, Loaned Out: 10", 2026-10-15).
+                        add_to_team checks it before writing any dummy field.
 ]]
 version.LIMITS = {
     max_playerid         = 499999,
@@ -122,6 +131,7 @@ version.LIMITS = {
     log_ring_lines       = 500,
     log_tail_lines       = 120,
     next_free_id_probes  = 64,
+    max_squad_with_loans = 52,
 }
 
 -- Convenience: the op-name set, derived so it can never drift from OP_VERSIONS.
@@ -143,6 +153,8 @@ version.OP_GRANTS = {
     create_player = "allow_create_player",
     add_to_team = "allow_add_to_team",
     repair_partial_add = "allow_add_to_team",
+    restore_partial_add = "allow_add_to_team",
+    ["names.sync"] = "allow_add_to_team",
 }
 
 -------------------------------------------------------------------------------

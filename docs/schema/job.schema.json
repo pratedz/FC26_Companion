@@ -50,7 +50,8 @@
           "op": {
             "enum": [
               "diag.ping", "assets.legacy", "db.dump", "set_fields", "create_player",
-              "add_to_team", "repair_partial_add", "transfer", "budget", "bulk_edit",
+              "add_to_team", "repair_partial_add", "restore_partial_add", "names.sync",
+              "transfer", "budget", "bulk_edit",
               "export_squad", "snapshot", "growth_sync", "career.set",
               "injury.scan", "injury.cure"
             ]
