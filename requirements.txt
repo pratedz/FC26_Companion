@@ -12,3 +12,5 @@ beautifulsoup4>=4.12.0
 
 # AI provider (OpenAI API key mode). Codex Account does not need this.
 openai>=1.40.0
+# AI provider (Claude via the local CLIProxyAPI-Claude proxy).
+anthropic>=1,<2

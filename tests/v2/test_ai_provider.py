@@ -11,13 +11,24 @@ from companion.integrations import ai_provider as ai
 from companion.integrations import grok
 
 
+def _defaults():
+    ai.apply_settings(
+        provider=ai.PROVIDER_CODEX, model="", claude_model="", claude_base_url="",
+        efforts={pid: "" for pid in ai.PROVIDERS}, parallel=0,
+    )
+    ai.clear_session_key()
+    ai.clear_claude_session_key()
+
+
 @pytest.fixture(autouse=True)
-def _reset_provider():
-    ai.apply_settings(provider=ai.PROVIDER_CODEX, model="")
-    ai.clear_session_key()
+def _reset_provider(monkeypatch, tmp_path):
+    # Never touch the real Claude key sources (env, Credential Manager, config).
+    monkeypatch.delenv(ai.CLAUDE_KEY_ENV, raising=False)
+    monkeypatch.setattr(ai, "_read_claude_stored_key", lambda: "")
+    monkeypatch.setattr(ai, "claude_config_path", lambda: tmp_path / "no-proxy" / "config.yaml")
+    _defaults()
     yield
-    ai.apply_settings(provider=ai.PROVIDER_CODEX, model="")
-    ai.clear_session_key()
+    _defaults()
 
 
 def test_both_providers_are_asked_for_the_same_model(monkeypatch):
@@ -100,6 +111,71 @@ def test_missing_pref_uses_the_api_key_and_shared_model():
     assert ai.model_id() == grok.DEFAULT_MODEL == "gpt-6-luna"
 
 
+def test_three_providers_with_labels():
+    assert ai.PROVIDERS == (ai.PROVIDER_CODEX, ai.PROVIDER_API, ai.PROVIDER_CLAUDE)
+    assert ai.PROVIDER_CLAUDE == "claude_proxy"
+    assert ai.PROVIDER_LABELS[ai.PROVIDER_CLAUDE] == "Claude (proxy)"
+    ai.load_from_prefs({"ai_provider": "claude_proxy"})
+    assert ai.provider_id() == ai.PROVIDER_CLAUDE
+    ai.load_from_prefs({"ai_provider": "bogus"})
+    assert ai.provider_id() == ai.PROVIDER_API
+
+
+def test_claude_has_its_own_model_and_openai_codex_still_share_one():
+    ai.load_from_prefs({
+        "ai_provider": "claude_proxy", "ai_model_id": "gpt-6-terra",
+        "ai_claude_model_id": "claude-opus-5-5",
+    })
+    assert ai.model_id() == "claude-opus-5-5"
+    assert ai.model_id(ai.PROVIDER_CODEX) == ai.model_id(ai.PROVIDER_API) == "gpt-6-terra"
+    ai.load_from_prefs({"ai_provider": "claude_proxy"})
+    assert ai.model_id() == "claude-sonnet-5-5"
+    assert ai.claude_base_url() == "http://127.0.0.1:8318"
+
+
+def test_explicit_model_ids_never_cross_providers():
+    ai.apply_settings(provider=ai.PROVIDER_CLAUDE, claude_model="claude-haiku-5-5")
+    assert ai.effective_model("gpt-6-terra") == "claude-haiku-5-5"
+    assert ai.effective_model(grok.DEFAULT_MODEL) == "claude-haiku-5-5"
+    assert ai.effective_model("claude-opus-5-5") == "claude-opus-5-5"
+    ai.apply_settings(provider=ai.PROVIDER_API, model="gpt-6-terra")
+    assert ai.effective_model("claude-opus-5-5") == "gpt-6-terra"
+
+
+def test_speed_defaults_and_prefs_per_provider():
+    ai.load_from_prefs({})
+    assert ai.reasoning_effort(ai.PROVIDER_CODEX) == "medium"
+    assert ai.reasoning_effort(ai.PROVIDER_API) == "medium"
+    assert ai.reasoning_effort(ai.PROVIDER_CLAUDE) == "low"
+    ai.load_from_prefs({"ai_effort_codex": "high", "ai_effort_claude": "medium",
+                        "ai_effort_openai": "nonsense"})
+    assert ai.reasoning_effort(ai.PROVIDER_CODEX) == "high"
+    assert ai.reasoning_effort(ai.PROVIDER_CLAUDE) == "medium"
+    assert ai.reasoning_effort(ai.PROVIDER_API) == "medium"
+    assert ai.EFFORT_LABELS == {"low": "Fast", "medium": "Balanced", "high": "Thorough"}
+
+
+def test_responses_body_uses_the_selected_provider_speed():
+    ai.apply_settings(provider=ai.PROVIDER_CODEX, efforts={ai.PROVIDER_CODEX: "low"})
+    body = grok._responses_body([{"role": "user", "content": "x"}], model="m")
+    assert body["reasoning"] == {"effort": "low"}
+    ai.apply_settings(provider=ai.PROVIDER_API, efforts={ai.PROVIDER_API: "high"})
+    body = grok._responses_body([{"role": "user", "content": "x"}], model="m")
+    assert body["reasoning"] == {"effort": "high"}
+    assert "reasoning" not in grok._responses_body(
+        [{"role": "user", "content": "x"}], model="m", reasoning=False)
+
+
+def test_parallel_groups_default_and_override():
+    ai.load_from_prefs({"ai_provider": "codex_account"})
+    assert ai.parallel_groups() == 5
+    assert ai.parallel_groups(ai.PROVIDER_CLAUDE) == 6
+    ai.load_from_prefs({"ai_provider": "codex_account", "ai_parallel_groups": 3})
+    assert ai.parallel_groups() == 3
+    ai.load_from_prefs({"ai_parallel_groups": 99})
+    assert ai.parallel_groups() == ai.MAX_PARALLEL
+
+
 def _signed_out_codex(monkeypatch, tmp_path):
     auth = tmp_path / "auth.json"
     auth.write_text('{"auth_mode": "none"}', encoding="utf-8")
@@ -122,6 +198,30 @@ def test_blocked_provider_points_at_the_ready_one(monkeypatch, tmp_path):
     reason = ai.block_reason()
     assert "sign-in required" in reason.lower()
     assert "OpenAI API Key is ready" in reason
+
+
+def test_blocked_provider_lists_every_ready_provider(monkeypatch, tmp_path):
+    _signed_out_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    monkeypatch.setenv(ai.CLAUDE_KEY_ENV, "claude-env-key")
+    monkeypatch.setattr(ai, "_claude_sdk_available", lambda: True)
+    ai.apply_settings(provider=ai.PROVIDER_CODEX)
+    reason = ai.block_reason()
+    assert "OpenAI API Key or Claude (proxy) is ready" in reason
+    assert "claude-env-key" not in reason
+
+
+def test_blocked_openai_points_at_a_ready_claude(monkeypatch, tmp_path):
+    _signed_out_codex(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(ai, "_read_stored_key", lambda: "")
+    monkeypatch.setenv(ai.CLAUDE_KEY_ENV, "claude-env-key")
+    monkeypatch.setattr(ai, "_claude_sdk_available", lambda: True)
+    ai.apply_settings(provider=ai.PROVIDER_API)
+    reason = ai.block_reason()
+    assert "API key required" in reason
+    assert "Claude (proxy) is ready" in reason
+    assert "Codex" not in reason
 
 
 def test_signed_out_codex_stub_reads_as_not_signed_in(monkeypatch, tmp_path):

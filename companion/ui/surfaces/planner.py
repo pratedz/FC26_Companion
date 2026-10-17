@@ -514,18 +514,42 @@ def session_propose_worker(
             if not getattr(token, "cancelled", False) and on_success:
                 on_success(staged)
             return
-        hinted: list = []
-        for row in propose_payload(plan, session):
-            hint = row.get("library_hint") or ""
-            if not hint and catalog is not None:
-                hint = library_hint_for(
+        # Catalog lookups are independent read-only queries (each opens its own
+        # connection): dedupe them and run them on a private pool, so a big
+        # squad does not wait on one lookup at a time before the AI call.
+        payload = [dict(row) for row in propose_payload(plan, session)]
+        lookups: dict[tuple[str, str, int], str] = {}
+        for row in payload:
+            if not (row.get("library_hint") or "") and catalog is not None:
+                lookups.setdefault((
                     str(row.get("name") or ""),
                     str(row.get("position") or ""),
                     int(row.get("target_ovr") or 80),
-                    catalog,
-                    **({"cache": cache} if cache is not None else {}),
+                ), "")
+        if lookups:
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _lookup(spec: tuple[str, str, int]) -> str:
+                if getattr(token, "cancelled", False):
+                    return ""
+                return library_hint_for(
+                    *spec, catalog, **({"cache": cache} if cache is not None else {}),
                 )
-            row = dict(row)
+
+            specs = list(lookups)
+            with ThreadPoolExecutor(max_workers=min(4, len(specs)),
+                                    thread_name_prefix="plan-hints") as pool:
+                for spec, hint in zip(specs, pool.map(_lookup, specs)):
+                    lookups[spec] = hint
+        hinted: list = []
+        for row in payload:
+            hint = row.get("library_hint") or ""
+            if not hint and catalog is not None:
+                hint = lookups.get((
+                    str(row.get("name") or ""),
+                    str(row.get("position") or ""),
+                    int(row.get("target_ovr") or 80),
+                ), "")
             row["library_hint"] = hint
             hinted.append(row)
         problems: list[str] = []

@@ -2,15 +2,19 @@
 
 Codex Account reuses the ``codex login`` cache at ``~/.codex/auth.json``.
 The API key, when used, is resolved by ``ai_provider`` and is never stored here.
+Claude (proxy) requests are routed by ``ai_provider.dispatch_request`` to
+``claude_proxy``; the prompts and validation below are shared by all providers.
 The model never returns a replacement player card and this module never submits a game job.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
 import shutil
+import time
 import uuid
 import urllib.error
 import urllib.request
@@ -43,10 +47,32 @@ from ..domain.squad_session import (
 
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_MODEL = "gpt-6-luna"
-DEFAULT_REASONING_EFFORT = "high"
+# Fallback only: the live effort is the per-provider "Speed" setting
+# (ai_provider.reasoning_effort), medium for Codex/OpenAI by default.
+DEFAULT_REASONING_EFFORT = "medium"
 # Same prompt and reasoning as a serial run. Overlap the chunk waits only.
-_PARALLEL_CHUNKS = 3
+# Fallback only: the live value is ai_provider.parallel_groups() (5, Claude 6).
+_PARALLEL_CHUNKS = 5
+_CODEX_RETRY_DELAY = 1.5
 _JSON_OBJECT_HINT = "Respond with JSON only."
+
+
+def _reasoning_effort() -> str:
+    try:
+        from .ai_provider import reasoning_effort
+
+        return reasoning_effort()
+    except Exception:  # noqa: BLE001
+        return DEFAULT_REASONING_EFFORT
+
+
+def _parallel_chunks() -> int:
+    try:
+        from .ai_provider import parallel_groups
+
+        return max(1, int(parallel_groups()))
+    except Exception:  # noqa: BLE001
+        return _PARALLEL_CHUNKS
 
 
 def _with_json_word(text: str) -> str:
@@ -204,7 +230,7 @@ def _session() -> Mapping[str, str]:
     if not token:
         raise RuntimeError(
             "Codex is not connected. Run `codex login` in Codex CLI, then choose "
-            "Check again in Settings, or switch to an OpenAI API key."
+            "Check again in Settings, or switch to OpenAI API Key or Claude (proxy)."
         )
     return {"token": token, "account_id": account}
 
@@ -263,7 +289,7 @@ def _responses_body(
         "stream": True,
     }
     if reasoning:
-        body["reasoning"] = {"effort": DEFAULT_REASONING_EFFORT}
+        body["reasoning"] = {"effort": _reasoning_effort()}
     if json_object:
         body["text"] = {"format": {"type": "json_object"}}
     return body
@@ -398,6 +424,18 @@ def _request(messages: list[dict[str, str]], *, model: str) -> Mapping[str, Any]
     return dispatch_request(messages, model=model)
 
 
+def _codex_backoff() -> None:
+    time.sleep(_CODEX_RETRY_DELAY)
+
+
+def _transient_network(reason: Any) -> bool:
+    """Reset or timeout: worth one retry. DNS/refused/TLS failures are not."""
+    if isinstance(reason, (ConnectionResetError, ConnectionAbortedError, TimeoutError)):
+        return True
+    text = str(reason or "").lower()
+    return "timed out" in text or "reset" in text
+
+
 def _codex_request(
     messages: list[dict[str, str]],
     *,
@@ -410,30 +448,45 @@ def _codex_request(
             messages, model=model, json_object=json_object, reasoning=reasoning,
         )
     ).encode("utf-8")
-    req = urllib.request.Request(
-        CODEX_RESPONSES_URL,
-        data=payload,
-        method="POST",
-        headers=_codex_headers(_session()),
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=180.0) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        if exc.code == 401:
-            raise RuntimeError(
-                "Codex login expired. Run `codex login` again, then choose "
-                "Check again in Settings."
-            ) from exc
-        if exc.code == 429 or "usage_limit" in detail:
-            raise RuntimeError(
-                "Codex login credit is used up. Switch the provider to "
-                "OpenAI API Key. Nothing was written to the career."
-            ) from exc
-        raise RuntimeError(f"Codex request failed ({exc.code}): {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Cannot reach Codex: {exc.reason}") from exc
+    session = _session()
+    raw = ""
+    for attempt in (1, 2):
+        req = urllib.request.Request(
+            CODEX_RESPONSES_URL,
+            data=payload,
+            method="POST",
+            headers=_codex_headers(session),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180.0) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            if exc.code == 401:
+                raise RuntimeError(
+                    "Codex login expired. Run `codex login` again, then choose "
+                    "Check again in Settings."
+                ) from exc
+            if exc.code == 429 or "usage_limit" in detail:
+                raise RuntimeError(
+                    "Codex login credit is used up. Switch the provider to "
+                    "OpenAI API Key or Claude (proxy). Nothing was written to the career."
+                ) from exc
+            if exc.code >= 500 and attempt == 1:
+                _codex_backoff()
+                continue
+            raise RuntimeError(f"Codex request failed ({exc.code}): {detail}") from exc
+        except urllib.error.URLError as exc:
+            if attempt == 1 and _transient_network(exc.reason):
+                _codex_backoff()
+                continue
+            raise RuntimeError(f"Cannot reach Codex: {exc.reason}") from exc
+        except (ConnectionError, TimeoutError, http.client.IncompleteRead) as exc:
+            if attempt == 1:
+                _codex_backoff()
+                continue
+            raise RuntimeError(f"Codex connection dropped: {exc}") from exc
     body = _assemble_codex_stream(raw)
     if not isinstance(body, Mapping):
         raise RuntimeError("Codex returned an invalid response.")
@@ -932,7 +985,7 @@ def propose_squad_players(
     else:
         done = 0
         first_error: BaseException | None = None
-        with ThreadPoolExecutor(max_workers=min(_PARALLEL_CHUNKS, total)) as pool:
+        with ThreadPoolExecutor(max_workers=min(_parallel_chunks(), total)) as pool:
             pending = {pool.submit(run_chunk, chunk): index for index, chunk in enumerate(chunks)}
             for future in as_completed(pending):
                 index = pending[future]
