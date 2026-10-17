@@ -54,24 +54,12 @@ local function list_has_player(fn_name, arg, playerid)
     return false
 end
 
--- GetTeamIdFromPlayerId is sometimes briefly -1 after an async transfer even
--- when the roster helper/table already lists the player.  Treat a positive,
--- different team as a hard mismatch, but accept verified roster membership.
+-- Database membership first (2.6.42). GetTeamIdFromPlayerId answers from Live
+-- Editor's player cache, rebuilt only on a day advance or a save load, so in
+-- the hub visit of the signing it can still name the dummy's old team. It is
+-- consulted last: a positive match proves membership, and a positive,
+-- different team is a mismatch only when no database source lists the player.
 local function verify_membership(teamid, playerid)
-    local fn = rawget(_G, "GetTeamIdFromPlayerId")
-    if type(fn) == "function" then
-        local called, value = pcall(fn, playerid)
-        local actual = called and tonumber(value) or nil
-        if actual and math.floor(actual) == teamid then
-            return true, "GetTeamIdFromPlayerId", actual
-        end
-        -- 111592 is FC's free-agent/unknown sentinel, not evidence that a
-        -- completed async transfer landed at a different club.
-        if actual and actual > 0 and actual ~= 111592 then
-            return false, "different_team", actual
-        end
-    end
-
     if user_team() == teamid and list_has_player("GetUserSeniorTeamPlayerIDs", nil, playerid) then
         return true, "GetUserSeniorTeamPlayerIDs", nil
     end
@@ -88,6 +76,20 @@ local function verify_membership(teamid, playerid)
                 and positive(links:get("playerid", rec)) == playerid then
                 return true, "teamplayerlinks", nil
             end
+        end
+    end
+
+    local fn = rawget(_G, "GetTeamIdFromPlayerId")
+    if type(fn) == "function" then
+        local called, value = pcall(fn, playerid)
+        local actual = called and tonumber(value) or nil
+        if actual and math.floor(actual) == teamid then
+            return true, "GetTeamIdFromPlayerId", actual
+        end
+        -- 111592 is FC's free-agent/unknown sentinel, not evidence that a
+        -- completed async transfer landed at a different club.
+        if actual and actual > 0 and actual ~= 111592 then
+            return false, "different_team", actual
         end
     end
     return false, "unverified", nil
@@ -355,6 +357,32 @@ local function detach_name_dictionary(players, rec)
     return #failures == 0 and written == requested, written, failures
 end
 
+-- The identity Career renders, read back from the database (2.6.42): the
+-- four dictionary ids for a native profile, or a durable editedplayernames
+-- row plus detached ids for a custom name. Replaces the GetPlayerName gate,
+-- which read LE's cache and could not change before the next day advance.
+local function stored_identity_ok(playerid, names, native_name_ids)
+    local players, rec = db.resolve("players", "playerid", playerid)
+    if not players or not rec then return false, "players row is not readable" end
+    local function ids_are(expected)
+        for field, value in pairs(expected) do
+            if db.field("players", field) and tonumber(players:get(field, rec)) ~= value then
+                return false, string.format("%s reads %s, expected %s", field,
+                    tostring(players:get(field, rec)), tostring(value))
+            end
+        end
+        return true
+    end
+    if native_name_ids then return ids_are(native_name_ids) end
+    if not durable_name_ok(playerid, names) then
+        return false, "editedplayernames row is missing or stale"
+    end
+    return ids_are({
+        firstnameid = 0, lastnameid = 0, commonnameid = 0,
+        playerjerseynameid = 0, usercaneditname = 1,
+    })
+end
+
 function M.run(op, job, ctx)
     if not (job.grants and job.grants.allow_add_to_team) then
         return fail("grant_denied", "repair_partial_add requires allow_add_to_team")
@@ -464,40 +492,38 @@ function M.run(op, job, ctx)
             }, { name_dictionary_failures = detach_failures })
         end
     end
-    -- A durable row is only a prerequisite.  The old recovery path could
-    -- report success while FC still showed a blank/dummy name in Squad Hub.
-    -- Do not change potential or mark this repair complete unless FC's own
-    -- name resolver agrees with the requested visible identity.
-    local get_name = rawget(_G, "GetPlayerName")
-    if type(get_name) ~= "function" then
-        return fail("name_visibility_unavailable",
-            "GetPlayerName is required to verify the FC-visible repaired name", {
+    -- A durable row is only a prerequisite: Career renders the editedplayernames
+    -- row only once the dictionary ids are detached, and a native profile only
+    -- through its four ids. Do not change potential or mark this repair
+    -- complete unless that stored identity reads back.
+    local stored, stored_detail = stored_identity_ok(playerid, names, native_name_ids)
+    if not stored then
+        return fail("name_not_stored",
+            string.format("expected stored name %s: %s", tostring(names.commonname),
+                tostring(stored_detail)), {
                 targets = 1, fields_requested = requested_names + 1,
                 fields_written = names_written + detached_written,
                 fields_failed = 1,
             })
     end
-    local name_ok, visible = pcall(get_name, playerid)
-    local name_visible = name_ok and visible_name_matches(visible, names.commonname)
-    -- Native FC profiles may report a surname/jersey name while the catalog
-    -- uses the full common name. Only this native repair path may use those
-    -- verified source components as display alternatives.
-    if not name_visible and native_name_ids then
-        for _, field in ipairs({ "playerjerseyname", "surname" }) do
-            local alternative = tostring(names[field] or "")
-            if alternative ~= "" and name_ok and visible_name_matches(visible, alternative) then
-                name_visible = true
-                break
-            end
+    -- LE's cached name, for diagnostics only.
+    local visible = names.commonname
+    local le_cache_name, le_cache_current = nil, false
+    local get_name = rawget(_G, "GetPlayerName")
+    if type(get_name) == "function" then
+        local name_ok, cached = pcall(get_name, playerid)
+        if name_ok then
+            le_cache_name = tostring(cached or "")
+            le_cache_current = visible_name_matches(le_cache_name, names.commonname)
         end
     end
-    if not name_visible then
-        return fail("name_not_visible",
-            string.format("expected FC-visible name %s, observed %s", tostring(names.commonname), tostring(visible)), {
-                targets = 1, fields_requested = requested_names + 1,
-                fields_written = names_written + detached_written,
-                fields_failed = 1,
-            })
+    -- Resolve again: the identity read-back walked the table cursor.
+    players, rec, reason = db.resolve("players", "playerid", playerid)
+    if not players or not rec then
+        return fail("repair_player_missing_after_names", tostring(reason), {
+            targets = 1, fields_requested = requested_names + 1,
+            fields_written = names_written + detached_written,
+        })
     end
     local written, failures = db.set_many(players, rec, { potential = target_pot }, {
         on_field_error = "abort",
@@ -512,6 +538,8 @@ function M.run(op, job, ctx)
     return ok({
         playerid = playerid, teamid = teamid, membership = source,
         name = name_state, visible_name = tostring(visible), potential = target_pot,
+        name_verified_via = "database",
+        le_cache_name = le_cache_name, le_cache_current = le_cache_current,
     }, {
         targets = 1, found = 1, fields_requested = requested_names + 1,
         fields_written = names_written + detached_written + 1,

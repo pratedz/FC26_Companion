@@ -705,9 +705,12 @@ def test_first_live_native_tick_advertises_timer_once_and_only_on_hub(core):
     assert core.eval("LEC.runner._timer_gave_up") is True
     assert _session(core)["capabilities"]["fast_read_timer"] is False
 
+    # 2.6.42: the first live tick advertises at once; work waits for a quiet hub.
+    outcomes = []
     for t in (100.2, 100.4, 100.6, 103.0):
         core.set_clock(t)
-        assert core.eval("LEC.native.tick()") == "ok"
+        outcomes.append(core.eval("LEC.native.tick()"))
+    assert outcomes == ["settling", "settling", "settling", "ok"]
     assert timer_phases() == ["fast_read_timer"]
     assert core.eval("LEC.runner._native_live") is True
     assert core.eval("LEC.runner._fast_read_timer.native") is True

@@ -30,7 +30,7 @@ WHY THIS MODULE EXISTS
 local version = {}
 
 -- Semantic version of the resident core. Bump on any behaviour change.
-version.VERSION = "2.6.41"
+version.VERSION = "2.6.42"
 
 -- Wire protocol contract number. Job envelopes carry `"schema": 3`; results
 -- carry `"schema": 3`. This is PROTOCOL v3 (docs/V2_ARCHITECTURE.md §3), one
@@ -99,6 +99,10 @@ version.CAPABILITIES = {
     restore_partial_add = true, -- pre-write values captured; partial dummies restorable
     names_sync        = true,   -- names.sync: check & fix signed players' in-game names
     mirror_after_write = true,  -- 2.6.41: squad.json rebuilt in the hub frame a write job finished in
+    hub_latch         = true,   -- 2.6.42: hub readiness survives screen/notification events
+    ui_event_jobs     = true,   -- 2.6.42: reads and field edits also run on those events
+    db_name_verify    = true,   -- 2.6.42: signing names proven from the DB, not LE's name cache
+    native_apc        = true,   -- 2.6.42: lec_native 1.1 can tick through an APC on the Career thread
 }
 
 --[[ Hard limits. Every one of these is a number that broke something once.
@@ -117,6 +121,13 @@ version.CAPABILITIES = {
                         squad + loaned-out players reaches this ("Target Team
                         Squad is Full 42/52, Loaned Out: 10", 2026-10-15).
                         add_to_team checks it before writing any dummy field.
+     hub_drain_budget_ms  2.6.42. How long a settled hub event may keep
+                        starting queued jobs. 120 ms deferred a signing queued
+                        behind a 3-5 s squad export to yet another visit.
+     ui_pump_every_ms   2.6.42. At most one read/edit drain per this many ms
+                        on hub screen events (DATA_READY arrives in bursts).
+     quiet_ms           2.6.42. A native tick starts work only after this long
+                        without any Career event.
 ]]
 version.LIMITS = {
     max_playerid         = 499999,
@@ -143,6 +154,11 @@ version.LIMITS = {
     mirror_max_restarts  = 3,
     -- 2.6.41: one-shot rebuild budget right after a write job (0 = off).
     mirror_after_write_ms = 5000,
+    -- 2.6.42: one-visit drains and hub-latch pacing.
+    hub_drain_budget_ms  = 4000,
+    hub_drain_max_jobs   = 16,
+    ui_pump_every_ms     = 1000,
+    quiet_ms             = 1000,
 }
 
 -- Convenience: the op-name set, derived so it can never drift from OP_VERSIONS.

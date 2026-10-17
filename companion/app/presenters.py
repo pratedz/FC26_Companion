@@ -93,6 +93,10 @@ NATIVE_REASON_TEXT: dict[str, str] = {
     "set_timer_failed": "the native timer could not be started",
     "ok": "ready",
     "tick_error_stop": "stopped after a tick error",
+    # lec_native 1.1: neither the timer nor the APC carrier reaches FC's
+    # Career thread. Not a fault: jobs still run on Career screens.
+    "no_carrier": "FC's Career thread never pauses for it here; "
+                  "jobs run when you open Team Management or click around the Career hub",
 }
 # Reasons that mean something is wrong, not merely "not yet".
 _NATIVE_ATTENTION = frozenset(
@@ -125,6 +129,9 @@ def native_view(ns: NativeStatus | None) -> dict[str, Any]:
         }
     if ns.instant:
         tick = f"native tick {ns.tick_ms} ms" if ns.tick_ms > 0 else "native tick"
+        carrier = {"apc": "APC", "timer": "timer"}.get(ns.carrier)
+        if carrier:
+            tick += f" via {carrier}"
         return {
             "state": "on",
             "line": f"Instant mode: on ({tick})",

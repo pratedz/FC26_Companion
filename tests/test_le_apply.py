@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import time
@@ -14,6 +15,16 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from src import le_apply  # noqa: E402
+
+# These install tests write into the machine's real Live Editor install: the
+# v1 autorun loader in <LE data dir>\lua\autorun, the v1 bridge script, and a
+# temporary auto-arm patch of live_editor.lua. A plain `python -m pytest` run
+# re-armed the v1 bridge that the owner had disabled on 2026-10-16 (twice on
+# 2026-10-17). Opt in explicitly when you mean it.
+live_le_only = unittest.skipUnless(
+    os.environ.get("COMPANION_ALLOW_LIVE_LE_TESTS") == "1",
+    "writes into the real Live Editor install; set COMPANION_ALLOW_LIVE_LE_TESTS=1 to run",
+)
 
 
 class LeApplyQueueTests(unittest.TestCase):
@@ -152,6 +163,7 @@ class LeApplyInstallTextTests(unittest.TestCase):
         self.assertEqual(len(decls), 1)
         self.assertNotIn('local QUEUE_DIR = "LE_Profile_Executor/queue"', text)
 
+    @live_le_only
     def test_install_autoarm_safe_mode(self) -> None:
         """SAFE auto-arm patches Load() and can be removed cleanly."""
         p = le_apply.le_live_editor_lua_path()
@@ -176,6 +188,7 @@ class LeApplyInstallTextTests(unittest.TestCase):
         finally:
             le_apply.remove_autoarm_hook()
 
+    @live_le_only
     def test_install_bridge_does_not_patch_live_editor(self) -> None:
         """Product path: worker installed, LE core left unpatched."""
         p = le_apply.le_live_editor_lua_path()
@@ -194,6 +207,7 @@ class LeApplyInstallTextTests(unittest.TestCase):
         self.assertNotIn("00_le_companion_bridge", after)
         self.assertIn("Load LIVE EDITOR", after)
 
+    @live_le_only
     def test_one_click_inject_arm_roundtrip(self) -> None:
         from src import companion_config, product
 

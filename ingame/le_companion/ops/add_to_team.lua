@@ -130,7 +130,7 @@ local function consume_dummy(path, doc, pid)
     return true
 end
 
-local function safe_free_agent(pid, filter)
+local function safe_free_agent(pid, filter, on_club)
     local exists_fn = rawget(_G, "PlayerExists")
     local team_fn = rawget(_G, "GetTeamIdFromPlayerId")
     if type(exists_fn) ~= "function" or type(team_fn) ~= "function" then
@@ -139,6 +139,12 @@ local function safe_free_agent(pid, filter)
     local ok_exists, value = pcall(exists_fn, pid)
     if not ok_exists or not host_true(value) then
         return false, "dummy_missing", "selected free-agent player is no longer readable"
+    end
+    -- 2.6.42: GetTeamIdFromPlayerId answers from Live Editor's player cache,
+    -- which still says "free agent" for a dummy signed earlier in the same
+    -- hub session. The club's contracts (a DB read) are the authority here.
+    if type(on_club) == "table" and on_club[pid] then
+        return false, "dummy_not_free", "selected player is already on your club"
     end
     local ok_team, value_team = pcall(team_fn, pid)
     local live_teamid = ok_team and tonumber(value_team) or nil
@@ -902,6 +908,107 @@ local function write_names(pid, names)
     return false, "name_not_applied", 0
 end
 
+-- 2.6.42: the name step proves the identity FC renders from the database.
+--
+-- GetPlayerName is not proof of anything in the running session: it answers
+-- from Live Editor's own player cache, which LE builds once and clears only
+-- in its native DAY_PASSED / POST_LOAD_PREPARE listeners (FCLiveEditor.DLL
+-- v26.3.6, MasterManager registration at 0x180363d00). In the same hub visit
+-- it keeps returning the dummy's pre-signing name, so the old "visible name"
+-- gate waited 8 Career events and then failed signings whose names were
+-- already stored. FC itself renders the players-row dictionary ids, or the
+-- editedplayernames row once those ids are detached (ops/names_sync.lua).
+local DICT_FIELDS = { "firstnameid", "lastnameid", "commonnameid", "playerjerseynameid" }
+
+local function dictionary_ids(pid)
+    local h, rec = player_record(pid)
+    if not rec then return nil end
+    local out = {}
+    for _, field in ipairs({
+        "firstnameid", "lastnameid", "commonnameid", "playerjerseynameid", "usercaneditname",
+    }) do
+        out[field] = tonumber(h:get(field, rec))
+    end
+    return out
+end
+
+--- Returns ok, reason, detail for the stored name identity of ``pid``.
+local function stored_name_ok(pid, player, strategy, native_ids)
+    local dict = dictionary_ids(pid)
+    if not dict then return false, "player_not_found", "players row is not readable" end
+    if strategy == "native_ids" then
+        for _, field in ipairs(DICT_FIELDS) do
+            if dict[field] ~= (native_ids or {})[field] then
+                return false, "native_name_not_stored", string.format(
+                    "%s reads %s, expected %s", field, tostring(dict[field]),
+                    tostring((native_ids or {})[field]))
+            end
+        end
+        if dict.usercaneditname ~= 0 then
+            return false, "native_name_not_stored", "usercaneditname reads "
+                .. tostring(dict.usercaneditname) .. ", expected 0"
+        end
+        return true
+    end
+    if not durable_name_ok(pid, player.names or {}) then
+        return false, "name_not_applied", "editedplayernames row is missing or stale"
+    end
+    if player.detach_name_dictionary ~= false then
+        for _, field in ipairs(DICT_FIELDS) do
+            if dict[field] ~= 0 then
+                return false, "name_detach_not_stored", field .. " reads "
+                    .. tostring(dict[field]) .. ", expected 0"
+            end
+        end
+        if dict.usercaneditname ~= 1 then
+            return false, "name_detach_not_stored", "usercaneditname reads "
+                .. tostring(dict.usercaneditname) .. ", expected 1"
+        end
+    end
+    return true
+end
+
+--- Live Editor's cached name for diagnostics only (see above). nil when the
+--- host has no GetPlayerName or it threw.
+local function le_cache_name(pid)
+    local fn = rawget(_G, "GetPlayerName")
+    if type(fn) ~= "function" then return nil end
+    local ok, value = pcall(fn, pid)
+    if not ok then return nil end
+    return tostring(value or "")
+end
+
+--- Record the outcome of the name step on ``into`` (a member or the single
+--- path's state): what was proven, and what LE's cache still says.
+local function record_name_proof(into, pid, expected)
+    local cached = le_cache_name(pid)
+    into.visible_name_expected = expected
+    into.name_verified_via = "database"
+    into.le_cache_name = cached
+    into.le_cache_current = cached ~= nil and expected ~= ""
+        and visible_name_matches(cached, expected) or false
+    -- The stored display name; older readers use this field as the name.
+    into.host_player_name = expected
+end
+
+--- Mark a free-agent dummy as used in this save (idempotent). Done as soon
+--- as the dummy is on the club, so a later failure in the name step can never
+--- leave it pickable for another signing.
+local function consume_now(ctx, holder, state, pid)
+    if holder.slot_consumed then return true end
+    local consumed_path = state.consumed_path or holder.consumed_path
+    local path, consumed, consume_reason = consumed_dummy_store(ctx)
+    if consumed_path and consumed_path ~= "" then path = consumed_path end
+    if not path or type(consumed) ~= "table" then
+        return false, consume_reason or "consumed_slot_unavailable"
+    end
+    local marked, mark_reason = consume_dummy(path, consumed, pid)
+    if not marked then return false, mark_reason or "consumed_slot_write_failed" end
+    holder.slot_consumed = true
+    state.consumed_path = path
+    return true
+end
+
 local function members_from_op(op)
     if type(op.batch) == "table" and #op.batch >= 1 then
         return op.batch
@@ -932,7 +1039,7 @@ local function ensure_member_states(state, count)
     return state.members
 end
 
-local function try_pick_member(member, consumed, used)
+local function try_pick_member(member, consumed, used, on_club)
     local pool = type(member.dummy_pool) == "table" and member.dummy_pool or {}
     local filter = type(member.dummy_filter) == "table" and member.dummy_filter or {}
     local n = math.min(#pool, 6)
@@ -957,7 +1064,7 @@ local function try_pick_member(member, consumed, used)
                     use_filter = util.copy(filter)
                     use_filter.expected_overallrating = nil
                 end
-                local clean, reason, detail = safe_free_agent(pid, use_filter)
+                local clean, reason, detail = safe_free_agent(pid, use_filter, on_club)
                 if clean then
                     return "ok", pid, i
                 end
@@ -977,6 +1084,7 @@ end
 local function finish_member_name(player, mstate, verify, ctx, state)
     local strategy = tostring(player.name_strategy or "custom")
     local inserted = 0
+    local native_ids = nil
     local function fail_after_custom_detach(reason, detail)
         if strategy ~= "custom" or not mstate.name_dictionary_detached then
             return fail(reason, detail, state)
@@ -1019,6 +1127,7 @@ local function finish_member_name(player, mstate, verify, ctx, state)
             return fail("native_name_ids_missing",
                 "native name strategy requires at least one real dictionary id", state)
         end
+        native_ids = util.copy(native)
         native.usercaneditname = 0
         local nwritten, nfail = set_map(mstate.playerid, native)
         if #nfail > 0 or count ~= 4 then
@@ -1072,57 +1181,17 @@ local function finish_member_name(player, mstate, verify, ctx, state)
 
     local expected = requested_name_from_player(player)
     if (verify or {}).name ~= false then
-        local host_name, host_available = nil, false
-        if type(rawget(_G, "GetPlayerName")) == "function" then
-            local ok, actual = pcall(_G.GetPlayerName, mstate.playerid)
-            host_available = ok
-            if ok then host_name = tostring(actual or "") end
-        end
-        mstate.host_player_name = host_name
-        if not host_available then
-            return fail_after_custom_detach("name_visibility_unavailable",
-                "GetPlayerName is required to verify the FC-visible signing name")
-        end
-        local name_visible = expected ~= "" and visible_name_matches(host_name, expected)
-        local matched_expected = expected
-        if not name_visible and strategy == "native_ids" then
-            local source_names = type(player.names) == "table" and player.names or {}
-            for _, field in ipairs({ "playerjerseyname", "surname" }) do
-                local alternative = tostring(source_names[field] or "")
-                if alternative ~= "" and visible_name_matches(host_name, alternative) then
-                    name_visible = true
-                    matched_expected = alternative
-                    break
-                end
-            end
-        end
-        mstate.visible_name_expected = matched_expected
-        if not name_visible then
-            mstate.verify_visible_name_tries = (tonumber(mstate.verify_visible_name_tries) or 0) + 1
-            if mstate.verify_visible_name_tries < 8 then
-                return wait_event(state, {
-                    waiting_for = "visible_name", expected = expected, actual = host_name,
-                    strategy = strategy, tries = mstate.verify_visible_name_tries,
-                    playerid = mstate.playerid,
-                })
-            end
-            return fail_after_custom_detach("name_not_visible",
-                string.format("expected FC-visible name %s, observed %s after %s waits",
-                    expected, tostring(host_name), mstate.verify_visible_name_tries))
+        local stored, why, detail = stored_name_ok(mstate.playerid, player, strategy, native_ids)
+        if not stored then
+            return fail_after_custom_detach(why, detail or "")
         end
     end
-    if not mstate.slot_consumed then
-        local consumed_path = state.consumed_path or mstate.consumed_path
-        local path, consumed, consume_reason = consumed_dummy_store(ctx)
-        if consumed_path and consumed_path ~= "" then path = consumed_path end
-        if not path then
-            return fail(consume_reason or "consumed_slot_unavailable",
-                "name verified but free-agent slot could not be reserved", state)
-        end
-        local marked, mark_reason = consume_dummy(path, consumed, mstate.playerid)
-        if not marked then return fail("consumed_slot_write_failed", mark_reason or "", state) end
-        mstate.slot_consumed = true
-        state.consumed_path = path
+    record_name_proof(mstate, mstate.playerid, expected)
+    local consumed_ok, consume_reason = consume_now(ctx, mstate, state, mstate.playerid)
+    if not consumed_ok then
+        return fail(consume_reason == "consumed_slot_unavailable" and consume_reason
+                or "consumed_slot_write_failed",
+            "name stored but the free-agent slot could not be reserved", state)
     end
     mstate.name_done = true
     mstate.name_rows_inserted = inserted
@@ -1192,6 +1261,9 @@ local function step_batch(op, job, ctx, state)
             if pid and pid > 0 then used[math.floor(pid)] = true end
             i = i + 1
         end
+        -- One DB read for the whole bag: dummies already on the club.
+        local on_club = (user_team() == state.teamid)
+            and host_id_set("GetUserSeniorTeamPlayerIDs", nil) or nil
         local saw_wait = false
         local last_reason, last_detail = "no_dummy", "no eligible dummy in the explicit pool"
         i = 1
@@ -1214,7 +1286,7 @@ local function step_batch(op, job, ctx, state)
                     mstate.relink_only = true
                     used[pid] = true
                 else
-                    local kind, a, b = try_pick_member(member, consumed, used)
+                    local kind, a, b = try_pick_member(member, consumed, used, on_club)
                     if kind == "ok" then
                         mstate.playerid, mstate.dummy_index = a, b
                         used[a] = true
@@ -1339,6 +1411,10 @@ local function step_batch(op, job, ctx, state)
                     mstate.transferred = true
                     mstate.transfer_via = reason
                     placed = placed + 1
+                    -- The dummy is on the club now: never offer it again, even
+                    -- if a later step fails. A write error is retried (and then
+                    -- fatal) in the name step.
+                    consume_now(ctx, mstate, state, pid)
                 elseif kind == "wait" then
                     waiting = true
                 else
@@ -1468,13 +1544,16 @@ local function step_batch(op, job, ctx, state)
             i = i + 1
         end
         local ids, first = {}, nil
+        local cache_stale = false
         i = 1
         while i <= count do
-            local pid = tonumber(member_at(members, i).playerid)
+            local mstate = member_at(members, i)
+            local pid = tonumber(mstate.playerid)
             if pid then
                 ids[#ids + 1] = pid
                 if not first then first = pid end
             end
+            if mstate.le_cache_current == false then cache_stale = true end
             i = i + 1
         end
         state.step = #BATCH_STEP_NAMES + 1
@@ -1486,6 +1565,10 @@ local function step_batch(op, job, ctx, state)
                 verified = true, steps = #BATCH_STEP_NAMES,
                 batch = count,
                 visible_name_verified = true,
+                name_verified_via = "database",
+                -- LE's own name list (GetPlayerName) catches up after the next
+                -- day advance or save load; FC reads the stored identity.
+                le_name_cache_stale = cache_stale,
             },
             progress = state, failures = {},
         }
@@ -1559,6 +1642,8 @@ function M.step(op, job, ctx)
         end
         local saw_unknown = false
         local last_reason, last_detail = "no_dummy", "no eligible dummy in the explicit pool"
+        local on_club = (user_team() == state.teamid)
+            and host_id_set("GetUserSeniorTeamPlayerIDs", nil) or nil
         for i = 1, n do
             local pid = tonumber(pool[i])
             if not pid or pid <= 0 or pid > 459999 then
@@ -1574,7 +1659,7 @@ function M.step(op, job, ctx)
                         use_filter = util.copy(filter)
                         use_filter.expected_overallrating = nil
                     end
-                    local clean, reason, detail = safe_free_agent(pid, use_filter)
+                    local clean, reason, detail = safe_free_agent(pid, use_filter, on_club)
                     if clean then
                         -- Do not burn the slot until names are written. A failed
                         -- name insert used to leave a half-mutated free agent
@@ -1684,6 +1769,7 @@ function M.step(op, job, ctx)
             })
         end
         state.verify_source = reason
+        consume_now(ctx, state, state, state.playerid)
         return next_step(state, { transferred = true, transfer_via = reason }, { side_effects = 1 })
     end
 
@@ -1773,6 +1859,7 @@ function M.step(op, job, ctx)
         -- path, but may finish only after the host resolves that same name.
         local strategy = tostring(player.name_strategy or "custom")
         local inserted = 0
+        local native_ids = nil
         local function fail_after_custom_detach(reason, detail)
             if strategy ~= "custom" or not state.name_dictionary_detached then
                 return fail(reason, detail, state)
@@ -1815,6 +1902,7 @@ function M.step(op, job, ctx)
                 return fail("native_name_ids_missing",
                     "native name strategy requires at least one real dictionary id", state)
             end
+            native_ids = util.copy(native)
             native.usercaneditname = 0
             local nwritten, nfail = set_map(state.playerid, native)
             if #nfail > 0 or count ~= 4 then
@@ -1869,62 +1957,17 @@ function M.step(op, job, ctx)
 
         local expected = requested_name(op)
         if (op.verify or {}).name ~= false then
-            local host_name, host_available = nil, false
-            if type(rawget(_G, "GetPlayerName")) == "function" then
-                local ok, actual = pcall(_G.GetPlayerName, state.playerid)
-                host_available = ok
-                if ok then host_name = tostring(actual or "") end
-            end
-            state.host_player_name = host_name
-            if not host_available then
-                return fail_after_custom_detach("name_visibility_unavailable",
-                    "GetPlayerName is required to verify the FC-visible signing name")
-            end
-            local name_visible = expected ~= "" and visible_name_matches(host_name, expected)
-            local matched_expected = expected
-            -- Native FC cards may expose a full common name in the Library
-            -- while Career renders the verified surname/jersey name. Treat
-            -- those source-provided display components as alternatives, but
-            -- only for native IDs; custom-name fallback must match its full
-            -- requested literal row exactly.
-            if not name_visible and strategy == "native_ids" then
-                local source_names = type(player.names) == "table" and player.names or {}
-                for _, field in ipairs({ "playerjerseyname", "surname" }) do
-                    local alternative = tostring(source_names[field] or "")
-                    if alternative ~= "" and visible_name_matches(host_name, alternative) then
-                        name_visible = true
-                        matched_expected = alternative
-                        break
-                    end
-                end
-            end
-            state.visible_name_expected = matched_expected
-            if not name_visible then
-                state.verify_visible_name_tries = (tonumber(state.verify_visible_name_tries) or 0) + 1
-                if state.verify_visible_name_tries < 8 then
-                    return wait_event(state, {
-                        waiting_for = "visible_name", expected = expected, actual = host_name,
-                        strategy = strategy, tries = state.verify_visible_name_tries,
-                    })
-                end
-                return fail_after_custom_detach("name_not_visible",
-                    string.format("expected FC-visible name %s, observed %s after %s waits",
-                        expected, tostring(host_name), state.verify_visible_name_tries))
+            local stored, why, detail = stored_name_ok(state.playerid, player, strategy, native_ids)
+            if not stored then
+                return fail_after_custom_detach(why, detail or "")
             end
         end
-        -- Mark the safe free-agent slot only after the real FC name resolver
-        -- agrees. A blank/dummy label is an incomplete signing, never done.
-        if not state.slot_consumed then
-            local consumed_path = state.consumed_path
-            local path, consumed, consume_reason = consumed_dummy_store(ctx)
-            if consumed_path and consumed_path ~= "" then path = consumed_path end
-            if not path then
-                return fail(consume_reason or "consumed_slot_unavailable",
-                    "name verified but free-agent slot could not be reserved", state)
-            end
-            local marked, mark_reason = consume_dummy(path, consumed, state.playerid)
-            if not marked then return fail("consumed_slot_write_failed", mark_reason or "", state) end
-            state.slot_consumed = true
+        record_name_proof(state, state.playerid, expected)
+        local consumed_ok, consume_reason = consume_now(ctx, state, state, state.playerid)
+        if not consumed_ok then
+            return fail(consume_reason == "consumed_slot_unavailable" and consume_reason
+                    or "consumed_slot_write_failed",
+                "name stored but the free-agent slot could not be reserved", state)
         end
         state.step = 11
         return {
@@ -1936,6 +1979,8 @@ function M.step(op, job, ctx)
                 host_player_name = state.host_player_name,
                 name_strategy = strategy,
                 visible_name_verified = true,
+                name_verified_via = "database",
+                le_name_cache_stale = state.le_cache_current == false,
             },
             progress = state, failures = {},
         }

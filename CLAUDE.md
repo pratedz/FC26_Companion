@@ -55,12 +55,31 @@ keeps every job-derived path inside `queue/` (SI-7).
 - **Never drain during LE init.** Autorun arms handlers only (SAFE_ARM). Draining
   at load froze LE.
 - **Arm only via `lua/autorun/`.** Never patch LE's `live_editor.lua` (SI-3).
-- **Jobs run only on an allow-listed, settled Career event** (post
-  `ENTERED_HUB_FIRST_TIME` / `ENTERING_TEAM_MANAGEMENT` with `IsInCM()`).
-  Every other event, including day/hour/month passing, save, load and season
-  reset, clears hub-ready and does no game or disk I/O. Readiness is
-  re-checked between ops and jobs. This is the 2.6.36/2.6.37 calendar-freeze
-  fix — see `C:\Users\prated\Desktop\Fc26 LE\diagnosis\Career progression fix.md`.
+- **Hub readiness is a latch (2.6.42).** Only a settled hub event (post
+  `ENTERED_HUB_FIRST_TIME` / `ENTERING_TEAM_MANAGEMENT` with `IsInCM()`) sets
+  it. Hub screen/notification events (`events.BENIGN_NAMES`: `DATA_READY`,
+  `LEAVING_TEAM_MANAGEMENT`, `PLAYER_ADDED_TO_TEAM`, …) keep it. Every other
+  event, including day/hour/month passing, save, load, match, season reset
+  and any unknown id, clears it and does no game or disk I/O. Readiness is
+  re-checked between ops and jobs. This keeps the 2.6.36/2.6.37
+  calendar-freeze fix — see `C:\Users\prated\Desktop\Fc26 LE\diagnosis\Career progression fix.md`.
+- **Job classes (2.6.42, `runner.job_class`)**: `read`, `light` (set_fields,
+  bulk_edit, career.set, growth_sync, injury.cure, budget set) and `heavy`
+  (add_to_team, transfer incl. release, create_player, names.sync,
+  repair/restore_partial_add, asset export, anything unknown). A settled hub
+  event runs every class for up to `hub_drain_budget_ms` (one visit finishes
+  the queue); a quiet native tick runs read + light; a hub screen post event
+  (throttled, `ui_pump_every_ms`) runs read + light except the whole-table
+  reads `export_squad` / `db.dump` (0.2-3.2 s freezes). Heavy jobs wait for
+  Team Management.
+- **`GetPlayerName` / `GetTeamIdFromPlayerId` are Live Editor's cache**, built
+  on first use and cleared only by LE's native `DAY_PASSED` /
+  `POST_LOAD_PREPARE` listeners (FCLiveEditor.DLL v26.3.6, MasterManager
+  0x180363d00). In the hub visit of a write they return pre-write values.
+  Never use them as proof of a write: verify from the DB (players name ids,
+  editedplayernames, teamplayerlinks, `GetUserSeniorTeamPlayerIDs`). Before
+  2.6.42 this made every signing wait 8 events and end `name_not_visible`, and
+  releases end `unverified_side_effect`.
 - No `ReloadPlayersManager` (SI-4). `CreatePlayer` only with
   `grants.allow_create_player` and ids clamped to 460000–499999 (SI-5).
   `add_to_team` needs `core_ops` enabled in config.json **and**
@@ -74,19 +93,27 @@ keeps every job-derived path inside `queue/` (SI-7).
   show a reviewed diff before any queue write. No animation loops in the UI
   (they froze v1).
 
-## Native plugin (lec_native.dll, core 2.6.38+)
+## Native plugin (lec_native.dll 1.1.0, core 2.6.42+)
 
 LE has no native plugin API (`GetPlugin` only looks up game objects), but its
 embedded Lua keeps `package.loadlib`. `ingame/le_companion/native.lua` loads
 `native/lec_native.dll` (source: `native/lec_native/`, build: `python build.py`
 with Zig). The DLL adds a ~200 ms tick on the Career-event thread that calls
-`runner.on_native_tick()`: reads on a settled hub, writes only after 1.5 s of
-hub quiet with no job awaiting a post-transfer event. It calls LE's own
-`lua_gettop/settop/load/pcallk` by RVA **only after matching LE v26.3.6's code
-bytes** (`le_sig.h`); any other LE build leaves it idle. Status:
-`<queue>/native_status.json` -> app "Instant mode" (doctor/Health/status).
-Kill switches: `native/DISABLE`, `<queue>/native_disable`,
-`config.json "native": false` / `"native_tick_writes": false`.
+`runner.on_native_tick()`: read + light jobs only, never while a Career event
+is open or within `LIMITS.quiet_ms` of one, writes only after 1.5 s of quiet
+with no job awaiting a post-transfer event. Two carriers: a thread timer
+(needs a message pump — FC's Career thread has none, measured 2026-10-17) and
+(1.1.0) one user APC at a time via `QueueUserAPC`, which Windows runs only
+inside that thread's own alertable waits. `native_status.json` reports
+`carrier` (`timer`/`apc`/`none`) and `reason: "no_carrier"` when neither
+reaches the thread; whether FC's thread waits alertably is not yet measured
+in game. It calls LE's own `lua_gettop/settop/load/pcallk` by RVA **only after
+matching LE v26.3.6's code bytes** (`le_sig.h`); any other LE build leaves it
+idle. Status -> app "Instant mode" (doctor/Health/status). Kill switches:
+`native/DISABLE`, `<queue>/native_disable`, `config.json "native": false` /
+`"native_tick_writes": false`; APC only: `native/NO_APC`,
+`<queue>/native_no_apc`, `config.json "native_apc": false`. Hub screen-event
+drains: `config.json "ui_event_jobs": false`.
 A new LE version needs the RVAs re-located (see `native/lec_native/README.md`).
 
 ## Versions — keep in sync
@@ -95,13 +122,16 @@ A new LE version needs the RVAs re-located (see `native/lec_native/README.md`).
   `CORE_VERSION`, `SIGN_CORE_MIN`.
 - `ingame/le_companion/version.lua`: `version.VERSION` must equal
   `CORE_VERSION` (enforced by `tests/v2/test_automation_workspace.py`).
-  Both are `2.6.38` (2.6.37 calendar-freeze fix + 2.6.38 native tick). Bump both on any core change.
+  Both are `2.6.42` (hub latch, job classes, DB name proof, APC carrier). Bump both on any core change.
 - Deployed `README.txt` carries per-release notes (written by the deploy step).
 
 ## Commands
 
 ```powershell
-python -m pytest tests/v2 -q                 # ~1,100 tests, headless
+python -m pytest tests/v2 -q                 # ~1,500 tests, headless. A bare `pytest` also runs
+                                             # tests/; its tests that write into the real LE
+                                             # install (v1 autorun loader, live_editor.lua
+                                             # auto-arm) run only with COMPANION_ALLOW_LIVE_LE_TESTS=1
 $env:COMPANION_ALLOW_GUI_TESTS=1; python -m pytest tests/v2 -q   # include real-window tests
 python app_entry_v2.py                       # run GUI from source
 python app_entry_v2.py doctor                # any arg -> CLI (companion/cli.py)

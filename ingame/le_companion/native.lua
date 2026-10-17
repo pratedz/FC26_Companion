@@ -8,12 +8,19 @@ LE v26.3.6's code bytes, only on the Career event thread and only with the
 same lua_State; otherwise it stays idle and the core behaves exactly as
 before.
 
+The tick arrives by thread timer or (1.1.0) by an APC that Windows runs only
+inside one of that thread's own alertable waits. FC's Career thread has no
+message pump, so the timer never fired there; native_status.json reports
+which carrier delivers ("carrier") or "no_carrier" when neither does.
+
 What a tick may do is decided by the runner (runner.on_native_tick): reads
-when the hub is settled, writes only after the hub has been quiet and no job
-is waiting for a post-transfer event. Simulation days never run anything.
+and plain field edits once the hub has been quiet, never while a Career
+event is open, never a signing, release or other heavy job. Simulation days
+never run anything.
 
 Disable without uninstalling: config.json "native": false, or create
-native/DISABLE (stops ticks within ~1 s), or <queue>/native_disable.
+native/DISABLE (stops ticks within ~1 s), or <queue>/native_disable. APC
+only: config.json "native_apc": false, native/NO_APC or <queue>/native_no_apc.
 ]]
 
 local native = {
@@ -22,6 +29,7 @@ local native = {
     path = nil,
     ticks = 0,
     hotkeys = 0,
+    apc = false,    -- the loaded DLL has the APC carrier and it is enabled
 }
 
 local DLL = "native/lec_native.dll"
@@ -54,6 +62,7 @@ local function apply_install_switches(dir, cfg)
     f:close()
     if text:match('"native"%s*:%s*false') then cfg.native = false end
     if text:match('"native_tick_writes"%s*:%s*false') then cfg.native_tick_writes = false end
+    if text:match('"native_apc"%s*:%s*false') then cfg.native_apc = false end
 end
 
 --- Load the plugin from <core_dir>/native/lec_native.dll.
@@ -97,6 +106,13 @@ function native.load(core_dir, cfg, runner)
     if not ok then
         native.reason = "open_failed:" .. tostring(open_err)
         return false
+    end
+    -- Optional (1.1.0+): an older DLL simply has no APC carrier to stop.
+    local no_apc = package.loadlib(path, "lec_native_no_apc")
+    native.apc = type(no_apc) == "function"
+    if native.apc and type(cfg) == "table" and cfg.native_apc == false then
+        pcall(no_apc)
+        native.apc = false
     end
     native._mark_career = mark
     native._mark_hotkey = hotkey

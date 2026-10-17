@@ -159,6 +159,59 @@ def test_waiting_for_career_event_is_not_an_alarm() -> None:
     assert view["state"] == "off" and not view["attention"]
 
 
+# The exact shape lec_native 1.1.0 writes (lec_format_status).
+_STATUS_1_1 = """{
+  "schema": 1,
+  "plugin": "lec_native",
+  "version": "1.1.0",
+  "le_build": "v26.3.6",
+  "pid": 1234,
+  "verified": true,
+  "reason": "ok",
+  "le_base": "0x7ffaae130000",
+  "le_base_via": "module_list",
+  "pe_header": "match",
+  "disabled": false,
+  "error_stop": false,
+  "tick_live": true,
+  "tick_ms": 200,
+  "timer_kind": "thread",
+  "threads": {"open": 14536, "career": 13704, "hotkey": 0, "timer": 13704},
+  "same_thread": true,
+  "same_state": true,
+  "counts": {"career_events": 3246, "hotkey_events": 0, "ticks": 75, "tick_errors": 0, "skip_thread": 0, "skip_state": 0, "skip_busy": 0, "timer_ticks": 0, "apc_ticks": 75},
+  "carrier": "apc",
+  "apc": {"enabled": true, "tid": 13704, "queued": 76, "ran": 75, "queue_failed": 0, "pending": true, "pending_ms": 40},
+  "last_tick_age_ms": 160,
+  "last_career_age_ms": 407891,
+  "last_status": 0,
+  "uptime_ms": 48289703
+}
+"""
+
+
+def test_parses_the_lec_native_1_1_status(tmp_path: Path) -> None:
+    p = _write(tmp_path / NATIVE_STATUS_FILE, None, raw=_STATUS_1_1)
+    ns = read_native_status(p, now_ts=NOW, session_pid=1234)
+    assert ns is not None and ns.instant
+    assert ns.carrier == "apc"
+    assert ns.apc["queued"] == 76 and ns.apc["ran"] == 75 and ns.apc["pending"] == 1
+    assert ns.counts["apc_ticks"] == 75 and ns.counts["timer_ticks"] == 0
+    assert native_view(ns)["line"] == "Instant mode: on (native tick 200 ms via APC)"
+
+
+def test_no_carrier_is_off_and_not_an_alarm() -> None:
+    view = native_view(NativeStatus.from_wire(_status(reason="no_carrier", tick_live=False)))
+    assert view["state"] == "off" and not view["attention"]
+    assert "Team Management" in view["line"]
+
+
+def test_a_1_0_status_without_carrier_fields_still_reads() -> None:
+    ns = NativeStatus.from_wire(_status())
+    assert ns.carrier == "" and ns.apc == {}
+    assert native_view(ns)["line"] == "Instant mode: on (native tick 200 ms)"
+
+
 # ---- transport + liveness -------------------------------------------------
 
 

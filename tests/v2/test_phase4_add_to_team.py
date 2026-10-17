@@ -146,7 +146,11 @@ def test_lua_has_ten_named_steps_and_truthful_verification() -> None:
     ):
         assert f'"{name}"' in source
     assert '"team_not_applied"' in source
-    assert 'fail_after_custom_detach("name_not_visible"' in source
+    # 2.6.42: the stored identity is the name gate; LE's cached GetPlayerName
+    # (rebuilt only on a day advance / save load) is diagnostics, never a wait.
+    assert "stored_name_ok(" in source
+    assert 'waiting_for = "visible_name"' not in source
+    assert '"name_not_visible"' not in source
     assert "create_strategy_disabled" in source
     assert "consumed_free_agent_dummies_" in source
     assert "safe_free_agent" in source
@@ -194,8 +198,9 @@ def test_lua_name_path_proves_durable_content_not_shell_rows() -> None:
     # embedded dummy substring (Ben / Benedict) look like a valid identity.
     assert "contains_sequence" in source
     assert "got:find(want" not in source
-    # Step 10: custom fallback keeps durable-row ordering, but a matching FC
-    # host-visible name is the terminal gate for both custom and native paths.
+    # Step 10: custom fallback keeps durable-row ordering, and the stored
+    # identity read back from the database is the terminal gate for both the
+    # custom and the native path (2.6.42).
     step10 = source.split("if step == 10 then", 1)[1].split(
         'return fail("bad_resume_step"', 1
     )[0]
@@ -203,20 +208,20 @@ def test_lua_name_path_proves_durable_content_not_shell_rows() -> None:
     assert 'strategy == "custom"' in step10
     assert "write_names(state.playerid, player.names or {})" in step10
     assert "host_player_name" in step10
-    assert "visible_name_matches(host_name, expected)" in step10
-    assert 'waiting_for = "visible_name"' in step10
-    assert 'fail_after_custom_detach("name_not_visible"' in step10
+    assert "stored_name_ok(state.playerid, player, strategy, native_ids)" in step10
+    assert 'waiting_for = "visible_name"' not in step10
+    assert 'name_verified_via = "database"' in step10
     assert "visible_name_verified = true" in step10
     assert step10.index("write_names(state.playerid, player.names or {})") < step10.index(
         "if player.detach_name_dictionary ~= false then"
     )
     # A worker can never claim the signing is verified before this guard.
-    assert step10.index("visible_name_matches(host_name, expected)") < step10.index(
+    assert step10.index("stored_name_ok(state.playerid") < step10.index(
         "visible_name_verified = true"
     )
-    # A custom fallback restores its original dictionary identity on its final
-    # visible-name failure, so it cannot leave a new blank Squad Hub label.
-    assert "fail_after_custom_detach" in step10
+    # A custom fallback restores its original dictionary identity when the
+    # stored identity does not read back, so it cannot leave a blank label.
+    assert "fail_after_custom_detach(why" in step10
     assert "restored the original FC name identity" in step10
 
 

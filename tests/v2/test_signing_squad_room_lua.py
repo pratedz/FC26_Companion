@@ -579,14 +579,44 @@ def test_names_sync_reports_a_read_back_failure_per_player(host):
     assert [f["target"] for f in res["failures"]] == [701]
 
 
-def test_names_sync_undoes_a_detach_that_never_becomes_visible(host):
+def test_names_sync_trusts_the_stored_identity_over_a_stale_le_cache(host):
+    """2.6.42: GetPlayerName is LE's cache (rebuilt on a day advance / load).
+
+    A stale cached name must neither fail the fix nor undo a detach whose
+    stored identity reads back; it is only reported.
+    """
+    _squad(host, 5, 0)
+    _signed(host, 701, detached=False)
+    host.run("STALE_VISIBLE = true")
+    res = host.drive("ops.names_sync", "step", _sync_op(_sync_entry(701, "Diego Maradona")))
+    assert res["ok"] is True, res
+    row = res["data"]["players"][0]
+    assert row["status"] == "fixed" and row["visible_name"] == "Diego Maradona"
+    assert row["le_cache_current"] is False
+    assert row["le_cache_name"] == "Dummy 701"
+    assert not row.get("restored")
+    assert host.eval("player_row(701).firstnameid") == 0
+    assert host.eval("player_row(701).usercaneditname") == 1
+
+
+def test_names_sync_undoes_a_detach_whose_identity_does_not_read_back(host):
     _squad(host, 5, 0)
     _signed(host, 701, detached=False)
     original = host.eval("player_row(701).firstnameid")
-    host.run("STALE_VISIBLE = true")
+    # FC refuses the dictionary detach for this row: the ids never become 0.
+    host.run(
+        """
+        local t = TABLES.players
+        local real = t.SetRecordFieldValue
+        t.SetRecordFieldValue = function(self, rec, field, value)
+            if field == "usercaneditname" then return end
+            return real(self, rec, field, value)
+        end
+        """
+    )
     res = host.drive("ops.names_sync", "step", _sync_op(_sync_entry(701, "Diego Maradona")))
     row = res["data"]["players"][0]
-    assert row["status"] == "failed" and row["reason"] == "name_not_visible"
+    assert row["status"] == "failed"
     assert row["restored"] is True
     assert host.eval("player_row(701).firstnameid") == original
 

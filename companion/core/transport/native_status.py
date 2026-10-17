@@ -31,6 +31,7 @@ KNOWN_REASONS = (
     "set_timer_failed",
     "ok",
     "tick_error_stop",
+    "no_carrier",   # lec_native 1.1: neither timer nor APC reaches the Career thread
 )
 
 
@@ -94,6 +95,10 @@ class NativeStatus:
     last_career_age_ms: int | None = None
     last_status: int = 0
     uptime_ms: int = 0
+    # lec_native 1.1: which carrier delivered the last tick ("timer" | "apc" |
+    # "none"), and the APC carrier's counters (booleans read as 0/1).
+    carrier: str = ""
+    apc: Mapping[str, int] = field(default_factory=dict)
     # Staleness, decided by the reader — not part of the wire file.
     file_age: float = 0.0       # seconds since the file's mtime
     stale: bool = False
@@ -148,6 +153,8 @@ class NativeStatus:
             last_career_age_ms=_opt_int(data.get("last_career_age_ms")),
             last_status=_int(data.get("last_status")),
             uptime_ms=_int(data.get("uptime_ms")),
+            carrier=_str(data.get("carrier")),
+            apc=_int_map(data.get("apc")),
             file_age=float(file_age),
             stale=bool(stale),
             stale_reason=stale_reason,

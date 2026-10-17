@@ -34,14 +34,25 @@ events.FALLBACK_IDS = {
     ALL_RETIRED_PLAYERS_COMPLETE = 61,
     PLAYER_CONTRACT_TERMINATION = 62,
     PLAYER_CONTRACT_ACCEPTED = 63,
+    PLAYER_CONTRACT_NEGOTIATION = 64,
     SCREEN_HAS_DONE_LOADING = 68,
+    PLAYER_MADE_AVAILABLE_FOR_TRANSFER = 80,
+    PLAYER_MADE_AVAILABLE_FOR_LOAN = 81,
     ENTERING_TEAM_MANAGEMENT = 82,
+    LEAVING_TEAM_MANAGEMENT = 83,
+    TRANSFER_MOVE_ABOUT_TO_COMPLETE = 85,
     TRANSFER_MOVE_COMPLETE = 86,
+    USER_PRESIGNED_CONTRACT_CREATED = 87,
     YOUTH_PLAYER_ADDED_TO_YOUTH_ACADEMY = 109,
     PLAYER_ADDED_TO_TEAM = 110,
     PLAYER_REMOVED_FROM_TEAM = 111,
     YOUTH_PLAYER_PROMOTION = 112,
     YOUTH_PLAYERS_RETIREMENT = 115,
+    USER_SHORTLISTED = 136,
+    USER_TRANSFERLISTED = 137,
+    USER_LOANLISTED = 138,
+    USER_PLAYER_POSITION_CHANGED = 148,
+    USER_PLAYER_TRAINING_PLAN_CHANGED = 149,
 }
 
 events.HARD_RESET_NAMES = {
@@ -75,6 +86,32 @@ events.PUMP_NAMES = {
 -- Only these two mean the hub (or team management) is actually open.
 events.HUB_READY_NAMES = {
     "ENTERED_HUB_FIRST_TIME", "ENTERING_TEAM_MANAGEMENT",
+}
+-- 2.6.42: screen and notification events that fire while the user stays in
+-- the Career hub (DATA_READY alone fired ~2,000 times in one 2026-10-17
+-- session). They keep hub readiness instead of revoking it, so a settled hub
+-- no longer needs a fresh Team Management visit after every click. They never
+-- *establish* readiness: only HUB_READY_NAMES do. Every id not listed here or
+-- there, including unknown ones, still revokes readiness (fail safe), which
+-- covers simulation, saving, loading, matches and season changes.
+events.BENIGN_NAMES = {
+    "DATA_READY", "SCREEN_HAS_DONE_LOADING", "LEAVING_TEAM_MANAGEMENT",
+    "TRANSFER_MOVE_ABOUT_TO_COMPLETE", "TRANSFER_MOVE_COMPLETE",
+    "PLAYER_ADDED_TO_TEAM", "PLAYER_REMOVED_FROM_TEAM",
+    "PLAYER_CONTRACT_TERMINATION", "PLAYER_CONTRACT_ACCEPTED",
+    "PLAYER_CONTRACT_NEGOTIATION", "USER_PRESIGNED_CONTRACT_CREATED",
+    "PLAYER_INSERTED_INTO_PLAYERS_TABLE", "PLAYER_DELETED_FROM_PLAYERS_TABLE",
+    "PLAYER_MADE_AVAILABLE_FOR_TRANSFER", "PLAYER_MADE_AVAILABLE_FOR_LOAN",
+    "USER_SHORTLISTED", "USER_TRANSFERLISTED", "USER_LOANLISTED",
+    "USER_PLAYER_POSITION_CHANGED", "USER_PLAYER_TRAINING_PLAN_CHANGED",
+}
+-- Benign events after which the squad may differ: the live mirror rebuilds.
+events.SQUAD_CHANGE_NAMES = {
+    "TRANSFER_MOVE_ABOUT_TO_COMPLETE", "TRANSFER_MOVE_COMPLETE",
+    "PLAYER_ADDED_TO_TEAM", "PLAYER_REMOVED_FROM_TEAM",
+    "PLAYER_CONTRACT_TERMINATION", "PLAYER_CONTRACT_ACCEPTED",
+    "USER_PRESIGNED_CONTRACT_CREATED",
+    "PLAYER_INSERTED_INTO_PLAYERS_TABLE", "PLAYER_DELETED_FROM_PLAYERS_TABLE",
 }
 -- Calendar simulate and match entry fire these in a tight loop on the game
 -- thread. The companion must not touch disk or the player DB while they do.
@@ -131,6 +168,8 @@ function events.load()
     events.pump = {}
     events.hub = {}
     events.busy = {}
+    events.benign = {}
+    events.squad_change = {}
     fill(events.hard_reset, events.HARD_RESET_NAMES)
     fill(events.invalidate_players, events.INVALIDATE_PLAYERS_NAMES)
     fill(events.invalidate_squads, events.INVALIDATE_SQUADS_NAMES)
@@ -138,6 +177,8 @@ function events.load()
     fill(events.pump, events.PUMP_NAMES)
     fill(events.hub, events.HUB_READY_NAMES)
     fill(events.busy, events.BUSY_NAMES)
+    fill(events.benign, events.BENIGN_NAMES)
+    fill(events.squad_change, events.SQUAD_CHANGE_NAMES)
     return true
 end
 
@@ -174,6 +215,15 @@ end
 
 function events.is_busy(id)
     return type(id) == "number" and events.busy[id] ~= nil
+end
+
+--- A hub screen/notification event: keeps readiness, never establishes it.
+function events.is_benign(id)
+    return type(id) == "number" and events.benign ~= nil and events.benign[id] ~= nil
+end
+
+function events.changes_squad(id)
+    return type(id) == "number" and events.squad_change ~= nil and events.squad_change[id] ~= nil
 end
 
 events.load()

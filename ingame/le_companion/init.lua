@@ -104,8 +104,10 @@ LEC.config = {
     max_playerid = version.LIMITS.max_playerid,
     core_ops = {},
     native = true,              -- load native/lec_native.dll (tick)
-    native_tick_writes = true,  -- native tick may run writes on a quiet hub
+    native_tick_writes = true,  -- native tick may run read/light jobs on a quiet hub
     mirror = true,              -- keep <queue>/mirror/squad.json current on a settled hub
+    ui_event_jobs = true,       -- 2.6.42: hub screen events may run read/light jobs
+    native_apc = true,          -- 2.6.42: lec_native may tick through an APC
 }
 
 local function read_install_config()
@@ -142,7 +144,7 @@ function LEC.configure(opts)
             end
         end
     end
-    for _, key in ipairs({ "native", "native_tick_writes", "mirror" }) do
+    for _, key in ipairs({ "native", "native_tick_writes", "mirror", "ui_event_jobs", "native_apc" }) do
         local v = opts[key]
         if v == nil and installed then v = installed[key] end
         if type(v) == "boolean" then c[key] = v end

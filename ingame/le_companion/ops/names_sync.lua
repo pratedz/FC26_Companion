@@ -18,14 +18,17 @@ Contract (op v1, single-op job, grant allow_add_to_team, requires.save_uid):
 
 Per player, step 1 ("write"):
   * refuse (no write) unless the player is provably on the user's club;
-  * "already" (no write) when the durable identity is in place AND FC's own
-    resolver (GetPlayerName) shows the signed name;
+  * "already" (no write) when the stored identity is in place;
   * otherwise write: custom -> durable editedplayernames row first, then the
     dictionary detach (snapshotting the previous ids); native -> the four ids;
     then read the stored identity back.
-Step 2 ("verify_visible") waits on real Career events (like add_to_team's
-final name step) until GetPlayerName agrees; a custom detach that never
-becomes visible is undone so no blank label is left behind.
+Step 2 ("verify_visible") reads the stored identity back once more. Since
+2.6.42 it no longer waits on GetPlayerName: that answers from Live Editor's
+player cache, which LE rebuilds only on a day advance or a save load, so it
+kept old names for the whole hub visit and every fix ended name_not_visible.
+The cached name is still reported (le_cache_name) for diagnostics; a custom
+detach whose stored identity does not read back is undone so no blank label
+is left behind.
 
 Nothing here transfers, edits stats/face, or touches another table.
 ]]
@@ -37,7 +40,6 @@ local H = add.helpers
 local M = {}
 
 local MAX_PLAYERS = 60
-local VISIBLE_TRIES = 6
 local DICT_FIELDS = { "firstnameid", "lastnameid", "commonnameid", "playerjerseynameid" }
 
 local function positive(value)
@@ -129,19 +131,29 @@ local function visible_ok(entry, name)
     return false
 end
 
+--- The identity FC renders, read from the database (2.6.42).
+local function stored_ok(entry, dict)
+    dict = dict or dictionary_state(entry.playerid)
+    if not dict then return false end
+    if entry.strategy == "native_ids" then
+        return native_applied(dict, entry.native_ids)
+    end
+    return H.durable_name_ok(entry.playerid, entry.names)
+        and (entry.detach == false or is_detached(dict))
+end
+
+local function note_cache(entry)
+    local name, available = host_name(entry.playerid)
+    entry.le_cache_name = available and name or nil
+    entry.le_cache_current = available and visible_ok(entry, name) or false
+end
+
 local function fail(reason, detail, state)
     return {
         ok = false, reason = reason, detail = detail or "",
         counts = (state and state.counts) or {},
         data = { progress = state },
         failures = { { reason = reason, detail = detail or "" } },
-    }
-end
-
-local function wait_event(state, data)
-    return {
-        ok = true, deferred = true, awaiting_event = true,
-        counts = {}, data = data or {}, progress = state, failures = {},
     }
 end
 
@@ -169,28 +181,18 @@ local function sync_one(entry, teamid, state)
         entry.detail = "players row is not readable"
         return entry
     end
-    local before, available = host_name(pid)
+    local before = host_name(pid)
     entry.before_name = before
-    local durable, dict_ok
-    if entry.strategy == "native_ids" then
-        durable, dict_ok = true, native_applied(dict, entry.native_ids)
-    else
-        durable = H.durable_name_ok(pid, entry.names)
-        dict_ok = entry.detach == false or is_detached(dict)
-    end
-    if durable and dict_ok and available and visible_ok(entry, before) then
-        entry.status, entry.visible_name = "already", before
+    note_cache(entry)
+    if stored_ok(entry, dict) then
+        -- The stored identity is already the signed one. LE's cached name
+        -- (before_name) may lag until the next day advance; it is reported,
+        -- never rewritten into the save.
+        entry.status, entry.visible_name = "already", entry.expected
         return entry
     end
 
     if entry.strategy == "native_ids" then
-        if dict_ok then
-            -- The ids already hold the signed identity; writing them again
-            -- cannot change what FC shows. Report it rather than pretend.
-            entry.status, entry.reason = "failed", "native_name_not_visible"
-            entry.detail = string.format("native ids are set but FC shows %s", tostring(before))
-            return entry
-        end
         local write = util.copy(entry.native_ids)
         write.usercaneditname = 0
         local written, failures = H.set_map(pid, write)
@@ -264,6 +266,8 @@ local function report(state)
             before_name = entry.before_name,
             visible_name = entry.visible_name,
             restored = entry.restored,
+            le_cache_name = entry.le_cache_name,
+            le_cache_current = entry.le_cache_current,
         }
     end
     return players, totals
@@ -300,31 +304,24 @@ local function finish(state)
     }
 end
 
--- Step 2: FC's resolver is the terminal gate, as in add_to_team.
+-- Step 2: the stored identity is the terminal gate, as in add_to_team.
 local function verify_visible(state)
     local pending = 0
     for _, entry in ipairs(state.players or {}) do
         if entry.status == "written" then
-            local name, available = host_name(entry.playerid)
-            if available and visible_ok(entry, name) then
-                entry.status, entry.visible_name = "fixed", name
+            note_cache(entry)
+            if stored_ok(entry) then
+                entry.status, entry.visible_name = "fixed", entry.expected
             else
-                entry.visible_name = name
                 pending = pending + 1
             end
         end
     end
     if pending == 0 then return finish(state) end
-    state.visible_tries = (tonumber(state.visible_tries) or 0) + 1
-    if state.visible_tries < VISIBLE_TRIES then
-        return wait_event(state, { waiting_for = "visible_name", pending = pending,
-                                   tries = state.visible_tries })
-    end
     for _, entry in ipairs(state.players or {}) do
         if entry.status == "written" then
-            entry.status, entry.reason = "failed", "name_not_visible"
-            entry.detail = string.format("saved, but FC still shows %s after %d waits",
-                tostring(entry.visible_name), state.visible_tries)
+            entry.status, entry.reason = "failed", "name_not_stored"
+            entry.detail = "the name was written but the stored identity did not read back"
             if entry.detached_now then
                 local restored, restored_written = H.restore_name_dict(entry.playerid, entry.prev_nameids)
                 add_count(state, "fields_written", restored_written or 0)
@@ -408,12 +405,12 @@ function M.step(op, job, ctx)
         for _, entry in ipairs(entries) do
             if entry.status == "pending" then
                 local member = H.verify_team_membership(entry.playerid, teamid)
-                local name = host_name(entry.playerid)
-                entry.before_name = name
+                entry.before_name = host_name(entry.playerid)
+                note_cache(entry)
                 if not member then
                     entry.status, entry.reason = "refused", "not_on_team"
-                elseif visible_ok(entry, name) then
-                    entry.status, entry.visible_name = "already", name
+                elseif stored_ok(entry) then
+                    entry.status, entry.visible_name = "already", entry.expected
                 else
                     entry.status, entry.reason = "failed", "dry_run_mismatch"
                 end

@@ -3,6 +3,17 @@
 SI-6: arm never calls pump. Writes still wait for host events / force_drain.
       Allow-listed reads may also drain on the fast-read timer (CT/LE style).
 SI-8: drain is bounded by drain_budget_ms and drain_max_jobs.
+
+2.6.42 — one visit, not ten:
+  * Hub readiness is a latch. A settled hub event (ENTERED_HUB_FIRST_TIME /
+    ENTERING_TEAM_MANAGEMENT) sets it; simulation, save, load, match, season
+    and unknown events clear it (no host call, no disk IO, as before); hub
+    screen and notification events (events.BENIGN_NAMES) leave it alone.
+  * Job classes: "read", "light" (plain field and career-value edits) and
+    "heavy" (moves players between clubs, creates rows, rewrites names). A
+    settled hub event runs every class with hub_drain_budget_ms; a quiet
+    native tick runs read and light jobs; a hub screen event (throttled) runs
+    read and light jobs except whole-table reads (export_squad, db.dump).
 ]]
 
 local util = require("util")
@@ -88,6 +99,76 @@ local function is_bootstrap_read(job_id)
         if not safe then return false end
     end
     return #job.ops > 0
+end
+
+-- Job classes (2.6.42). Everything not named here is "heavy" and waits for a
+-- settled hub event (or Force Drain): TransferPlayer / ReleasePlayerFromTeam
+-- raise nested Career events and change club membership, CreatePlayer and
+-- InsertDBTableRow add rows, names.sync rewrites name identities, and an
+-- unknown op is never assumed to be harmless.
+local CLASS_READ_OPS = {
+    ["diag.ping"] = true, ["db.dump"] = true, ["export_squad"] = true,
+    ["snapshot"] = true, ["injury.scan"] = true,
+}
+local CLASS_LIGHT_OPS = {
+    ["set_fields"] = true, ["bulk_edit"] = true, ["career.set"] = true,
+    ["growth_sync"] = true, ["injury.cure"] = true,
+}
+
+local function op_class(op)
+    local name = type(op) == "table" and op.op or ""
+    if CLASS_READ_OPS[name]
+        or (name == "assets.legacy" and op.action == "check")
+        or (name == "budget" and (op.action or "get") == "get") then
+        return "read"
+    end
+    if CLASS_LIGHT_OPS[name] or name == "budget" then return "light" end
+    return "heavy"
+end
+
+--- The most demanding class among a job's ops; a malformed job is "heavy".
+local function job_class(job)
+    if type(job) ~= "table" or type(job.ops) ~= "table" or #job.ops == 0 then
+        return "heavy"
+    end
+    local worst = "read"
+    for i = 1, #job.ops do
+        local c = op_class(job.ops[i])
+        if c == "heavy" then return "heavy" end
+        if c == "light" then worst = "light" end
+    end
+    return worst
+end
+runner.op_class = op_class
+runner.job_class = job_class
+
+-- Whole-table walks: 0.2-3.2 s of game-thread time each in the 2026-10-17
+-- results. Fine on a Team Management visit or a quiet tick; a freeze when
+-- they run on an ordinary hub click, so screen-event drains skip them.
+local SLOW_READ_OPS = { ["export_squad"] = true, ["db.dump"] = true }
+
+local function has_slow_read(job)
+    if type(job) ~= "table" or type(job.ops) ~= "table" then return false end
+    for i = 1, #job.ops do
+        local op = job.ops[i]
+        if type(op) == "table" and SLOW_READ_OPS[op.op] then return true end
+    end
+    return false
+end
+
+--- May a drain with `filter` run this queued or claimed job?
+--- filter nil: every job; true / "read": the bootstrap-read allow-list;
+--- "light": read and light jobs; "ui": read and light jobs without a
+--- whole-table walk.
+local function job_allowed(job_id, filter)
+    if filter == nil then return true end
+    if filter == true or filter == "read" then return is_bootstrap_read(job_id) end
+    local path = status.claimed_path(job_id)
+    if not path or not util.exists(path) then path = status.jobs_path(job_id) end
+    local job = path and read_job(path) or nil
+    if job_class(job) == "heavy" then return false end
+    if filter == "ui" and has_slow_read(job) then return false end
+    return true
 end
 
 -- Same read-only set as companion/app/commands/apply.py::_is_write_job, so
@@ -771,7 +852,7 @@ function runner.run_one(job_id, pump_reason)
     return result.state
 end
 
-local function pump_inner(reason, deadline, read_only_only)
+local function pump_inner(reason, deadline, filter)
     local t0 = util.clock()
     local seen, done, failed, deferred = 0, 0, 0, 0
     local budget_ms = version.LIMITS.drain_budget_ms or 120
@@ -779,6 +860,9 @@ local function pump_inner(reason, deadline, read_only_only)
     if reason == "force" then
         budget_ms = version.LIMITS.max_budget_ms or 5000
         max_jobs = 32
+    elseif type(reason) == "string" and reason:sub(1, 6) == "event:" then
+        -- A settled hub event is the user's one visit: finish what is queued.
+        max_jobs = version.LIMITS.hub_drain_max_jobs or max_jobs
     end
     local hard = deadline or util.deadline(budget_ms)
 
@@ -820,7 +904,7 @@ local function pump_inner(reason, deadline, read_only_only)
             deferred = #queue - seen
             break
         end
-        if read_only_only and not is_bootstrap_read(queue[i]) then
+        if not job_allowed(queue[i], filter) then
             deferred = deferred + 1
         else
             seen = seen + 1
@@ -862,7 +946,9 @@ local function pump_inner(reason, deadline, read_only_only)
     return "ok"
 end
 
-function runner.pump(reason, deadline, read_only_only)
+--- `filter`: nil runs every job class; true / "read" only the bootstrap-read
+--- allow-list; "light" read and light jobs (see job_class).
+function runner.pump(reason, deadline, filter)
     -- Calendar simulate and match entry run on this same thread. A squad sync
     -- here blocks the game for the whole job (often 2-5s) on every day.
     if runner._simulating then return "sim_paused" end
@@ -871,7 +957,7 @@ function runner.pump(reason, deadline, read_only_only)
     if not cfg().queue_dir or cfg().queue_dir == "" then return "no_queue" end
     runner._busy = true
     local ok, result = util.capture(function()
-        return pump_inner(reason, deadline, read_only_only)
+        return pump_inner(reason, deadline, filter)
     end)
     -- A malformed job or unexpected host error must never wedge every future
     -- event behind a permanent "busy" state.
@@ -931,20 +1017,77 @@ local function publish_session(ready)
     end)
 end
 
+-- Event bookkeeping for native ticks (Lua state only, safe in any callback).
+-- A tick never starts while an event is open (pre seen, post not yet) or
+-- within LIMITS.quiet_ms of the last event. An open event older than
+-- EVENT_OPEN_MAX_S is treated as closed, so a lost post cannot wedge ticks.
+local EVENT_OPEN_MAX_S = 30
+runner._last_event_clock = nil
+runner._open_events = 0
+runner._open_since = nil
+runner._ui_pump_at = nil
+
+local function note_event(post)
+    local now = util.clock()
+    runner._last_event_clock = now
+    if post then
+        if runner._open_events > 0 then runner._open_events = runner._open_events - 1 end
+    else
+        if runner._open_events == 0 then runner._open_since = now end
+        runner._open_events = runner._open_events + 1
+    end
+end
+
+local function event_open()
+    if runner._open_events <= 0 then return false end
+    local since = runner._open_since
+    if since and (util.clock() - since) > EVENT_OPEN_MAX_S then
+        runner._open_events = 0
+        return false
+    end
+    return true
+end
+
+local function quiet_for(seconds)
+    local last = runner._last_event_clock
+    return last == nil or (util.clock() - last) >= seconds
+end
+
 function runner.on_career(event_id, phase)
     local post = (phase == "post" or phase == nil)
+    note_event(post)
+    local hub = events.is_hub(event_id)
+
+    -- The pre phase of a hub event is a screen change. Before 2.6.42 it
+    -- revoked readiness like a simulation event; the latch keeps it.
+    if hub and not post then
+        runner._cache_dirty = true
+        return "hub_pre"
+    end
+
+    -- Hub screens and notifications (DATA_READY, LEAVING_TEAM_MANAGEMENT,
+    -- PLAYER_ADDED_TO_TEAM, ...) keep the latch. Lua state only, except the
+    -- throttled read/edit drain after a post event on a settled hub.
+    if not hub and events.is_benign(event_id) then
+        if events.changes_squad(event_id) then
+            runner._cache_dirty = true
+            if mirror then mirror.mark_dirty("career_event") end
+        end
+        if post and not runner._busy and not runner._handling_hub then
+            return runner.pump_on_ui_event(event_id)
+        end
+        return runner._busy and "nested" or "benign"
+    end
+
     -- An allow-list is safer than guessing which simulation events are busy.
     -- HOURS_PASSED and first-career setup happen before DAY_PASSED; native
     -- TransferPlayer also emits nested events. No host calls, disk IO, cache
     -- traversal or error logging are allowed in those callbacks.
-    if not post or not events.is_hub(event_id) then
+    if not hub then
         runner._cache_dirty = true
-        -- The pre phase of a hub event is a screen change, not a change to
-        -- the squad. Everything else (simulation, day advance, save, load)
+        -- Everything else (simulation, day advance, save, load, unknown)
         -- makes the mirror rebuild on the next settled hub. Lua state only.
-        if mirror and (post or not events.is_hub(event_id)) then
-            mirror.on_unsettled()
-        end
+        if mirror then mirror.on_unsettled() end
         -- A job's own writes raise nested Career events on this very thread:
         -- ReleasePlayerFromTeam and TransferPlayer both do. Clearing readiness
         -- here made the op loop abandon every remaining op after the first
@@ -981,9 +1124,13 @@ function runner.on_career(event_id, phase)
         runner._last_hub_clock = util.clock()
         runner._awaiting_event = false
         runner.start_fast_read_timer()
+        -- The mirror slice below keeps its old 120 ms share; the job drain
+        -- gets the larger hub budget so one visit finishes the queue.
         local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
+        local hub_deadline = util.deadline(version.LIMITS.hub_drain_budget_ms
+            or version.LIMITS.drain_budget_ms or 120)
         runner._pump_wrote = false
-        local pumped = runner.pump("event:" .. events.name(event_id), deadline)
+        local pumped = runner.pump("event:" .. events.name(event_id), hub_deadline)
         if runner._pump_wrote and not runner._awaiting_event then
             -- A write job finished on this settled hub. Without the native
             -- tick the app's follow-up export would wait for the *next* hub
@@ -1019,7 +1166,7 @@ function runner.tick_fast_read()
     -- pump(..., true) is read_only_only — writes never run here.
     if runner._simulating then return "sim_paused" end
     if not in_career_mode() then return "idle" end
-    if runner._busy then return "busy" end
+    if runner._busy or runner._handling_hub then return "busy" end
     local wake = util.exists(qjoin(FAST_READ_WAKE))
     if not wake and not has_bootstrap_read() then return "idle" end
     local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
@@ -1124,14 +1271,24 @@ function runner.start_fast_read_timer()
 end
 
 -- Native plugin tick (lec_native.dll, see native.lua). The DLL calls this on
--- the Career event thread every ~200 ms. Writes need everything a hub event
--- needs, plus a quiet hub and no job waiting for a post-transfer event.
+-- the Career event thread about every 200 ms. Writes need everything a hub
+-- event needs, plus a quiet hub (no Career event for NATIVE_SETTLE_S) and no
+-- job waiting for a post-transfer event; they run read and light jobs only.
+-- Heavy jobs (signing, release, create, names) wait for Team Management.
 local NATIVE_SETTLE_S = 1.5
 local NATIVE_WRITE_EVERY_S = 1.0
 runner._awaiting_event = false
 runner._last_hub_clock = nil
 runner._native_write_at = nil
 runner._native_live = false
+
+-- pump() always stamps drain.json; stay disk-silent when there is no work.
+local function has_queued_work()
+    local jobs = util.list_job_ids(qjoin("jobs")) or {}
+    if #jobs > 0 then return true end
+    local claimed = util.list_job_ids(qjoin("claimed")) or {}
+    return #claimed > 0
+end
 
 function runner.tick_native_writes()
     if cfg().native_tick_writes == false then return "off" end
@@ -1140,20 +1297,49 @@ function runner.tick_native_writes()
     if runner._busy or runner._handling_hub then return "busy" end
     if runner._awaiting_event then return "awaiting_event" end
     local now = util.clock()
-    if not runner._last_hub_clock or (now - runner._last_hub_clock) < NATIVE_SETTLE_S then
+    if not runner._last_hub_clock or (now - runner._last_hub_clock) < NATIVE_SETTLE_S
+        or not quiet_for(NATIVE_SETTLE_S) or event_open() then
         return "settling"
     end
     if runner._native_write_at and (now - runner._native_write_at) < NATIVE_WRITE_EVERY_S then
         return "throttled"
     end
     runner._native_write_at = now
-    -- pump() always stamps drain.json; stay disk-silent when there is no work.
-    local jobs = util.list_job_ids(qjoin("jobs")) or {}
-    local claimed = util.list_job_ids(qjoin("claimed")) or {}
-    if #jobs == 0 and #claimed == 0 then return "idle" end
+    if not has_queued_work() then return "idle" end
     if not in_career_mode() then return "idle" end
     local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
-    return runner.pump("native_tick", deadline)
+    return runner.pump("native_tick", deadline, "light")
+end
+
+--- Read and light jobs after a hub screen/notification post event (2.6.42).
+--- At most one drain per LIMITS.ui_pump_every_ms; nothing at all (no host
+--- call, no disk IO) unless the hub latch is set. Heavy jobs and whole-table
+--- reads stay queued for the next settled hub event (or a quiet native tick),
+--- and nothing runs while a signing waits for its post-transfer event.
+function runner.pump_on_ui_event(event_id)
+    if runner._simulating or not runner._hub_ready then return "hub_required" end
+    if cfg().ui_event_jobs == false then return "off" end
+    if runner._busy or runner._handling_hub then return "busy" end
+    if runner._awaiting_event then return "awaiting_event" end
+    local every = (version.LIMITS.ui_pump_every_ms or 1000) / 1000
+    local now = util.clock()
+    if runner._ui_pump_at and (now - runner._ui_pump_at) < every then
+        return "throttled"
+    end
+    runner._ui_pump_at = now
+    if not has_queued_work() then return "idle" end
+    if not probe_in_cm() then return "idle" end
+    if runner._cache_dirty then
+        require("db").reset()
+        runner._cache_dirty = false
+    end
+    local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
+    runner._pump_wrote = false
+    local pumped = runner.pump("ui:" .. events.name(event_id), deadline, "ui")
+    if not util.expired(deadline) then
+        util.pcall_named("mirror", runner.tick_mirror, "ui", deadline)
+    end
+    return pumped
 end
 
 --- Live squad mirror (mirror.lua): one budgeted slice. Same gates as native
@@ -1205,12 +1391,18 @@ end
 function runner.on_native_tick()
     -- Simulation days and menus: return before any host call or file IO.
     if runner._simulating or not runner._hub_ready then return "paused" end
+    -- Re-entered from inside a job or a hub drain (a host call can wait
+    -- alertably and run an APC tick there): never start new work.
+    if runner._busy or runner._handling_hub then return "busy" end
     if not runner._native_live then
         runner._native_live = true
         remember_timer({ Enabled = true, native = true })
         emit("fast_read timer armed (lec_native)")
         advertise_timer(true)
     end
+    -- A screen is still changing: wait until the hub has been quiet.
+    local quiet = (version.LIMITS.quiet_ms or 1000) / 1000
+    if event_open() or not quiet_for(quiet) then return "settling" end
     util.pcall_named("fast_read", runner.tick_fast_read)
     util.pcall_named("native_writes", runner.tick_native_writes)
     util.pcall_named("mirror", runner.tick_mirror, "native")

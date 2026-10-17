@@ -490,6 +490,7 @@ def test_first_settled_tick_writes_the_mirror_in_export_row_shape(core):
 def test_nothing_changed_means_no_rebuild_and_no_file_writes(core):
     core.settle_hub()
     assert core.until_idle()[-1] == "written"
+    core.advance(1.0)  # 2.6.42: native ticks start work after LIMITS.quiet_ms
     core.native_tick()  # first live native tick advertises the timer once
     first = core.mirror_file.read_bytes()
     walks = {t: core.walks(t) for t in ("players", "teamplayerlinks", "editedplayernames")}
@@ -585,7 +586,9 @@ def test_readiness_drop_mid_build_abandons_without_io_and_restarts(core):
 def test_hub_pre_phase_is_a_screen_change_and_keeps_progress(core):
     _build_until_phase(core, "players")
     core.eval(f"LEC.runner.on_career({HUB}, 'pre')")
-    assert core.tick() == "sim_paused"  # the pre phase pauses like any event
+    # 2.6.42 hub latch: a hub pre phase is a screen change, not a pause.
+    assert core.eval("LEC.runner._hub_ready") is True
+    assert core.tick() == "building"
     assert core.eval("LEC.mirror._build ~= nil")
     core.hub()  # settled again; the hub slice continues the same walk
     assert core.until_idle(limit=600)[-1] == "written"

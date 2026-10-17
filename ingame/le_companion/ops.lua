@@ -946,15 +946,33 @@ local function player_teamid(playerid)
     return rec and tonumber(links:get("teamid", rec)) or nil, "teamplayerlinks"
 end
 
+--- 2.6.42: is there a teamplayerlinks row joining *playerid* to *teamid*?
+--- nil when the table is unreadable. This reads the database itself, unlike
+--- GetTeamIdFromPlayerId, which answers from Live Editor's player cache (LE
+--- rebuilds it only on a day advance or a save load), so after a transfer in
+--- the same hub visit the cache still names the old club.
+local function linked_to_team(playerid, teamid)
+    teamid = tonumber(teamid)
+    local links = db.open("teamplayerlinks")
+    if not links or not teamid then return nil end
+    for rec in links:records() do
+        if tonumber(links:get("playerid", rec)) == playerid
+            and tonumber(links:get("teamid", rec)) == teamid then
+            return true
+        end
+    end
+    return false
+end
+
 --- Is *playerid* still one of the user's senior-squad players?
 ---
---- ``GetTeamIdFromPlayerId`` answers from a Career Mode structure that still
---- names the old club in the same frame as ``ReleasePlayerFromTeam``, so a
---- release that worked was reported as ``verify_mismatch`` and the rest of the
---- job was abandoned.  This helper is the source the squad export already
---- trusts, and it drops the player immediately.  Returns nil when the host
---- helper is unavailable or hands back an empty squad, which is never proof
---- that a player left.
+--- ``GetTeamIdFromPlayerId`` answers from Live Editor's player cache, which
+--- still names the old club after ``ReleasePlayerFromTeam`` (until the next
+--- day advance or save load), so a release that worked was reported as
+--- ``verify_mismatch`` and the rest of the job was abandoned.  This helper is
+--- the source the squad export already trusts, and it drops the player
+--- immediately.  Returns nil when the host helper is unavailable or hands back
+--- an empty squad, which is never proof that a player left.
 local function in_user_senior_squad(playerid)
     local ids = user_senior_playerids()
     if #ids == 0 then return nil end
@@ -1030,6 +1048,13 @@ ops.handlers["transfer"] = function(op, job, ctx)
 
     local before_team = player_teamid(playerid)
     local verify = op.verify ~= false
+    -- 2.6.42: for a release, membership of the user's senior squad before the
+    -- call is read from the database (contracts), not from LE's cache. Today's
+    -- "Release 29" jobs (2026-10-17) read the cache's 1797 / 111592 both
+    -- before and after a release that worked, and ended partial.
+    local user_team_before = action == "release" and resolve_user_teamid() or nil
+    local was_senior = nil
+    if user_team_before then was_senior = in_user_senior_squad(playerid) end
     local ok_clear, clear_reason, cleared = clear_player_state(playerid, op, action)
     if not ok_clear then
         return fail_result(clear_reason, "required player state could not be cleared")
@@ -1137,6 +1162,12 @@ ops.handlers["transfer"] = function(op, job, ctx)
             data.verified = true
             return ok_result(data, { targets = 1, found = 1, side_effects = 1 })
         end
+        -- The cache may still name the old club; the roster row decides.
+        if linked_to_team(playerid, expected) == true then
+            data.verified, data.teamid, data.verify_source = true, expected, "teamplayerlinks"
+            data.cached_teamid = actual
+            return ok_result(data, { targets = 1, found = 1, side_effects = 1 })
+        end
         return fail_result("verify_mismatch",
             string.format("%s returned but team read-back was %s, expected %s",
                 api_name, tostring(actual), tostring(expected)),
@@ -1151,11 +1182,11 @@ ops.handlers["transfer"] = function(op, job, ctx)
             data.verified = true
             return ok_result(data, { targets = 1, found = 1, side_effects = 1 })
         end
-        -- GetTeamIdFromPlayerId still answers with the old club in the frame
-        -- the release happens in. The user-squad helper does not, so it is the
-        -- deciding read-back when the player left the team we manage.
+        -- GetTeamIdFromPlayerId keeps answering from LE's cache after the
+        -- release. The user-squad helper does not, so it is the deciding
+        -- read-back when the player left the team we manage.
         local user_team = resolve_user_teamid()
-        if user_team and before_team == user_team then
+        if user_team and (before_team == user_team or was_senior == true) then
             local still_here = in_user_senior_squad(playerid)
             if still_here == false then
                 data.verified = true

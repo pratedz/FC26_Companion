@@ -124,10 +124,14 @@ def test_worker_rechecks_save_team_and_exact_player_values_before_writes() -> No
     assert "firstnameid = 0" in source
     assert "usercaneditname = 1" in source
     assert 'rawget(_G, "GetPlayerName")' in source
-    assert "visible_name_matches(visible, names.commonname)" in source
+    # 2.6.42: the stored identity gates the repair; LE's cached name is only
+    # reported (le_cache_name), never waited on.
+    assert "stored_identity_ok(playerid, names, native_name_ids)" in source
+    assert 'fail("name_not_stored"' in source
+    assert 'fail("name_not_visible"' not in source
+    assert "visible_name_matches(le_cache_name, names.commonname)" in source
     assert "contains_sequence" in source
     assert "got:find(want" not in source
-    assert 'fail("name_not_visible"' in source
     assert "native_name_ids_from(op)" in source
     assert "native_name_write_failed" in source
     assert "if not native_name_ids then" in source
