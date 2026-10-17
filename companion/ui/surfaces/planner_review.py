@@ -90,6 +90,9 @@ def player_summary(plan: SquadPlan, pid: int, *, ready: bool) -> str:
     member = _review_index(plan)["members"][pid]
     patch = plan.patch_for(pid)
     bits = []
+    issue = plan.shirt_issue_for(pid)
+    if issue is not None:
+        bits.append(f"#{issue.number} is taken — pick a number")
     shirt = plan.jersey_numbers.get(pid)
     old_shirt = plan.shirt_book.get(pid) or member.base.get("jerseynumber")
     if shirt is not None and shirt != old_shirt:
@@ -302,10 +305,13 @@ def refresh_review(state):
     plan = state["plan"]
     ready = state.get("phase") in {"review", "applied"}
     changed, shirts, plus = review_totals(plan) if ready else (0, 0, 0)
+    shirt_issues = len(plan.shirt_issues)
     state["review_summary"].configure(text=(
         "Previous preview — rebuild to update" if ready and state.get("edits_dirty") else
         "Changes applied" if state.get("phase") == "applied" else
-        "Repair affected players before Apply" if ready and plan.blocking_issues else
+        "Some players need a fix — Apply the rest writes everything else" if ready and plan.blocking_issues else
+        f"{shirt_issues} shirt number{'s' if shirt_issues != 1 else ''} need a choice — Apply skips only those"
+        if ready and shirt_issues else
         "Review your changes" if ready else "Selected players"))
     state["review_counts"].configure(text=(
         f"{changed} players change  ·  {shirts} shirts  ·  {plus} with PlayStyle+" if ready
@@ -317,9 +323,11 @@ def refresh_review(state):
         member = _review_index(plan)["members"].get(pid)
         if member:
             blocked = any(issue.startswith(member.name + ":") for issue in plan.blocking_issues)
-            row["caption"].configure(text="Build incomplete — repair this player" if ready and blocked else
+            shirt_problem = plan.shirt_issue_for(pid) is not None
+            row["caption"].configure(text="Needs a fix — select and press Fix this" if ready and blocked else
                                       player_summary(plan, pid, ready=ready),
-                                      text_color=theme.WARNING if ready and blocked else theme.MUTED)
+                                      text_color=theme.WARNING if ready and (blocked or shirt_problem)
+                                      else theme.MUTED)
         row["tick"].configure(state="disabled" if state.get("busy") or state.get("interpreting")
                                or state.get("applying") else "normal")
     select_player(state, state.get("review_selected"))
@@ -405,15 +413,35 @@ def select_player(state, pid):
         for issue in plan.blocking_issues:
             if issue.startswith(member.name + ":"):
                 player_blocked = True
-                action = "Rebuild your changed request first." if state.get("edits_dirty") else "Use Repair this player below."
+                action = ("Rebuild your changed request first." if state.get("edits_dirty") else
+                          "Fix this asks the AI again for this player only.")
                 muted_label(host, issue.replace("Rebuild this plan.", action), size=12, color=theme.WARNING, wraplength=340,
                             justify="left").pack(anchor="w", pady=(0, 10))
         if player_blocked and state.get("repair_player") and not state.get("edits_dirty"):
-            repair = button(host, "Repair this player", lambda: state["repair_player"](pid),
+            repair = button(host, "Fix this", lambda: state["repair_player"](pid),
                             kind="primary", height=32, width=170)
             repair.pack(anchor="w", pady=(0, 10))
             if state.get("busy") or state.get("applying"):
                 repair.configure(state="disabled")
+        shirt_issue = plan.shirt_issue_for(pid)
+        if shirt_issue is not None:
+            section(host, "Shirt number", "")
+            muted_label(host, shirt_issue.message, size=12, color=theme.WARNING, wraplength=340,
+                        justify="left").pack(anchor="w", pady=(0, 6))
+            if not state.get("edits_dirty"):
+                actions = ctk.CTkFrame(host, fg_color="transparent")
+                actions.pack(fill="x", pady=(0, 10))
+                controls = []
+                if state.get("fix_shirt"):
+                    controls.append(button(actions, "Fix this shirt", lambda: state["fix_shirt"](pid),
+                                           kind="primary", height=32, width=130))
+                if shirt_issue.can_swap and state.get("swap_shirt"):
+                    controls.append(button(actions, f"Swap with {shirt_issue.holder_name}",
+                                           lambda: state["swap_shirt"](pid), kind="secondary", height=32))
+                for control in controls:
+                    control.pack(side="left", padx=(0, 8))
+                    if state.get("busy") or state.get("applying"):
+                        control.configure(state="disabled")
         for note in plan.warnings:
             if note.startswith(member.name + ": removed incompatible existing styles:"):
                 muted_label(host, note, size=11, wraplength=340, justify="left").pack(anchor="w", pady=(0, 8))
@@ -423,7 +451,8 @@ def select_player(state, pid):
             old = plan.shirt_book.get(pid) or member.base.get("jerseynumber")
             section(host, "Shirt number", f"#{old or '—'}   →   #{shirt}")
             for note in plan.warnings:
-                if member.name in note and ("reserved" in note or "moves from #" in note or "stays with" in note):
+                if member.name in note and ("reserved" in note or "moves from #" in note or "stays with" in note
+                                            or "is worn by" in note):
                     muted_label(host, note, size=11, wraplength=340, justify="left").pack(anchor="w", pady=(4, 0))
         if "icontrait1" in patch or "icontrait2" in patch:
             names = plus_names(patch)

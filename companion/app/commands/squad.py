@@ -345,6 +345,7 @@ def _ingest(svc: Services, result: JobResult) -> None:
         return
     players: Sequence[Mapping[str, Any]] = ()
     free_agents: Sequence[Mapping[str, Any]] = ()
+    team_shirts: Sequence[Mapping[str, Any]] = ()
     teamid: int | None = None
     for op in result.ops:
         if op.op == "export_squad":
@@ -357,6 +358,9 @@ def _ingest(svc: Services, result: JobResult) -> None:
                 free_agents = [
                     p for p in raw_free if isinstance(p, Mapping)
                 ]
+            raw_shirts = data.get("team_shirts")
+            if isinstance(raw_shirts, list):
+                team_shirts = [row for row in raw_shirts if isinstance(row, Mapping)]
             tid = data.get("teamid")
             teamid = int(tid) if isinstance(tid, (int, float)) else None
     if not players:
@@ -386,6 +390,7 @@ def _ingest(svc: Services, result: JobResult) -> None:
             players=players,
             taken=svc.clock.now(),
             free_agents=free_agents,
+            team_shirts=team_shirts,
         )
     )
     _note_squad_result(svc, job_id=result.job_id, ok=True)
@@ -405,6 +410,7 @@ def _ingest(svc: Services, result: JobResult) -> None:
                 "teamid": teamid,
                 "players": list(players),
                 "free_agents": list(free_agents),
+                "team_shirts": list(team_shirts),
             },
             taken_ts=svc.clock.now_ts(),
             taken_utc=svc.clock.stamp(),

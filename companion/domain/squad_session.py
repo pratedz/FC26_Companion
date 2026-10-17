@@ -10,13 +10,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from typing import Any, Mapping, Sequence
+from typing import Any, Collection, Mapping, Sequence
 
 from .builds import expand_overall_patch, is_ratings_only_patch
 from .card_import import EA_DATE_EPOCH, FC26_SEASON_START, forced_birthdate_for_age
 from .job import JobValidationError
 from .player import FIELD_SPECS, normalize_patch, player_id
-from .squad_plan import MAX_OVERRIDE_FIELDS, MAX_PLAYERS, SquadMember, SquadPlan
+from .squad_plan import MAX_OVERRIDE_FIELDS, MAX_PLAYERS, ShirtIssue, SquadMember, SquadPlan
 
 
 LIVE_VALUE_FLOOR = 10
@@ -510,8 +510,20 @@ def assign_jersey_numbers(
     requests: Sequence[tuple[int, int]],
     *,
     names: Mapping[int, str] | None = None,
+    immovable: Collection[int] = (),
+    selected: Collection[int] | None = None,
+    gentle: Collection[int] = (),
+    positions: Mapping[int, Any] | None = None,
+    issues: list[tuple[int, int, tuple[int, ...]]] | None = None,
 ) -> tuple[dict[int, int], tuple[str, ...]]:
-    """Give requested shirts. A player already wearing one moves to the vacated number, or the lowest free shirt."""
+    """Give requested shirts. A player already wearing one moves to the vacated number, or a free shirt.
+
+    ``immovable`` wearers (team-linked players outside the senior list) are
+    never moved. Requests from ``gentle`` players (AI suggestions) may only
+    move players in ``selected``. A shirt that cannot be freed is recorded in
+    ``issues`` as ``(playerid, number, wearers)`` instead of being forced.
+    Only goalkeepers are given #1 as a free number.
+    """
     numbers: dict[int, int] = {}
     for pid, raw in current.items():
         try:
@@ -519,68 +531,83 @@ def assign_jersey_numbers(
         except (TypeError, ValueError):
             num = 0
         numbers[int(pid)] = num if 1 <= num <= 99 else 0
-    holder: dict[int, int] = {}
+    # Every wearer is kept: two players sharing a number are both real.
+    holder: dict[int, list[int]] = {}
     for pid, num in numbers.items():
         if num:
-            holder.setdefault(num, pid)
+            holder.setdefault(num, []).append(pid)
     locked: set[int] = set()
     changes: dict[int, int] = {}
     warnings: list[str] = []
     labels = dict(names or {})
+    fixed = {int(pid) for pid in immovable}
+    soft = {int(pid) for pid in gentle}
+    chosen = None if selected is None else {int(pid) for pid in selected}
+    where = dict(positions or {})
 
     def label(pid: int) -> str:
         return labels.get(pid) or str(pid)
 
-    def lowest_free() -> int | None:
-        for number in range(1, 100):
-            if number not in holder:
+    def lowest_free(pid: int) -> int | None:
+        start = 1 if position_group(where.get(pid)) == "gk" else 2
+        for number in range(start, 100):
+            if not holder.get(number):
                 return number
         return None
 
     def move(pid: int, new: int) -> None:
         old = numbers.get(pid, 0)
-        if old and holder.get(old) == pid:
-            holder.pop(old, None)
+        if old and pid in holder.get(old, ()):
+            holder[old].remove(pid)
+            if not holder[old]:
+                holder.pop(old)
         numbers[pid] = new
         if new:
-            holder[new] = pid
+            holder.setdefault(new, []).append(pid)
         if old != new:
             changes[pid] = new
+
+    def refuse(pid: int, wanted: int, wearers: Sequence[int]) -> None:
+        if issues is not None:
+            issues.append((pid, wanted, tuple(wearers)))
 
     for pid, wanted in requests:
         if not 1 <= int(wanted) <= 99:
             warnings.append(f"{label(pid)}: shirt numbers must be 1–99.")
             continue
         wanted = int(wanted)
+        pid = int(pid)
         numbers.setdefault(pid, 0)
         if numbers.get(pid) == wanted:
             locked.add(pid)
             continue
-        occupant = holder.get(wanted)
-        if occupant is not None and occupant != pid and occupant in locked:
+        occupants = [other for other in holder.get(wanted, ()) if other != pid]
+        if len(occupants) > 1:
+            refuse(pid, wanted, occupants)
+            continue
+        occupant = occupants[0] if occupants else None
+        if occupant is not None and occupant in locked:
             warnings.append(
                 f"#{wanted} stays with {label(occupant)}; {label(pid)} was asked for it later."
             )
             continue
+        if occupant is not None and (
+            occupant in fixed or (pid in soft and (chosen is None or occupant not in chosen))
+        ):
+            refuse(pid, wanted, (occupant,))
+            continue
         vacated = numbers.get(pid, 0)
-        if occupant is not None and occupant != pid:
-            # Unknown shirts are stored as 0. Do not invent #1, #2, #3 for the
-            # rest of the squad when the live list was never read.
-            if not numbers.get(occupant):
-                occupant = None
-        if occupant is not None and occupant != pid:
-            if holder.get(wanted) == occupant:
-                holder.pop(wanted, None)
-            numbers[occupant] = 0
+        if occupant is not None:
+            others_on_vacated = [other for other in holder.get(vacated, ()) if other != pid]
             replacement = (
                 vacated
-                if vacated and vacated != wanted and holder.get(vacated) in (None, pid)
-                else lowest_free()
+                if vacated and vacated != wanted and not others_on_vacated
+                and (vacated != 1 or position_group(where.get(occupant)) == "gk")
+                else lowest_free(occupant)
             )
             if replacement is None:
-                holder[wanted] = occupant
-                numbers[occupant] = wanted
                 warnings.append(f"No spare shirt for {label(occupant)}; {label(pid)} keeps their number.")
+                refuse(pid, wanted, (occupant,))
                 continue
             move(occupant, replacement)
             warnings.append(
@@ -1649,7 +1676,8 @@ def stage_per_player_plan(
             current_shirts[member.playerid] = _int_or_none(member.base.get("jerseynumber"))
     extra: list[tuple[int, int]] = []
     for pid, patch in grok_patches.items():
-        number = _int_or_none(patch.get("jerseynumber"))
+        # An AI shirt counts only when the request is about shirts.
+        number = _int_or_none(patch.get("jerseynumber")) if shirts_requested(session.recipe) else None
         try:
             target = session.target_for(int(pid))
         except (TypeError, ValueError):
@@ -1662,16 +1690,25 @@ def stage_per_player_plan(
         # still wins later; a suggested 87–90 does not.
         if number and 1 <= number <= 99 and number != target_ovr and number < 80:
             extra.append((int(pid), number))
+    shirt_names = dict(getattr(plan, "shirt_names", {}) or {})
+    refused: list[tuple[int, int, tuple[int, ...]]] = []
     jersey_changes, jersey_notes = plan_jersey_changes(
         session.recipe,
         roster,
         current_shirts,
-        names=dict(getattr(plan, "shirt_names", {}) or {}),
+        names=shirt_names,
         extra_requests=extra,
+        hidden=getattr(plan, "shirt_hidden", ()) or (),
+        issues=refused,
     )
     warnings.extend(jersey_notes)
+    if shirts_requested(session.recipe):
+        from .squad_shirts import shared_numbers
+        labels = {**shirt_names, **{member.playerid: member.name for member in plan.members}}
+        warnings.extend(shared_numbers(current_shirts, labels))
+    shirt_issues = _shirt_issues(plan, refused)
     if jersey_only(session.recipe):
-        if not jersey_changes:
+        if not jersey_changes and not shirt_issues:
             detail = " ".join(warnings) or "No shirt numbers to change."
             raise JobValidationError(detail)
         return plan.with_overrides(
@@ -1687,6 +1724,7 @@ def stage_per_player_plan(
             ),
             jersey_numbers=jersey_changes,
             blocking_issues=blocking_issues,
+            shirt_issues=shirt_issues,
         )
     for member in plan.members:
         target = session.target_for(member.playerid)
@@ -1793,7 +1831,19 @@ def stage_per_player_plan(
         identity_count=identity_n,
         jersey_numbers=jersey_changes,
         blocking_issues=blocking_issues,
+        shirt_issues=shirt_issues,
     )
+
+
+def _shirt_issues(plan: SquadPlan, refused: Sequence[tuple[int, int, tuple[int, ...]]]) -> tuple[ShirtIssue, ...]:
+    """One plain, per-player shirt problem for each refused number."""
+    from .squad_shirts import make_shirt_issue
+
+    names = {**dict(plan.shirt_names), **{member.playerid: member.name for member in plan.members}}
+    out: dict[int, ShirtIssue] = {}
+    for pid, number, wearers in refused:
+        out[int(pid)] = make_shirt_issue(int(pid), int(number), wearers, names)
+    return tuple(out.values())
 
 
 def compact_current(values: Mapping[str, Any]) -> dict[str, Any]:
@@ -1894,6 +1944,7 @@ def recommended_shirt_requests(
     current: Mapping[int, int | None] | None = None,
     reserved: Mapping[int, int] | None = None,
     notes: list[str] | None = None,
+    names: Mapping[int, str] | None = None,
 ) -> list[tuple[int, int]]:
     """Unique familiar or positional shirts for every selected, unpinned player.
 
@@ -1951,10 +2002,11 @@ def recommended_shirt_requests(
         used[number] = player.playerid
         if shirts and notes is not None:
             occupant = by_id.get(used[shirts[0]])
-            holder_name = occupant.name if occupant else str(used[shirts[0]])
+            holder_name = occupant.name if occupant else str((names or {}).get(used[shirts[0]]) or used[shirts[0]])
             explanation = "a familiar alternative" if number in shirts[1:] else "a positional alternative"
+            verb = "is reserved for" if occupant else "is worn by"
             notes.append(
-                f"#{shirts[0]} is reserved for {holder_name}; {player.name} gets #{number}, {explanation}."
+                f"#{shirts[0]} {verb} {holder_name}; {player.name} gets #{number}, {explanation}."
             )
     requests = [
         (player.playerid, assigned[player.playerid])
@@ -1965,6 +2017,24 @@ def recommended_shirt_requests(
     return requests
 
 
+_SHIRT_WORDS = re.compile(
+    r"\bjerseys?\b|\bshirts?\b|\bkits?\s+numbers?\b|\bsquad\s+numbers?\b|\bnumbers\b|#\s?\d",
+    re.IGNORECASE,
+)
+
+
+def shirts_requested(recipe: SquadRecipe) -> bool:
+    """True when the user's request is about shirts/numbers at all."""
+    if "jerseys" in recipe.excluded_families:
+        return False
+    return bool(recipe.named_jerseys) or bool(_SHIRT_WORDS.search(recipe.prompt or ""))
+
+
+def ai_shirts_wanted(recipe: SquadRecipe) -> bool:
+    """Only free-form shirt asks use AI numbers; recommendation mode is local."""
+    return shirts_requested(recipe) and not wants_recommended_shirts(recipe.prompt)
+
+
 def plan_jersey_changes(
     recipe: SquadRecipe,
     roster: Sequence[RosterPlayer],
@@ -1972,8 +2042,16 @@ def plan_jersey_changes(
     *,
     names: Mapping[int, str] | None = None,
     extra_requests: Sequence[tuple[int, int]] = (),
+    hidden: Collection[int] = (),
+    issues: list[tuple[int, int, tuple[int, ...]]] | None = None,
 ) -> tuple[dict[int, int], tuple[str, ...]]:
-    """Typed shirts win; recommendation mode allocates the rest deterministically."""
+    """Typed shirts win; recommendation mode allocates the rest deterministically.
+
+    ``hidden`` players (team-linked, outside the senior list) keep their
+    numbers: those shirts are never offered and their wearers never move.
+    AI suggestions count only when the request is about shirts, and they never
+    move a player outside the selection. Refused shirts go to ``issues``.
+    """
     chosen, unmatched = resolve_named_overalls(recipe.named_jerseys, roster)
     warnings = [f"Couldn't match shirt for {label}." for label in unmatched]
     labels = {player.playerid: player.name for player in roster}
@@ -1981,22 +2059,52 @@ def plan_jersey_changes(
     requests = list(chosen.items())
     if "jerseys" in recipe.excluded_families:
         return {}, tuple(warnings)
+    selected = {player.playerid for player in roster}
+    fixed = {int(pid) for pid in hidden} - selected
     locked = {pid for pid, _number in requests}
+    gentle: set[int] = set()
     if wants_recommended_shirts(recipe.prompt):
         reserved: dict[int, int] = {}
         for pid, number in requests:
             reserved.setdefault(number, pid)
+        wearers: dict[int, list[int]] = {}
+        for pid, raw in current.items():
+            number = _int_or_none(raw)
+            if number is not None and 1 <= number <= 99 and int(pid) not in selected:
+                wearers.setdefault(number, []).append(int(pid))
+        for number, pids in sorted(wearers.items()):
+            # A hidden wearer cannot be moved, and moving one of two players
+            # sharing a number still leaves a duplicate.
+            if any(pid in fixed for pid in pids) or len(pids) > 1:
+                reserved.setdefault(number, pids[0])
         requests.extend(recommended_shirt_requests(
-            roster, locked, current=current, reserved=reserved, notes=warnings,
+            roster, locked, current=current, reserved=reserved, notes=warnings, names=labels,
         ))
-    else:
-        selected = {player.playerid for player in roster}
+    elif shirts_requested(recipe):
         for pid, number in extra_requests:
             if int(pid) in selected and int(pid) not in locked and 1 <= int(number) <= 99:
                 requests.append((int(pid), int(number)))
                 locked.add(int(pid))
-    changes, moved = assign_jersey_numbers(current, requests, names=labels)
+                gentle.add(int(pid))
+    changes, moved = assign_jersey_numbers(
+        current, requests, names=labels, immovable=fixed, selected=selected, gentle=gentle,
+        positions={player.playerid: player.position for player in roster}, issues=issues,
+    )
     return changes, tuple(warnings) + moved
+
+
+def shirt_map_for_ai(plan: SquadPlan) -> dict[str, str]:
+    """Compact ``number -> wearer`` map of the club, numbers 1-99 in use only."""
+    names = {**dict(plan.shirt_names), **{member.playerid: member.name for member in plan.members}}
+    book = dict(plan.shirt_book)
+    for member in plan.members:
+        book.setdefault(member.playerid, member.base.get("jerseynumber"))
+    worn: dict[int, list[str]] = {}
+    for pid, raw in book.items():
+        number = _int_or_none(raw)
+        if number is not None and 1 <= number <= 99:
+            worn.setdefault(number, []).append(str(names.get(int(pid)) or pid))
+    return {str(number): " / ".join(sorted(who)) for number, who in sorted(worn.items())}
 
 
 def propose_payload(

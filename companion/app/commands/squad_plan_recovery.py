@@ -171,14 +171,50 @@ def receipt(record: Mapping[str, Any]) -> dict[str, Any]:
             "verification_errors": list(verification.get("errors") or ()),
             "undo_plan_id": record.get("undo_plan_id", ""),
             "live_changes": list(record.get("live_changes") or ()),
+            "shirt_conflicts": failed_shirts(record),
+            "shirts_fixed_by": record.get("shirts_fixed_by", ""),
             "error": record.get("error", "")}
+
+
+# Worker reasons for a shirt write refused because the number is worn. These
+# shirts are re-planned with "Fix shirts"; they are never replayed blindly.
+SHIRT_CONFLICT_REASONS = frozenset({"shirt_taken"})
+
+
+def _op_conflicts(job_wire: Mapping[str, Any], raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Shirt writes the worker refused in one attempt, with the wanted number."""
+    by_id = {str(op.get("id")): op for op in job_wire.get("ops", ())}
+    found = []
+    for item in raw.get("ops", ()) or ():
+        if item.get("ok") or str(item.get("reason") or "") not in SHIRT_CONFLICT_REASONS:
+            continue
+        operation = by_id.get(str(item.get("id")))
+        if not operation or str(operation.get("table") or "") != "teamplayerlinks":
+            continue
+        found.append({"playerid": int(operation["key"]["value"]),
+                      "number": int((operation.get("fields") or {}).get("jerseynumber") or 0),
+                      "reason": str(item.get("reason")), "op_id": str(item.get("id"))})
+    return found
+
+
+def failed_shirts(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Every shirt this plan could not write: refused in game or skipped before submit."""
+    names = record.get("names") or {}
+    found: dict[int, dict[str, Any]] = {}
+    for item in [*(record.get("skipped_shirts") or ()),
+                 *(conflict for part in record.get("parts", ()) for conflict in part.get("shirt_conflicts") or ())]:
+        pid = int(item["playerid"])
+        found[pid] = {**dict(item), "name": str(item.get("name") or names.get(str(pid)) or f"Player {pid}")}
+    return list(found.values())
 
 
 def aggregate_result(record: Mapping[str, Any], latest: JobResult) -> JobResult:
     report = receipt(record)
     outcome = latest.outcome
     if record.get("status") == "applied":
-        outcome = ApplyOutcome.APPLIED
+        # Everything else is verified, but some shirts still need a choice.
+        outcome = ApplyOutcome.PARTIAL if report["shirt_conflicts"] and not report["shirts_fixed_by"] \
+            else ApplyOutcome.APPLIED
     elif record.get("status") == "verification_failed":
         outcome = ApplyOutcome.PARTIAL
     elif record.get("status") in {"running", "awaiting_verification", "ready"}:
@@ -267,7 +303,10 @@ def _check_source(svc: Any, source: Mapping[str, Any], affected: Any, *, initial
         if str(source["snapshot_revision"]) != squad.taken.isoformat() and not baseline:
             raise ApplyError("The squad export changed since this plan was built. Rebuild the plan from the refreshed squad.")
     if live_known:
-        missing = set(int(pid) for pid in affected) - set(_roster_rows(svc))
+        # Team-linked players outside the senior list (an explicit shirt swap
+        # with a loaned-out player) are still at the club.
+        linked = {int(row.get("playerid") or 0) for row in getattr(squad, "team_shirts", ()) or ()}
+        missing = set(int(pid) for pid in affected) - set(_roster_rows(svc)) - linked
         if missing:
             raise ApplyError("These planned players are no longer in the original club: "
                              + ", ".join(str(pid) for pid in sorted(missing)) + ". Refresh and rebuild.")
@@ -293,29 +332,35 @@ def rebase_on_live(svc: Any, plan: SquadPlan) -> tuple[SquadPlan, list[str]]:
     if gone:
         notes.extend(f"{member.name} left the club; skipped" for member in gone)
         plan = plan.keeping([member.playerid for member in plan.members if member.playerid in current])
-    shirts: dict[int, int] = {}
-    for pid, row in current.items():
-        try:
-            number = int(row.get("jerseynumber") or 0)
-        except (TypeError, ValueError):
-            number = 0
-        shirts[pid] = number if 1 <= number <= 99 else 0
-    targets = {pid: number for pid, number in plan.jersey_numbers.items() if pid in current}
-    names = dict(plan.shirt_names)
+    from ...domain.squad_shirts import shirt_map_from_squad
+
+    shirts, linked_names, hidden = shirt_map_from_squad(squad.players, getattr(squad, "team_shirts", ()) or (),
+                                                        plan.members)
+    targets = {pid: number for pid, number in plan.jersey_numbers.items()
+               if pid in current or pid in hidden}
+    names = {**dict(plan.shirt_names), **linked_names}
     for pid, number in list(targets.items()):
+        if pid not in targets:
+            continue
         holder = next((other for other, worn in shirts.items()
                        if worn == number and other != pid and other not in targets), None)
         if holder is None:
             continue
+        if holder in hidden or holder not in current:
+            # A team-linked player outside the senior list is never moved
+            # silently. Skip this shirt; Apply reports it and the rest goes on.
+            targets.pop(pid, None)
+            continue
         taken = set(shirts.values()) | set(targets.values())
-        spare = next((n for n in [*range(12, 100), *range(1, 12)] if n not in taken), None)
+        spare = next((n for n in [*range(12, 100), *range(2, 12)] if n not in taken), None)
         if spare is None:
-            raise ApplyError(f"Shirt #{number} is worn and no free number is left to move its wearer.")
+            targets.pop(pid, None)
+            continue
         targets[holder] = spare
         name = str(current[holder].get("name") or f"Player {holder}")
         names[holder] = name
         notes.append(f"{name} moves from #{number} to #{spare} to free #{number}")
-    plan = replace(plan, shirt_book=shirts, shirt_names=names, jersey_numbers=targets)
+    plan = replace(plan, shirt_book=shirts, shirt_names=names, shirt_hidden=hidden, jersey_numbers=targets)
     live_bases: dict[int, dict[str, Any]] = {}
     for member in plan.members:
         live = current.get(member.playerid)
@@ -358,15 +403,33 @@ def apply_squad_plan(svc: Any, plan: SquadPlan, *, dry_run: bool = False, follow
               "snapshot_revision": plan.source_snapshot_revision}
     _check_source(svc, source, (), initial=True,
                   baseline={member.playerid: member.base for member in plan.members})
+    planned_shirts = dict(plan.jersey_numbers)
     plan, live_changes = rebase_on_live(svc, plan)
     growth = "auto" if svc.store.snapshot().prefs.growth_mirror else "off"
+    skipped: list[tuple[int, int, str]] = []
     try:
         jobs = _snapshots(svc, build_apply_jobs(plan, growth_mirror=growth, dry_run=dry_run,
-                                              label=f"Squad plan · {plan.blast_summary()}"), plan.source_save_uid)
+                                              label=f"Squad plan · {plan.blast_summary()}", skipped=skipped),
+                          plan.source_save_uid)
     except Exception as exc:
         raise ApplyError(str(exc)) from exc
+    # Shirts the rebase or the safe write order had to leave out. Nothing
+    # else is held back; "Fix shirts" re-plans exactly these.
+    at_club = set(_roster_rows(svc)) | set(plan.shirt_hidden)
+    left_out = {pid: number for pid, number in planned_shirts.items()
+                if pid not in plan.jersey_numbers and pid in at_club}
+    left_out.update({pid: number for pid, number, _reason in skipped})
+    skipped_shirts = []
+    for pid, number in sorted(left_out.items()):
+        name = str(plan.shirt_names.get(pid) or next((m.name for m in plan.members if m.playerid == pid), "")
+                   or f"Player {pid}")
+        wearer = next((plan.shirt_names.get(other) or f"Player {other}" for other, worn in plan.shirt_book.items()
+                       if worn == number and other != pid), "")
+        skipped_shirts.append({"playerid": pid, "number": number, "name": name, "reason": "worn"})
+        live_changes.append(f"{name}: #{number} skipped" + (f", still worn by {wearer}." if wearer else "."))
     record = make_record(svc, plan, jobs)
     record["live_changes"] = live_changes
+    record["skipped_shirts"] = skipped_shirts
     save_record(svc, record)
     _start_record(svc, record["plan_id"], follow=follow, on_result=on_result)
     return str(record["plan_id"])
@@ -506,16 +569,25 @@ def _finish_part(svc: Any, job: Job, result: JobResult) -> None:
     def publish() -> None:
         svc.store.dispatch(E.JobFinished(job_id=job.job_id, result=result))
         _persist_result(svc, result)
-        if result.outcome is ApplyOutcome.APPLIED and not job.dry_run and all(op.op == "set_fields" for op in job.ops):
+        if result.outcome in {ApplyOutcome.APPLIED, ApplyOutcome.PARTIAL} and not job.dry_run \
+                and all(op.op == "set_fields" for op in job.ops):
             from .squad import invalidate
             invalidate(svc, reason=f"{job.label or job.job_id} applied")
     svc.executor.on_ui_thread(publish)
 
 
-def _retry_part(svc: Any, part: dict[str, Any]) -> Job:
+def _retry_part(svc: Any, part: dict[str, Any]) -> Job | None:
+    """A retry of the unfinished ops; ``None`` when only refused shirts remain."""
     job = job_from_wire(part["job"])
     old_result = part.get("result") or {}
     complete_ids = {str(item["id"]) for item in old_result.get("ops", ()) if item.get("ok")}
+    # A refused shirt would be refused again: it goes to "Fix shirts" instead.
+    conflicts = _op_conflicts(part["job"], old_result)
+    if conflicts:
+        known = {item["op_id"] for item in part.get("shirt_conflicts") or ()}
+        part["shirt_conflicts"] = [*(part.get("shirt_conflicts") or ()),
+                                   *(item for item in conflicts if item["op_id"] not in known)]
+    complete_ids |= {item["op_id"] for item in conflicts}
     remaining = []
     outcomes = {str(item.get("id")): item for item in old_result.get("ops", ())}
     for operation in job.ops:
@@ -533,6 +605,9 @@ def _retry_part(svc: Any, part: dict[str, Any]) -> Job:
             operation = replace(operation, body={**dict(operation.body),
                                 "fields": {name: value for name, value in fields.items() if name in failed}})
         remaining.append(operation)
+    if not remaining and conflicts:
+        part["status"] = "applied"
+        return None
     remaining = tuple(remaining) or job.ops
     part.setdefault("attempts", []).append({"job": part["job"], "result": old_result, "status": part["status"]})
     retry = _snapshots(svc, (replace(job, ops=remaining, job_id=new_ulid()),), str(job.requires.get("save_uid") or ""))[0]
@@ -564,7 +639,7 @@ def _run_record(svc: Any, record: dict[str, Any], token: Any, *, follow: bool,
         job = job_from_wire(part["job"])
         existing = svc.transport.result(job.job_id)
         if existing is not None and existing.outcome.is_terminal:
-            if existing.outcome is ApplyOutcome.APPLIED:
+            if existing.outcome is ApplyOutcome.APPLIED or _only_shirt_conflicts(part["job"], existing):
                 result = existing
             else:
                 part.update(result=dict(existing.raw), status="failed")
@@ -577,6 +652,12 @@ def _run_record(svc: Any, record: dict[str, Any], token: Any, *, follow: bool,
             result = None
         else:
             result = None
+        if job is None:
+            # Only refused shirts were left in this part; keep going.
+            record.update(cursor=index + 1, status="running", error="", updated_utc=svc.clock.stamp())
+            save_record(svc, record)
+            latest = JobResult.from_wire(part["result"]) if part.get("result") else latest
+            continue
         if result is None:
             if part["status"] == "unsent":
                 try:
@@ -593,7 +674,13 @@ def _run_record(svc: Any, record: dict[str, Any], token: Any, *, follow: bool,
         if not result.outcome.is_terminal:
             return
         latest = result
-        part.update(result=dict(result.raw), status="applied" if result.outcome is ApplyOutcome.APPLIED else "failed")
+        conflicts = _op_conflicts(part["job"], result.raw)
+        if conflicts:
+            part["shirt_conflicts"] = conflicts
+        # A part whose only failures are refused shirts is complete: every
+        # other op ran (shirt ops continue on error). Later parts still run.
+        done = result.outcome is ApplyOutcome.APPLIED or _only_shirt_conflicts(part["job"], result)
+        part.update(result=dict(result.raw), status="applied" if done else "failed")
         record.update(cursor=index + 1 if part["status"] == "applied" else index,
                       status="running" if part["status"] == "applied" else "failed",
                       error="" if part["status"] == "applied" else (result.diagnostic or _status_line(result)),
@@ -609,6 +696,16 @@ def _run_record(svc: Any, record: dict[str, Any], token: Any, *, follow: bool,
             record.update(status="awaiting_verification", updated_utc=svc.clock.stamp())
             save_record(svc, record)
         _publish_parent(svc, record, latest, on_result)
+
+
+def _only_shirt_conflicts(job_wire: Mapping[str, Any], result: JobResult) -> bool:
+    """True when every op ran and each failure is a refused shirt."""
+    raw = result.raw or {}
+    items = list(raw.get("ops", ()) or ())
+    conflicts = {item["op_id"] for item in _op_conflicts(job_wire, raw)}
+    if not conflicts or len(items) != len(job_wire.get("ops", ())):
+        return False
+    return all(item.get("ok") or str(item.get("id")) in conflicts for item in items)
 
 
 def _same_value(actual: Any, planned: Any) -> bool:
@@ -679,9 +776,12 @@ def _verify_record(svc: Any, record: dict[str, Any], token: Any) -> None:
                     continue
                 observed.setdefault(table, {})[str(row.get("playerid"))] = dict(row)
     verified = 0
+    refused = {(str(item["playerid"]), int(item["number"])) for item in failed_shirts(record)}
     for table, players in record["expected"].items():
         for pid, fields in players.items():
             for field, planned in fields.items():
+                if table == "teamplayerlinks" and field == "jerseynumber" and (pid, _as_int(planned)) in refused:
+                    continue  # reported as a shirt to fix, not as a mismatch
                 actual = observed.get(table, {}).get(pid, {}).get(field)
                 if _same_value(actual, planned):
                     verified += 1
@@ -694,6 +794,13 @@ def _verify_record(svc: Any, record: dict[str, Any], token: Any) -> None:
     save_record(svc, record)
 
 
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _publish_parent(svc: Any, record: dict[str, Any], latest: JobResult,
                     on_result: Callable[[JobResult], None] | None) -> None:
     aggregate = aggregate_result(record, latest)
@@ -701,10 +808,12 @@ def _publish_parent(svc: Any, record: dict[str, Any], latest: JobResult,
     def publish() -> None:
         if record["status"] == "applied":
             verified = report["verification"] == "verified"
+            shirts = report["shirt_conflicts"] if not report["shirts_fixed_by"] else []
             svc.store.dispatch(E.StatusSet(
                 f"Squad plan applied: {report['players_applied']}/{report['players_requested']} players, "
                 f"{report['fields_applied']}/{report['fields_requested']} fields. "
-                + ("Final read-back verified." if verified else "Final read-back unavailable.")))
+                + ("Final read-back verified." if verified else "Final read-back unavailable.")
+                + (f" {len(shirts)} shirt number{'s' if len(shirts) != 1 else ''} still need a fix." if shirts else "")))
         else:
             svc.store.dispatch(E.StatusSet(f"Squad plan stopped: {record.get('error') or _status_line(latest)}"))
         if on_result is not None:
@@ -748,10 +857,71 @@ def _undo_locked(svc: Any, plan_id: str, *, follow: bool,
         label=f"Undo squad plan: {original['label']}",
         jersey_numbers={int(pid): int(fields["jerseynumber"]) for pid, fields in before.get("teamplayerlinks", {}).items()
                         if "jerseynumber" in fields})
-    jobs = _snapshots(svc, build_apply_jobs(plan, label=plan.label), plan.source_save_uid)
+    skipped: list[tuple[int, int, str]] = []
+    jobs = _snapshots(svc, build_apply_jobs(plan, label=plan.label, skipped=skipped), plan.source_save_uid)
+    if skipped:
+        pid, number, _reason = skipped[0]
+        raise ApplyError(f"Undo cannot give #{number} back to player {pid} without a duplicate shirt. "
+                         "Refresh the squad, free that number, then undo again.")
     record = make_record(svc, plan, jobs, kind="undo", undo_of=plan_id)
     save_record(svc, record)
     original["undo_plan_id"] = record["plan_id"]
     save_record(svc, original)
     _start_record(svc, record["plan_id"], follow=follow, on_result=on_result)
     return str(record["plan_id"])
+
+
+def plan_shirt_fix(svc: Any, plan_id: str) -> tuple[SquadPlan, list[str]]:
+    """Re-plan only the shirts a plan could not write, against the fresh squad.
+
+    Call after the squad was refreshed. A number that is free now is kept;
+    otherwise the player gets a familiar or positional free number. Nobody
+    else is moved. Returns a small shirt-only plan and plain notes.
+    """
+    from ...domain.squad_shirts import fix_shirt, make_shirt_issue, shirt_map_from_squad, final_shirts
+
+    record = load_record(svc, plan_id)
+    failed = failed_shirts(record)
+    if not failed:
+        raise ApplyError("This plan has no shirt numbers left to fix.")
+    _check_source(svc, record["source"], ())
+    squad = svc.store.snapshot().squad
+    if squad.stale or squad.taken is None:
+        raise SquadRefreshNeeded("Refresh the live squad before fixing shirts.")
+    rows = _roster_rows(svc)
+    notes: list[str] = []
+    present = [item for item in failed if int(item["playerid"]) in rows]
+    notes.extend(f"{item['name']} left the club; shirt skipped." for item in failed if item not in present)
+    if not present:
+        raise ApplyError("None of these players is still at the club.")
+    plan = plan_from_rows([rows[int(item["playerid"])] for item in present], source_save_uid=squad.save_uid,
+                          source_teamid=squad.teamid, source_snapshot_revision=squad.taken.isoformat())
+    book, names, hidden = shirt_map_from_squad(squad.players, getattr(squad, "team_shirts", ()) or (), plan.members)
+    plan = replace(plan, shirt_book=book, shirt_names=names, shirt_hidden=hidden, label="Fix shirts",
+                   mode="per_player", source="shirt_fix")
+    for item in present:
+        pid, wanted = int(item["playerid"]), int(item["number"])
+        if book.get(pid) == wanted:
+            notes.append(f"{item['name']} already wears #{wanted}.")
+            continue
+        wearers = [other for other, number in final_shirts(plan).items() if number == wanted and other != pid]
+        if not wearers:
+            plan = replace(plan, jersey_numbers={**dict(plan.jersey_numbers), pid: wanted})
+            notes.append(f"{item['name']} gets #{wanted}; it is free now.")
+            continue
+        plan = replace(plan, shirt_issues=plan.shirt_issues + (make_shirt_issue(pid, wanted, wearers, names),))
+        plan, note = fix_shirt(plan, pid)
+        notes.append(f"#{wanted} is worn by {' and '.join(str(names.get(w) or w) for w in wearers)}. {note}")
+    return plan, notes
+
+
+def apply_shirt_fix(svc: Any, plan_id: str, plan: SquadPlan, *,
+                    on_result: Callable[[JobResult], None] | None = None) -> str:
+    """Queue the reviewed shirt-only fix as its own small plan."""
+    if not plan.jersey_numbers:
+        raise ApplyError("No shirt number needs to change.")
+    fix_id = apply_squad_plan(svc, plan, confirm_token="APPLY", on_result=on_result)
+    record = load_record(svc, plan_id)
+    record["shirts_fixed_by"] = fix_id
+    save_record(svc, record)
+    return fix_id

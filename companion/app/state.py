@@ -122,6 +122,8 @@ class SquadState:
     teamid: int | None = None
     players: tuple[Mapping[str, Any], ...] = ()
     free_agents: tuple[Mapping[str, Any], ...] = ()
+    # Complete club shirt map, including team-linked players outside the senior list.
+    team_shirts: tuple[Mapping[str, Any], ...] = ()
     taken: datetime | None = None
     stale: bool = True
 

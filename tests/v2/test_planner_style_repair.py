@@ -131,9 +131,9 @@ def test_individual_repair_button_targets_selected_player_and_respects_edits(mon
              "review_detail": scroll, "repair_player": called.append, "edits_dirty": dirty, "busy": busy}
     review.select_player(state, 85308)
     if dirty:
-        assert "Repair this player" not in buttons
+        assert "Fix this" not in buttons
     else:
-        control, action = buttons["Repair this player"]
+        control, action = buttons["Fix this"]
         if busy:
             control.configure.assert_called_with(state="disabled")
         else:

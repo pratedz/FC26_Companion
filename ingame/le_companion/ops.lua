@@ -350,6 +350,35 @@ end
 -- export_squad
 -------------------------------------------------------------------------------
 
+-- Every teamplayerlinks row of the club, including players missing from the
+-- senior list (loaned out, reserves). The shirt write check in set_fields
+-- scans exactly these rows, so the planner must see the same shirts.
+function ops.team_shirts(teamid, senior_ids)
+    local links = db.open("teamplayerlinks")
+    if not links or db.field("teamplayerlinks", "jerseynumber") == nil then return nil end
+    local loaned_fn, name_fn = rawget(_G, "IsPlayerLoanedOut"), rawget(_G, "GetPlayerName")
+    local out = {}
+    for rec in links:records() do
+        local pid = tonumber(links:get("teamid", rec)) == teamid and tonumber(links:get("playerid", rec)) or nil
+        if pid and pid > 0 then
+            local row = { playerid = pid, jerseynumber = tonumber(links:get("jerseynumber", rec)) or 0,
+                          senior = (senior_ids or {})[pid] == true }
+            if not row.senior then
+                if type(loaned_fn) == "function" then
+                    local ok, value = pcall(loaned_fn, pid)
+                    if ok then row.loaned = value == true or tonumber(value) == 1 end
+                end
+                if type(name_fn) == "function" then
+                    local ok, name = pcall(name_fn, pid)
+                    if ok and name then row.name = tostring(name) end
+                end
+            end
+            out[#out + 1] = row
+        end
+    end
+    return out
+end
+
 ops.handlers["export_squad"] = function(op, job, ctx)
     -- Do not touch a Career table while FC is still moving through its loading
     -- screens. Live Editor returns numeric 0 for "no user club"; Lua considers
@@ -681,10 +710,16 @@ ops.handlers["export_squad"] = function(op, job, ctx)
         end
     end
 
+    local team_shirts = nil
+    if type(ops.team_shirts) == "function" then
+        local shirts_ok, rows = pcall(ops.team_shirts, teamid, squad_ids)
+        if shirts_ok then team_shirts = rows end
+    end
+
     return ok_result({
         teamid = teamid, teamname = teamname, players = players,
         free_agents = free_agents, free_agent_diagnostics = diagnostics,
-        count = #players,
+        count = #players, team_shirts = team_shirts,
     }, { targets = #players, found = #players })
 end
 

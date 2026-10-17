@@ -64,6 +64,25 @@ class SquadMember:
 
 
 @dataclass(frozen=True, slots=True)
+class ShirtIssue:
+    """A requested shirt that cannot be written as planned.
+
+    It belongs to one player and never blocks the rest of the plan. ``holder``
+    is the current wearer when exactly one teammate wears the number.
+    """
+
+    playerid: int
+    number: int
+    holder: int | None = None
+    holder_name: str = ""
+    message: str = ""
+
+    @property
+    def can_swap(self) -> bool:
+        return self.holder is not None
+
+
+@dataclass(frozen=True, slots=True)
 class SquadPlan:
     """Multi-player draft: shared template (+ optional per-player overrides)."""
 
@@ -85,6 +104,11 @@ class SquadPlan:
     shirt_book: Mapping[int, int] = field(default_factory=dict)
     shirt_names: Mapping[int, str] = field(default_factory=dict)
     jersey_numbers: Mapping[int, int] = field(default_factory=dict)
+    # Per-player shirt problems. Apply skips these numbers, never the plan.
+    shirt_issues: tuple[ShirtIssue, ...] = ()
+    # Team-linked players outside the senior list (loaned out, reserves).
+    # Their shirts count as worn, and the planner never moves them silently.
+    shirt_hidden: frozenset[int] = frozenset()
     source_save_uid: str = ""
     source_teamid: int | None = None
     source_snapshot_revision: str = ""
@@ -113,7 +137,8 @@ class SquadPlan:
         return replace(self, members=members, selection_revision="",
                        overrides={pid: patch for pid, patch in self.overrides.items() if pid in selected},
                        jersey_numbers={pid: number for pid, number in self.jersey_numbers.items()
-                                       if pid in selected or pid not in previous})
+                                       if pid in selected or pid not in previous},
+                       shirt_issues=tuple(issue for issue in self.shirt_issues if issue.playerid in selected))
 
     def __post_init__(self) -> None:
         if not self.selection_revision and self.members:
@@ -170,6 +195,7 @@ class SquadPlan:
         identity_count: int = 0,
         jersey_numbers: Mapping[int, int] | None = None,
         blocking_issues: Sequence[str] = (),
+        shirt_issues: Sequence[ShirtIssue] = (),
     ) -> "SquadPlan":
         cleaned: dict[int, dict[str, int]] = {}
         for raw_pid, patch in overrides.items():
@@ -189,7 +215,7 @@ class SquadPlan:
             for pid, number in dict(jersey_numbers or {}).items()
             if 1 <= int(number) <= 99
         }
-        if not cleaned and not shirts and not blocking_issues:
+        if not cleaned and not shirts and not blocking_issues and not shirt_issues:
             raise JobValidationError("No per-player patches to stage.")
         return replace(
             self,
@@ -205,6 +231,7 @@ class SquadPlan:
             chips=tuple(chips),
             identity_count=int(identity_count),
             jersey_numbers=shirts,
+            shirt_issues=tuple(shirt_issues),
             mode="per_player",
         )
 
@@ -227,6 +254,7 @@ class SquadPlan:
                 for pid, number in self.jersey_numbers.items()
                 if pid in want or pid not in {member.playerid for member in self.members}
             },
+            shirt_issues=tuple(issue for issue in self.shirt_issues if issue.playerid in want),
         )
 
     def with_member_bases(self, bases: Mapping[int, Mapping[str, Any]]) -> "SquadPlan":
@@ -248,6 +276,9 @@ class SquadPlan:
                 ovr = member.ovr
             members.append(replace(member, base=merged, ovr=ovr))
         return replace(self, members=tuple(members))
+
+    def shirt_issue_for(self, playerid: int) -> ShirtIssue | None:
+        return next((issue for issue in self.shirt_issues if issue.playerid == int(playerid)), None)
 
     def patch_for(self, playerid: int) -> dict[str, int]:
         """Template merged with any per-player override."""
@@ -354,16 +385,23 @@ def template_from_fields(
 def safe_jersey_writes(
     current: Mapping[int, int | None],
     targets: Mapping[int, int],
+    *,
+    skipped: list[tuple[int, int, str]] | None = None,
 ) -> list[tuple[int, int]]:
     """Order shirt writes so the destination is free at every step.
 
     Career Mode crashes when two players on the team wear the same number,
-    and it sees each database write immediately. A swap is parked on the
-    lowest free shirt first, then completed. The last write for a player is
-    their requested number.
+    and it sees each database write immediately. A swap is parked on a free
+    shirt first, then completed. The last write for a player is their
+    requested number.
+
+    A write that cannot be made without a duplicate is dropped on its own and
+    reported in ``skipped`` as ``(playerid, number, reason)``; every other
+    shirt write still goes ahead.
     """
     holders: dict[int, int] = {}
     worn: dict[int, int] = {}
+    shared: set[int] = set()
     for pid, raw in current.items():
         try:
             number = int(raw or 0)
@@ -372,6 +410,11 @@ def safe_jersey_writes(
         player = int(pid)
         if 1 <= number <= 99 and number not in holders:
             holders[number] = player
+            worn[player] = number
+        elif 1 <= number <= 99:
+            # Two teammates already share this number. Moving one of them
+            # still leaves the other on it, so it is never a free target.
+            shared.add(number)
             worn[player] = number
         else:
             worn.setdefault(player, 0)
@@ -399,6 +442,14 @@ def safe_jersey_writes(
         holders[number] = player
         writes.append((player, number))
 
+    def drop(player: int, number: int, reason: str) -> None:
+        remaining.pop(player, None)
+        if skipped is not None:
+            skipped.append((player, number, reason))
+
+    for player, number in sorted(remaining.items()):
+        if number in shared:
+            drop(player, number, "shared")
     while remaining:
         ready = sorted(
             player
@@ -409,21 +460,24 @@ def safe_jersey_writes(
             player = ready[0]
             assign(player, remaining.pop(player))
             continue
-        blocked = [
+        blocked = sorted(
             (player, number)
             for player, number in remaining.items()
             if holders.get(number) not in remaining
-        ]
+        )
         if blocked:
+            # The wearer is not moving in this plan. Skip only this write;
+            # anyone waiting for this player's old number is re-checked next.
             player, number = blocked[0]
-            raise JobValidationError(
-                f"Shirt #{number} is already worn and cannot be freed without a duplicate."
-            )
-        spare = next((number for number in range(1, 100) if number not in holders), None)
+            drop(player, number, "worn")
+            continue
+        wanted = set(remaining.values())
+        spare = next((number for number in range(99, 1, -1)
+                      if number not in holders and number not in wanted and number not in shared), None)
         if spare is None:
-            raise JobValidationError(
-                "No free shirt number left to move players without a duplicate."
-            )
+            player = min(remaining)
+            drop(player, remaining[player], "no_spare")
+            continue
         assign(min(remaining), spare)
     return writes
 
@@ -434,6 +488,7 @@ def build_apply_job(
     growth_mirror: str = "auto",
     dry_run: bool = False,
     label: str = "",
+    skipped: list[tuple[int, int, str]] | None = None,
 ) -> Job:
     """One multi-op job: set_fields per selected player (same template)."""
     if plan.blocking_issues:
@@ -472,8 +527,10 @@ def build_apply_job(
     current_shirts = dict(plan.shirt_book)
     for member in plan.members:
         current_shirts.setdefault(member.playerid, member.base.get("jerseynumber"))
-    for pid, number in safe_jersey_writes(current_shirts, plan.jersey_numbers):
-        ops.append(
+    for pid, number in safe_jersey_writes(current_shirts, plan.jersey_numbers, skipped=skipped):
+        # Each shirt write re-checks the club in game and refuses a taken
+        # number (displace=False). One refused shirt must not stop the rest.
+        ops.append(replace(
             op_set_fields(
                 f"jersey{pid}-{number}",
                 table="teamplayerlinks",
@@ -482,8 +539,9 @@ def build_apply_job(
                 growth_mirror="off",
                 teamid=teamid or None,
                 displace=False,
-            )
-        )
+            ),
+            on_error="continue",
+        ))
     if not ops:
         raise JobValidationError("Nothing to write for this selection.")
     return Job(
@@ -502,6 +560,7 @@ def build_apply_jobs(
     growth_mirror: str = "auto",
     dry_run: bool = False,
     label: str = "",
+    skipped: list[tuple[int, int, str]] | None = None,
 ) -> tuple[Job, ...]:
     """Split a plan so each game job finishes inside the 5000ms worker cap.
 
@@ -509,7 +568,7 @@ def build_apply_jobs(
     after the earlier part has been applied.
     """
     full = build_apply_job(
-        plan, growth_mirror=growth_mirror, dry_run=dry_run, label=label
+        plan, growth_mirror=growth_mirror, dry_run=dry_run, label=label, skipped=skipped
     )
     field_ops = [
         op for op in full.ops if str((op.body or {}).get("table") or "players") != "teamplayerlinks"
@@ -569,3 +628,109 @@ def selection_summary_for_ai(plan: SquadPlan) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Per-player issues: blocked fields, shirt problems and "Apply the rest".
+# ---------------------------------------------------------------------------
+
+
+def _issue_owner(plan: SquadPlan, issue: str) -> int | None:
+    """The selected player an issue line belongs to (``"Name: ..."``)."""
+    best: tuple[int, int] | None = None
+    for member in plan.members:
+        prefix = member.name + ":"
+        if issue.startswith(prefix) and (best is None or len(prefix) > best[0]):
+            best = (len(prefix), member.playerid)
+    return best[1] if best else None
+
+
+def blocked_playerids(plan: SquadPlan) -> set[int] | None:
+    """Players whose required changes were rejected.
+
+    ``None`` means an issue belongs to the whole plan (for example unknown
+    starters), so no part of it may be applied.
+    """
+    owners: set[int] = set()
+    for issue in plan.blocking_issues:
+        owner = _issue_owner(plan, issue)
+        if owner is None:
+            return None
+        owners.add(owner)
+    return owners
+
+
+# Words that mark a staging note as a problem rather than an explanation.
+_PROBLEM_WORDS = ("no applicable playstyles", "rebuild", "rejected", "failed", "missing", "invalid")
+
+
+def issue_playerids(plan: SquadPlan) -> set[int]:
+    """Every player with any problem: blocked fields, shirts or staging notes."""
+    found = {owner for owner in (_issue_owner(plan, issue) for issue in plan.blocking_issues)
+             if owner is not None}
+    found.update(issue.playerid for issue in plan.shirt_issues)
+    for note in plan.warnings:
+        owner = _issue_owner(plan, note)
+        if owner is not None and any(word in note.casefold() for word in _PROBLEM_WORDS):
+            found.add(owner)
+    return found
+
+
+def _member_name(plan: SquadPlan, pid: int) -> str:
+    member = next((m for m in plan.members if m.playerid == pid), None)
+    return member.name if member else str(plan.shirt_names.get(pid) or pid)
+
+
+def plan_without_blocked(plan: SquadPlan) -> tuple[SquadPlan, list[str]]:
+    """Keep every valid item; drop only blocked players' fields.
+
+    Shirts are separate items: a player's rejected PlayStyles do not cancel
+    his valid shirt. Shirt issues are already absent from ``jersey_numbers``.
+    Returns the reduced plan and plain sentences naming what is skipped.
+    """
+    blocked = blocked_playerids(plan)
+    if blocked is None:
+        raise JobValidationError("This problem affects the whole plan: " + " ".join(plan.blocking_issues))
+    skipped = [f"{_member_name(plan, pid)}: player changes skipped until fixed."
+               for pid in sorted(blocked, key=lambda pid: _member_name(plan, pid))]
+    skipped.extend(f"{_member_name(plan, issue.playerid)}: shirt skipped. {issue.message}".strip()
+                   for issue in plan.shirt_issues)
+    rest = replace(
+        plan,
+        overrides={pid: patch for pid, patch in plan.overrides.items() if pid not in blocked},
+        blocking_issues=(),
+    )
+    if not rest.overrides and not rest.jersey_numbers and not rest.template:
+        raise JobValidationError("Nothing valid is left to apply. Fix the listed problems first.")
+    return rest, skipped
+
+
+def splice_player(plan: SquadPlan, source: SquadPlan, playerid: int) -> SquadPlan:
+    """Replace one player's staged result; every other player stays as reviewed."""
+    pid = int(playerid)
+    name = _member_name(plan, pid)
+
+    def mine(text: str) -> bool:
+        return text.startswith(name + ":")
+
+    overrides = dict(plan.overrides)
+    if pid in source.overrides:
+        overrides[pid] = dict(source.overrides[pid])
+    else:
+        overrides.pop(pid, None)
+    reasons = dict(plan.reasons)
+    if source.reasons.get(pid):
+        reasons[pid] = source.reasons[pid]
+    hints = dict(plan.library_hints)
+    if source.library_hints.get(pid):
+        hints[pid] = source.library_hints[pid]
+    return replace(
+        plan,
+        overrides=overrides,
+        reasons=reasons,
+        library_hints=hints,
+        blocking_issues=tuple(issue for issue in plan.blocking_issues if not mine(issue))
+        + tuple(issue for issue in source.blocking_issues if mine(issue)),
+        warnings=tuple(note for note in plan.warnings if not mine(note))
+        + tuple(note for note in source.warnings if mine(note)),
+    )

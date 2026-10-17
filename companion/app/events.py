@@ -139,6 +139,8 @@ class SquadSynced:
     taken: datetime
     session_id: str = ""
     free_agents: Sequence[Mapping[str, Any]] = ()
+    # Every teamplayerlinks row of the club; empty when the loaded core predates it.
+    team_shirts: Sequence[Mapping[str, Any]] = ()
 
 
 @dataclass(frozen=True, slots=True)

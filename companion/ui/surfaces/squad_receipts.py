@@ -73,6 +73,9 @@ def render_receipts(host: Any, svc: Any) -> None:
         elif receipt.get("verification") == "failed" and not receipt.get("undo_plan_id"):
             button(row, "Verify again", lambda rid=plan_id: _resume(svc, rid),
                    disabled_reason=reason, kind="secondary", height=theme.BTN_SM).pack(side="left", padx=theme.SP1)
+        if receipt.get("shirt_conflicts") and not receipt.get("shirts_fixed_by") and not receipt.get("undo_plan_id"):
+            button(row, "Fix shirts", lambda rid=plan_id, w=card: _fix_shirts(svc, rid, w),
+                   disabled_reason=reason, kind="primary", height=theme.BTN_SM).pack(side="left", padx=theme.SP1)
         if int(receipt.get("fields_applied") or 0) > 0 and not receipt.get("undo_plan_id"):
             button(row, "Undo plan", lambda rid=plan_id: _undo(svc, rid),
                    disabled_reason=reason, kind="danger", height=theme.BTN_SM).pack(side="left", padx=theme.SP1)
@@ -94,6 +97,16 @@ def _resume(svc: Any, plan_id: str) -> None:
         set_status(svc, "Following the plan's remaining work and verification. Successful writes will be kept.")
     except Exception as exc:
         set_status(svc, f"Could not resume plan: {exc}", tone="error")
+
+
+def _fix_shirts(svc: Any, plan_id: str, widget: Any) -> None:
+    """Refresh, re-plan only the refused shirts, confirm, queue a shirt-only job."""
+    from .planner_shirts import fix_shirts_flow
+    try:
+        win = widget.winfo_toplevel()
+    except Exception:
+        win = widget
+    fix_shirts_flow(svc, plan_id, win)
 
 
 def _undo(svc: Any, plan_id: str) -> None:
@@ -159,9 +172,17 @@ def open_receipt(svc: Any, plan_id: str) -> None:
         status = "Verified" if row.get("verified") else "Awaiting verification" if row.get("readback") is None else "Mismatch"
         muted_label(scroll, f"Before {before} → Planned {planned} · Read-back {actual} · {status}",
                     size=11, wraplength=660).pack(anchor="w")
+    conflicts = receipt.get("shirt_conflicts") or ()
+    if conflicts and not receipt.get("shirts_fixed_by"):
+        from .planner_shirts import shirt_conflict_text
+        muted_label(scroll, shirt_conflict_text(conflicts), size=11, color=theme.WARNING,
+                    wraplength=660).pack(anchor="w", pady=theme.SP1)
     for error in receipt.get("verification_errors") or ():
         muted_label(scroll, str(error), size=11, color=theme.WARNING, wraplength=660).pack(anchor="w", pady=theme.SP1)
     footer = _frame(win)
     footer.pack(fill="x", padx=theme.SP3, pady=theme.SP3)
     button(footer, "Open Club", lambda: _open_club(svc, receipt), kind="secondary").pack(side="left")
+    if conflicts and not receipt.get("shirts_fixed_by"):
+        button(footer, "Fix shirts", lambda: _fix_shirts(svc, plan_id, win), kind="primary").pack(
+            side="left", padx=theme.SP1)
     button(footer, "Close", win.destroy, kind="ghost").pack(side="right")

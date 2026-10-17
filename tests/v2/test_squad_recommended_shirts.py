@@ -130,9 +130,12 @@ def test_recommended_swaps_with_nonselected_holder_remain_safe_to_apply():
     assert running == final
 
 
-def test_ai_only_shirts_keep_legacy_behavior_and_ignore_unselected_ids():
+def test_unrequested_ai_shirts_are_dropped_and_unselected_ids_ignored():
     roster = (RosterPlayer(1, "Ronaldinho", "CAM"),)
     final, _notes, changes = _final(roster, {1: 50}, prompt="improve playstyles", extra=((1, 40), (999, 7)))
+    assert final == {1: 50} and changes == {}
+    final, _notes, changes = _final(roster, {1: 50}, prompt="improve playstyles and give him a good shirt",
+                                    extra=((1, 40), (999, 7)))
     assert final == {1: 40}
     assert 999 not in changes
 

@@ -520,7 +520,7 @@ def propose_changes(
         "You design safe EA FC 26 Career Mode player edits. Return JSON only. "
         "Do not invent a different playerid. Return exactly: "
         '{"target_playerid":number,"base_revision":"string","summary":"string",'
-        '"changes":[{"field":"canonical_name","value":integer,"reason":"short"}]}. '
+        '"changes":[{"field":"canonical_name","value":integer}]}. '
         "Only propose fields from the supplied contract. "
         "CRITICAL — overall vs in-stats: Career Mode stores overallrating "
         "separately from Pace/Shooting/Passing/Dribbling/Defending/Physical. "
@@ -630,7 +630,7 @@ def propose_squad_template(
         "You design safe EA FC 26 Career Mode squad templates. Return JSON only. "
         "Return exactly one shared patch for ALL selected players (not per-player): "
         '{"selection_revision":"string","summary":"string",'
-        '"changes":[{"field":"canonical_name","value":integer,"reason":"short"}]}. '
+        '"changes":[{"field":"canonical_name","value":integer}]}. '
         "Only fields from the contract. Do not invent playerids. Prefer attributes "
         "and ratings the user asked for. Never change identity, names, team, "
         "contract, or face unless explicitly requested. Keep the change set small."
@@ -864,8 +864,16 @@ def propose_squad_players(
     on_chunk: Callable[[int, int], None] | None = None,
     problems: list[str] | None = None,
     cache: Any | None = None,
+    shirt_map: Mapping[str, str] | None = None,
+    repair_notes: Mapping[int, str] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, str], dict[int, str]]:
-    """Per-player patches in chunks. Never submits a game job."""
+    """Per-player patches in chunks. Never submits a game job.
+
+    ``shirt_map`` (number -> wearer) lets the model avoid worn shirts.
+    ``repair_notes`` (playerid -> rejection) re-asks only those players, one
+    request each, with the previous rejection fed back; the cache is bypassed
+    for them and refreshed with the repaired proposal.
+    """
     prompt = (request or "").strip()
     if not prompt:
         raise ValueError("Describe the squad build you want.")
@@ -882,31 +890,40 @@ def propose_squad_players(
     keys: dict[int, str] = {}
     from .ai_provider import provider_id, model_id
     provider_key = f"{provider_id()}:{model_id()}:{model}"
+    notes = {int(pid): str(text) for pid, text in (repair_notes or {}).items() if str(text or "").strip()}
+    repairs: list[Mapping[str, Any]] = []
     for row in players:
         pid = int(row["playerid"])
         key = cache.proposal_key(row, recipe, prompt, provider_key) if cache is not None else ""
         keys[pid] = key
-        cached = cache.get(key) if cache is not None else None
-        if cached is None:
+        cached = cache.get(key) if cache is not None and pid not in notes else None
+        if pid in notes:
+            repairs.append(row)
+        elif cached is None:
             rows.append(row)
         else:
             patches[pid], reasons[pid], hints[pid] = cached
-    if not rows:
+    if not rows and not repairs:
         if on_chunk is not None:
             on_chunk(1, 1)
         return patches, reasons, hints
-    chunks = [rows[index:index + PROPOSE_CHUNK] for index in range(0, len(rows), PROPOSE_CHUNK)]
+    chunks = [(rows[index:index + PROPOSE_CHUNK], prompt) for index in range(0, len(rows), PROPOSE_CHUNK)]
+    chunks.extend(([row], f"{prompt}\nPrevious attempt rejected: {notes[int(row['playerid'])]}. Fix only this.")
+                  for row in repairs)
     total = len(chunks)
+    extra = {"shirt_map": dict(shirt_map)} if shirt_map else {}
 
-    def run_chunk(chunk: list[Mapping[str, Any]]):
+    def run_chunk(item: tuple[list[Mapping[str, Any]], str]):
+        chunk, chunk_request = item
         if cancel_check is not None and cancel_check():
             return None
         result = _propose_squad_chunk(
             chunk,
             selection_revision=selection_revision,
-            request=prompt,
+            request=chunk_request,
             recipe=recipe,
             model=model,
+            **extra,
         )
         # Preserve valid groups even when a sibling fails or the user closes
         # the window; the next request can retry only missing proposals.
@@ -1043,10 +1060,12 @@ def _propose_squad_chunk(
     request: str,
     recipe: SquadRecipe,
     model: str,
+    shirt_map: Mapping[str, str] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, str], dict[int, str]]:
     """Repair missing/invalid players once, preserving every valid proposal."""
     patches, reasons, hints = _propose_squad_chunk_once(
         chunk, selection_revision=selection_revision, request=request, recipe=recipe, model=model,
+        shirt_map=shirt_map,
     )
     missing = [row for row in chunk if int(row["playerid"]) not in patches]
     if missing:
@@ -1056,7 +1075,7 @@ def _propose_squad_chunk(
             repaired, why, extra = _propose_squad_chunk_once(
                 missing, selection_revision=selection_revision,
                 request=request + "\nRepair these rejected proposals: " + details,
-                recipe=recipe, model=model,
+                recipe=recipe, model=model, shirt_map=shirt_map,
             )
             patches.update(repaired)
             reasons.update(why)
@@ -1076,8 +1095,18 @@ def _propose_squad_chunk_once(
     request: str,
     recipe: SquadRecipe,
     model: str,
+    shirt_map: Mapping[str, str] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, str], dict[int, str]]:
     field_contract = _field_contract(recipe)
+    from ..domain.squad_session import ai_shirts_wanted
+
+    shirts_by_ai = ai_shirts_wanted(recipe)
+    shirt_instructions = (
+        "Set jerseynumber only as the user asked, usually 1-30; never copy overallrating into it. "
+        "squad_shirts maps numbers already worn to the wearer: never give a number worn by "
+        "someone outside this selection unless the user asked for a swap. "
+        if shirts_by_ai else "Never return jerseynumber; Python assigns shirts. "
+    )
     allowed = list(recipe.families)
     identity_note = club_identity_note(recipe.club_name)
     attribute_instructions = (
@@ -1093,7 +1122,7 @@ def _propose_squad_chunk_once(
         '{"selection_revision":"string","players":['
         '{"playerid":number,"summary":"one-line Career reason",'
         '"playstyles":["exact name"],"playstyles_plus":["exact name"],'
-        '"changes":[{"field":"canonical_name","value":integer,"reason":"short"}]}]}. '
+        '"changes":[{"field":"canonical_name","value":integer}]}]}. '
         "Each player gets a DIFFERENT patch from their live current_values. "
         "Keep relative shape (a creator stays high passing/dribble, a CB stays a CB). "
         f"{attribute_instructions}"
@@ -1128,11 +1157,10 @@ def _propose_squad_chunk_once(
         "bits as a 79. When playstyle_plus_max is a number, never exceed it. "
         "Each player gets their own attribute shape and their own playstyle bits. "
         "Do not copy one trait mask onto every player. "
-        "If the user asks to arrange or recommend jersey numbers, also set "
-        "jerseynumber to that player's well-known squad shirt, usually 1-30. "
-        "Never copy overallrating into jerseynumber. "
+        f"{shirt_instructions}"
         "Never change identity, names, team, contract, or face unless identity is allowed. "
-        "Do not invent playerids. Do not nerf unless the user asked."
+        "Do not invent playerids. Do not nerf unless the user asked. "
+        "Keep summary to 8 words or fewer."
     )
     user = json.dumps(
         {
@@ -1184,6 +1212,7 @@ def _propose_squad_chunk_once(
             ],
             "editable_field_contract": field_contract,
             "playstyle_catalog": {"outfield": OUTFIELD, "goalkeeper": GOALKEEPER},
+            **({"squad_shirts": dict(shirt_map)} if shirts_by_ai and shirt_map else {}),
         },
         ensure_ascii=False,
     )
