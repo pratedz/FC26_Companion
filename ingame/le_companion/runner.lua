@@ -936,17 +936,28 @@ function runner.on_career(event_id, phase)
     -- TransferPlayer also emits nested events. No host calls, disk IO, cache
     -- traversal or error logging are allowed in those callbacks.
     if not post or not events.is_hub(event_id) then
-        runner._hub_ready = false
-        runner._career_seen = false
-        runner._simulating = true
         runner._cache_dirty = true
-        _G.LEC_CAREER_SEEN = false
         -- The pre phase of a hub event is a screen change, not a change to
         -- the squad. Everything else (simulation, day advance, save, load)
         -- makes the mirror rebuild on the next settled hub. Lua state only.
         if mirror and (post or not events.is_hub(event_id)) then
             mirror.on_unsettled()
         end
+        -- A job's own writes raise nested Career events on this very thread:
+        -- ReleasePlayerFromTeam and TransferPlayer both do. Clearing readiness
+        -- here made the op loop abandon every remaining op after the first
+        -- write ("career_event_interrupted"), so a 17-player release only ever
+        -- released one player per run. Nothing else can reach this thread
+        -- while _busy, so a nested event never means the hub went away; an op
+        -- that genuinely needs a fresh event still yields with awaiting_event.
+        if runner._busy then
+            runner._nested_events = (runner._nested_events or 0) + 1
+            return "nested"
+        end
+        runner._hub_ready = false
+        runner._career_seen = false
+        runner._simulating = true
+        _G.LEC_CAREER_SEEN = false
         return "paused"
     end
 

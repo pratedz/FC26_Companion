@@ -605,9 +605,15 @@ def test_draft_session_before_grok() -> None:
 
 
 def test_current_squad_plan_release_version() -> None:
+    """Plan these players shipped in 2.11.0 and has only moved forward since.
+
+    Pinning the exact release here just made this fail on every bump.
+    """
     from companion import __version__
 
-    assert __version__ == "2.11.0"
+    parts = tuple(int(part) for part in __version__.split("."))
+    assert len(parts) == 3
+    assert parts >= (2, 11, 0)
 
 
 def test_relative_pace_under_80() -> None:

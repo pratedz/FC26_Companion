@@ -180,6 +180,9 @@ def main() -> int:
         "--hidden-import", "tkinter.ttk",
         "--hidden-import", "PIL",
         "--hidden-import", "PIL._tkinter_finder",
+        # Portrait export reads FC's .dds files. PIL finds its plugins by
+        # scanning its own package, which a frozen build cannot do.
+        "--hidden-import", "PIL.DdsImagePlugin",
         "--hidden-import", "openai",
         "--collect-submodules", "openai",
         # Claude (proxy): anthropic 1.x runs on httpx2/httpcore2 (+ truststore).

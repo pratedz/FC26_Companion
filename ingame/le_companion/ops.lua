@@ -931,6 +931,10 @@ local function host_function(...)
     return nil, nil
 end
 
+-- Defined further down with the squad helpers; the transfer handler needs
+-- them for the release read-back.
+local resolve_user_teamid, user_senior_playerids
+
 local function player_teamid(playerid)
     local fn = rawget(_G, "GetTeamIdFromPlayerId")
     if type(fn) == "function" then
@@ -940,6 +944,24 @@ local function player_teamid(playerid)
     local links = db.open("teamplayerlinks")
     local rec = links and db.scan_for(links, "playerid", playerid) or nil
     return rec and tonumber(links:get("teamid", rec)) or nil, "teamplayerlinks"
+end
+
+--- Is *playerid* still one of the user's senior-squad players?
+---
+--- ``GetTeamIdFromPlayerId`` answers from a Career Mode structure that still
+--- names the old club in the same frame as ``ReleasePlayerFromTeam``, so a
+--- release that worked was reported as ``verify_mismatch`` and the rest of the
+--- job was abandoned.  This helper is the source the squad export already
+--- trusts, and it drops the player immediately.  Returns nil when the host
+--- helper is unavailable or hands back an empty squad, which is never proof
+--- that a player left.
+local function in_user_senior_squad(playerid)
+    local ids = user_senior_playerids()
+    if #ids == 0 then return nil end
+    for i = 1, #ids do
+        if ids[i] == playerid then return true end
+    end
+    return false
 end
 
 local function clear_player_state(playerid, op, action)
@@ -959,7 +981,12 @@ local function clear_player_state(playerid, op, action)
             cleared.presigned = true
         end
     end
-    if op.clear_loan ~= false and action == "transfer"
+    -- Live Editor's own documentation warns that releasing a player who is on
+    -- loan at another club can damage the save: ReleasePlayerFromTeam moves
+    -- the player out of whatever club GetTeamIdFromPlayerId reports, which for
+    -- a loaned-out player is the loan club, not the parent club. Ending the
+    -- loan first is the same thing the transfer path already does.
+    if op.clear_loan ~= false and (action == "transfer" or action == "release")
         and type(rawget(_G, "IsPlayerLoanedOut")) == "function" then
         local ok, active = pcall(_G.IsPlayerLoanedOut, playerid)
         if ok and active then
@@ -1006,6 +1033,12 @@ ops.handlers["transfer"] = function(op, job, ctx)
     local ok_clear, clear_reason, cleared = clear_player_state(playerid, op, action)
     if not ok_clear then
         return fail_result(clear_reason, "required player state could not be cleared")
+    end
+    -- Ending a loan sends the player back to the parent club, so the club to
+    -- compare the read-back against is the one he holds now, not the one he
+    -- was lent to.
+    if cleared.loan then
+        before_team = player_teamid(playerid) or before_team
     end
 
     local fn, api_name, args
@@ -1111,14 +1144,34 @@ ops.handlers["transfer"] = function(op, job, ctx)
     elseif action == "release" then
         local actual, source = player_teamid(playerid)
         data.teamid, data.verify_source = actual, source
+        data.before_teamid = before_team
         -- A released player may no longer have a teamplayerlinks record, so
         -- nil is a valid and useful read-back when the old team was known.
         if actual ~= before_team then
             data.verified = true
             return ok_result(data, { targets = 1, found = 1, side_effects = 1 })
         end
-        return fail_result("verify_mismatch",
-            string.format("release returned but team remained %s", tostring(actual)),
+        -- GetTeamIdFromPlayerId still answers with the old club in the frame
+        -- the release happens in. The user-squad helper does not, so it is the
+        -- deciding read-back when the player left the team we manage.
+        local user_team = resolve_user_teamid()
+        if user_team and before_team == user_team then
+            local still_here = in_user_senior_squad(playerid)
+            if still_here == false then
+                data.verified = true
+                data.verify_source = "senior_squad"
+                return ok_result(data, { targets = 1, found = 1, side_effects = 1 })
+            end
+            if still_here == true then
+                return fail_result("verify_mismatch",
+                    string.format("release returned but %d is still in squad %d",
+                        playerid, user_team),
+                    { targets = 1, side_effects = 1 })
+            end
+        end
+        return fail_result("unverified_side_effect",
+            string.format("release returned but team still read back as %s",
+                tostring(actual)),
             { targets = 1, side_effects = 1 })
     elseif action == "terminate_loan" then
         local is_loaned = rawget(_G, "IsPlayerLoanedOut")
@@ -1155,7 +1208,7 @@ end
 -------------------------------------------------------------------------------
 
 --- Resolve the user senior team id when present.
-local function resolve_user_teamid()
+function resolve_user_teamid()
     if type(rawget(_G, "GetUserTeamID")) == "function" then
         local ok, tid = pcall(_G.GetUserTeamID)
         if ok and type(tid) == "number" and tid > 0 then return math.floor(tid) end
@@ -1174,7 +1227,7 @@ end
 --- Export uses the helper for that reason.  Career writes must use the same
 --- membership source or a freshly exported 41-player squad can immediately
 --- fail as ``empty_team``.
-local function user_senior_playerids()
+function user_senior_playerids()
     local out, seen = {}, {}
     local fn = rawget(_G, "GetUserSeniorTeamPlayerIDs")
     if type(fn) ~= "function" then return out end

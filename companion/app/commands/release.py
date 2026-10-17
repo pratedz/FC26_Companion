@@ -47,7 +47,9 @@ def build_release_job(svc: Services, rows: Sequence[Mapping[str, Any]]) -> Job:
         # One attempt: a retry would call ReleasePlayerFromTeam again for
         # players who already left, then fail the read-back.
         max_attempts=1,
-        budget_ms=min(5000, max(500, 200 * len(ops))),
+        # Core 2.6.40 runs the whole list in one pass instead of stopping at
+        # the first write, and a release may also have to end a loan first.
+        budget_ms=min(5000, max(500, 300 * len(ops))),
     )
 
 

@@ -30,7 +30,7 @@ WHY THIS MODULE EXISTS
 local version = {}
 
 -- Semantic version of the resident core. Bump on any behaviour change.
-version.VERSION = "2.6.39"
+version.VERSION = "2.6.40"
 
 -- Wire protocol contract number. Job envelopes carry `"schema": 3`; results
 -- carry `"schema": 3`. This is PROTOCOL v3 (docs/V2_ARCHITECTURE.md §3), one
