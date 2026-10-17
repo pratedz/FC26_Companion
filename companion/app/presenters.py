@@ -98,6 +98,10 @@ NATIVE_REASON_TEXT: dict[str, str] = {
     "no_carrier": "FC's Career thread never pauses for it here; "
                   "jobs run when you open Team Management or click around the Career hub",
 }
+NATIVE_APC_OFF_TEXT = (
+    "the APC carrier is off by default; "
+    "jobs run when you open Team Management or click around the Career hub"
+)
 # Reasons that mean something is wrong, not merely "not yet".
 _NATIVE_ATTENTION = frozenset(
     {"le_base_not_found", "le_build_mismatch_header", "le_build_mismatch_code",
@@ -155,6 +159,11 @@ def native_view(ns: NativeStatus | None) -> dict[str, Any]:
     elif not ns.verified:
         why = "the Live Editor build is not verified"
         attention = True
+    elif ns.apc.get("enabled") == 0:
+        # lec_native 1.1 with its APC carrier off (the core 2.6.43 default):
+        # the timer alone never reaches FC's Career thread, so no tick is due.
+        why = NATIVE_APC_OFF_TEXT
+        attention = False
     else:
         why = "the native tick is not running"
         attention = False

@@ -9,7 +9,12 @@ from typing import Any
 
 import pytest
 
-from companion.app.presenters import NATIVE_REASON_TEXT, native_reason_text, native_view
+from companion.app.presenters import (
+    NATIVE_APC_OFF_TEXT,
+    NATIVE_REASON_TEXT,
+    native_reason_text,
+    native_view,
+)
 from companion.core.clock import FakeClock
 from companion.core.paths import TempAppPaths
 from companion.core.transport.native_status import (
@@ -204,6 +209,25 @@ def test_no_carrier_is_off_and_not_an_alarm() -> None:
     view = native_view(NativeStatus.from_wire(_status(reason="no_carrier", tick_live=False)))
     assert view["state"] == "off" and not view["attention"]
     assert "Team Management" in view["line"]
+
+
+def test_apc_off_by_default_says_so_and_is_not_an_alarm() -> None:
+    # lec_native 1.1 as core 2.6.43 starts it (measured in game 2026-10-17):
+    # APC carrier off, reason "ok", the thread timer never fires.
+    status = _status(tick_live=False)
+    status["apc"] = {"enabled": False, "tid": 0, "queued": 0, "ran": 0, "pending": False}
+    view = native_view(NativeStatus.from_wire(status))
+    assert view["state"] == "off" and not view["attention"]
+    assert view["line"] == f"Instant mode: off — {NATIVE_APC_OFF_TEXT}"
+    assert "Team Management" in view["line"]
+
+
+def test_apc_on_but_not_ticking_keeps_the_generic_line() -> None:
+    status = _status(tick_live=False)
+    status["apc"] = {"enabled": True, "tid": 13704, "queued": 3, "ran": 0, "pending": True}
+    assert native_view(NativeStatus.from_wire(status))["line"] == (
+        "Instant mode: off — the native tick is not running"
+    )
 
 
 def test_a_1_0_status_without_carrier_fields_still_reads() -> None:
