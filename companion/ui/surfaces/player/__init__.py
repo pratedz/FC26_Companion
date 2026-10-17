@@ -25,7 +25,6 @@ from .workstation import (
     PLAYER_SOURCES,
     _build_page_header,
     _build_session_panel,
-    _build_session_toolbar,
     _build_workstation_strip,
 )
 
@@ -64,7 +63,6 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
 
     ed = editor_view(state)
     _build_page_header(root, svc, target)
-    _build_session_toolbar(root, svc, ed)
 
     # The chosen editing method is the page's main content. The large target
     # information card used to push it below the fold in a windowed app.

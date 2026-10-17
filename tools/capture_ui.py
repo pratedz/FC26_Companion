@@ -35,7 +35,7 @@ DEFAULT_INSTALL = Path.home() / "Desktop" / "Fc26 LE" / "FC26_Companion"
 SURFACES = ("club", "player", "add_player", "injury", "automations", "library")
 EXTRAS = ("activity", "settings", "palette", "review")
 SCENARIOS = (
-    "club_selected", "club_checked", "player_open", "player_edited", "review_edited",
+    "club_selected", "club_checked", "player_open", "player_edited", "player_ai", "player_card", "review_edited",
     "library_search", "sign_search", "sign_results", "sign_base", "sign_collection", "planner",
 )
 
@@ -259,7 +259,7 @@ def _scenario(name: str, shell: Any, svc: Any) -> str:
             for slot in (0, 2, 4):
                 grid._on_check(slot, _Click())
         return "club"
-    if name in ("player_open", "player_edited"):
+    if name in ("player_open", "player_edited", "player_ai", "player_card"):
         best = _top_players(svc, 1)
         if best:
             p = best[0]
@@ -269,6 +269,13 @@ def _scenario(name: str, shell: Any, svc: Any) -> str:
                 svc.store.dispatch(E.FieldEdited("overallrating", int(p.get("overallrating") or 70) + 4))
                 svc.store.dispatch(E.FieldEdited("potential", int(p.get("potential") or 70) + 3))
                 svc.store.dispatch(E.FieldEdited("sprintspeed", 90))
+        if name == "player_ai":
+            shell._surface_vms.setdefault("player", {})["player_source"] = "presets"
+        if name == "player_card" and best and svc.catalog is not None:
+            # A chosen Library card, as if picked from the results: the preview state.
+            hits = svc.catalog.search(str(best[0].get("name") or ""), limit=5)
+            if hits:
+                shell._surface_vms.setdefault("player", {})["pending_library_card"] = dict(hits[0])
         shell._show("player")
         return "player"
     if name == "review_edited":

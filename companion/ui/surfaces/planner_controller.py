@@ -1,21 +1,15 @@
 """Window-owned planning state; proposal callbacks cannot cross windows or builds."""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from ...domain.ai_requests import CLUB_REQUESTS, load_requests, save_request
 from ...domain.squad_plan import SquadPlan
 
 
-REQUEST_PRESETS = {
-    "Skills and quick step": "Make all players 5 star skill moves and Quick Step+. Arrange jerseys as recommended.",
-    "Improve playstyles": "Improve these players by adding role-appropriate PlayStyles and PlayStyle+ with no ceiling. Keep existing playstyles.",
-    "Shirts only": "Arrange these players by jersey number as recommended. Do not change ratings, age or playstyles.",
-    "Young prospects": "Improve these prospects to an overall range of 75-85 and set age to 19. Improve role-appropriate playstyles.",
-}
+REQUEST_PRESETS = CLUB_REQUESTS
 
 
 @dataclass
@@ -59,22 +53,4 @@ class PlannerController:
                 executor.cancel(key)
 
 
-def load_requests(path: Path) -> dict[str, str]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            return {}
-        return {str(k): str(v) for k, v in raw.items() if isinstance(v, str) and v.strip()}
-    except (OSError, ValueError):
-        return {}
-
-
-def save_request(path: Path, name: str, request: str) -> None:
-    if not name.strip() or not request.strip():
-        raise ValueError("Give the saved request a name and some changes.")
-    saved = load_requests(path)
-    saved[name.strip()] = request.strip()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(saved, indent=2, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
+__all__ = ["PlannerController", "REQUEST_PRESETS", "load_requests", "save_request"]

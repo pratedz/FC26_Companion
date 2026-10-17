@@ -44,6 +44,7 @@ from ..widgets.primitives import (
 )
 from ..widgets.table import Column, DataGrid, TableModel, inclusive_span
 from ._common import set_status
+from ...domain.ai_requests import saved_requests_path
 from .planner_controller import PlannerController, REQUEST_PRESETS, load_requests, save_request
 from .planner_shirts import shirt_conflict_text
 
@@ -316,7 +317,7 @@ def _open_session_planner(
     prompt_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
     if state["prompt"]:
         prompt_entry.insert(0, state["prompt"])
-    saved_path = svc.paths.root / "planner_requests.json"
+    saved_path = saved_requests_path(svc.paths.root)
     requests = {**REQUEST_PRESETS, **load_requests(saved_path)}
     def save_current_request():
         dialog = ctk.CTkInputDialog(text="Name this request so you can reuse it.", title="Save request")

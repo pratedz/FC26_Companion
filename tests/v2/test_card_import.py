@@ -426,19 +426,24 @@ def test_player_surface_contains_embedded_selective_card_workflow():
     assert "CTkScrollableFrame" not in source
     assert "themed_scroll" in source
     assert "changed_fields_by_category" in source
+    # The panel uses the page's height: results and the card preview grow
+    # into it, and Stage is packed to the panel's bottom edge first so it is
+    # never pushed out of a windowed Companion. The diff list paints the
+    # preview's own colour, so a short list cannot show as a slab.
     preview_pack = source.split("themed_scroll(preview_host", 1)[1].split(
         "body = scroll.inner", 1
     )[0]
-    assert "expand=True" not in preview_pack
-    assert 'fill="x"' in preview_pack
+    assert "fill=elevation(2)" in preview_pack
+    assert 'fill="both", expand=True' in preview_pack
     host_pack = source.split("host = panel(root, level=1)", 1)[1].split("heading =", 1)[0]
-    assert 'fill="both"' not in host_pack
-    assert "expand=True" not in host_pack
+    assert 'fill="both", expand=True' in host_pack
+    actions_pack = source.split("actions = ctk.CTkFrame(host", 1)[1].split("stage_button =", 1)[0]
+    assert 'side="bottom"' in actions_pack
+    assert source.index("actions.pack(") < source.index("grid = DataGrid(")
     preview_show = source.split("def show_card_preview()", 1)[1].split(
         "def _prefetch_live_values", 1
     )[0]
-    assert "expand=True" not in preview_show
-    assert 'fill="x"' in preview_show
+    assert 'fill="both", expand=True' in preview_show
     # Card Library is an explicit copy workflow: its five selected details
     # should be complete by default, including face and Force age. Kit stays off.
     for topic in ("name", "age", "face", "force_age"):

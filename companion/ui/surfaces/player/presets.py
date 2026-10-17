@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ....domain.ai_requests import PLAYER_BUILD_IDEAS
 from ....domain.builds import revision
 from ... import theme
 from ...widgets.primitives import button, muted_label, text_label
@@ -17,12 +18,8 @@ except ImportError:  # pragma: no cover
 # AI / Codex accent — shared theme token (Integration Agent).
 CODEX_PURPLE = theme.CODEX
 
-EXAMPLE_PROMPTS: tuple[str, ...] = (
-    "Make him faster but keep him realistic",
-    "Improve passing for a deep-lying playmaker",
-    "Turn him into a box-to-box midfielder",
-    "Boost defending without killing pace",
-)
+# Build ideas now live with the shared AI requests (Player's request list).
+EXAMPLE_PROMPTS: tuple[str, ...] = tuple(PLAYER_BUILD_IDEAS.values())
 
 
 def _grok_readiness_copy(result: Any) -> tuple[str, str]:

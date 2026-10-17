@@ -10,6 +10,7 @@ from ...widgets.ovr import ovr_delta_chips
 from ...widgets.primitives import (
     EM_DASH,
     button,
+    elevation,
     entry,
     muted_label,
     panel,
@@ -18,6 +19,7 @@ from ...widgets.primitives import (
     set_disabled,
     text_label,
     themed_scroll,
+    tooltip,
     ui_font,
 )
 from ...widgets.table import HEADER_HEIGHT, ROW_HEIGHT, Column, DataGrid, TableModel
@@ -37,18 +39,28 @@ def _build_card_picker(
 ) -> None:
     """Embedded Library workflow: search, choose topics, then stage one card."""
     host = panel(root, level=1)
-    host.pack(fill="x", pady=(0, theme.SP2))
+    host.pack(fill="both", expand=True, pady=(0, theme.SP2))
 
     heading = ctk.CTkFrame(host, fg_color="transparent")
-    heading.pack(fill="x", padx=theme.SP4, pady=(theme.SP3, theme.SP2))
+    heading.pack(fill="x", padx=theme.SP4, pady=(theme.SP4, theme.SP2))
     target = svc.store.snapshot().target
     section_title(
         heading, "Card library",
-        detail=f"Copy a card onto {target.name or target.playerid}. Staging opens Review; nothing is applied until you confirm.",
+        detail=f"Copy a card onto {target.name or target.playerid}; nothing is applied until you confirm in Review.",
     ).pack(side="left")
     options = ctk.CTkFrame(host, fg_color="transparent")
-    options.pack(fill="x", padx=theme.SP4, pady=(theme.SP2, 0))
+    options.pack(fill="x", padx=theme.SP4, pady=(theme.SP2, theme.SP2))
     muted_label(options, "Copy", size=theme.T_SMALL).pack(side="left", padx=(0, theme.SP3))
+    # What each topic covers lives on its checkbox; a paragraph under the row
+    # was read once and then only pushed the results down.
+    option_help = {
+        "stats": "Ratings, PlayStyles, body and run style from the card.",
+        "kit": "Boots, socks and jersey fit.",
+        "name": "Name from verified FC 26 base-player data only.",
+        "age": "Birthdate from verified FC 26 base-player data only.",
+        "face": "Face from verified FC 26 base-player data only.",
+        "force_age": "Replace the card birthdate with this age (25 suits legends).",
+    }
     choices = {
         "stats": ctk.BooleanVar(value=True),
         "kit": ctk.BooleanVar(value=False),
@@ -64,47 +76,45 @@ def _build_card_picker(
         ("age", "Age"),
         ("face", "Face"),
     ):
-        ctk.CTkCheckBox(
+        box = ctk.CTkCheckBox(
             options,
             text=label,
             variable=choices[key],
             onvalue=True,
             offvalue=False,
-            width=74,
+            width=1,
             height=24,
             checkbox_width=18,
             checkbox_height=18,
             font=ui_font(theme.T_SMALL),
             command=lambda: render_card_preview(),
-        ).pack(side="left", padx=(0, theme.SP2))
+        )
+        box.pack(side="left", padx=(0, theme.SP4))
+        tooltip(box, option_help[key])
     force_age = entry(options, width=46, height=28, justify="center")
     force_age.insert(0, "25")
-    ctk.CTkCheckBox(
+    force_box = ctk.CTkCheckBox(
         options,
         text="Force age",
         variable=choices["force_age"],
         onvalue=True,
         offvalue=False,
-        width=88,
+        width=1,
         height=24,
         checkbox_width=18,
         checkbox_height=18,
         font=ui_font(theme.T_SMALL),
         command=lambda: render_card_preview(),
-    ).pack(side="left", padx=(theme.SP1, 2))
-    force_age.pack(side="left", padx=(0, theme.SP2))
+    )
+    force_box.pack(side="left", padx=(theme.SP1, 2))
+    tooltip(force_box, option_help["force_age"])
+    force_age.pack(side="left", padx=(theme.SP2, theme.SP2))
     force_age.bind("<KeyRelease>", lambda _event: render_card_preview())
-    muted_label(
-        host,
-        "Card build includes body and run style. Kit is boots, socks and jersey fit. "
-        "Force age replaces the card birthdate (25 suits legends). Name, birthdate and face use verified FC 26 base-player data only.",
-        size=theme.T_CAPTION, wraplength=760, justify="left",
-    ).pack(anchor="w", padx=theme.SP4, pady=(theme.SP1, theme.SP2))
 
     search_row = ctk.CTkFrame(host, fg_color="transparent")
     # Finding a card is the first action. Keep search above import options so
     # it is visible immediately when this mode opens in a windowed Companion.
-    search_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP1), before=options)
+    search_row.pack(fill="x", padx=theme.SP4, pady=(theme.SP1, theme.SP1), before=options)
     query_box = search_box(search_row, placeholder="Search a player or card variant")
     query_box.pack(side="left", fill="x", expand=True)
     query = query_box.entry
@@ -214,8 +224,10 @@ def _build_card_picker(
             if category != "Ratings" or any(field != "overallrating" for field, *_rest in rows)
         ]
         if groups:
-            scroll = themed_scroll(preview_host, fill=theme.CARD, height=160)
-            scroll.pack(fill="x", padx=theme.SP2, pady=(0, theme.SP2))
+            # The diff list takes the panel's spare height. Its canvas is the
+            # preview's own colour, so a short list leaves no visible slab.
+            scroll = themed_scroll(preview_host, fill=elevation(2), height=160)
+            scroll.pack(fill="both", expand=True, padx=theme.SP2, pady=(0, theme.SP2))
             body = scroll.inner
             for category, rows in groups:
                 visible = [
@@ -345,11 +357,12 @@ def _build_card_picker(
             selected_caption.configure(text=f"Could not stage this card: {exc}")
             set_status(svc, str(exc))
 
-    # Stage stays above the preview so a windowed Companion still shows the
-    # continue action. Staging is immediate; Review (with Apply) opens now.
-    # A live read may still fill current stats in the background.
+    # Stage sits under the results, packed to the panel's bottom edge first so
+    # a windowed Companion always keeps it visible however tall the results
+    # get. Staging is immediate; Review (with Apply) opens now. A live read
+    # may still fill current stats in the background.
     actions = ctk.CTkFrame(host, fg_color="transparent")
-    actions.pack(fill="x", padx=theme.SP4, pady=(theme.SP2, theme.SP2))
+    actions.pack(side="bottom", fill="x", padx=theme.SP4, pady=(theme.SP1, theme.SP3))
     stage_button = button(
         actions,
         "Stage card & review now",
@@ -408,7 +421,7 @@ def _build_card_picker(
             preview_host.pack_forget()
         except Exception:
             pass
-        grid.pack(fill="x", padx=theme.SP3, pady=(theme.SP1, theme.SP3))
+        grid.pack(fill="both", expand=True, padx=theme.SP3, pady=(theme.SP1, theme.SP1))
 
     def show_card_preview() -> None:
         try:
@@ -416,7 +429,7 @@ def _build_card_picker(
         except Exception:
             pass
         preview_host.pack(
-            fill="x", padx=theme.SP3, pady=(theme.SP1, theme.SP3),
+            fill="both", expand=True, padx=theme.SP3, pady=(theme.SP1, theme.SP1),
         )
 
     def _prefetch_live_values() -> None:
