@@ -211,7 +211,26 @@ def run(svc: Services) -> Report:
                   "Install the worker to detect it.", "warn")
         )
 
+    checks.append(game_log_check(svc))
+
     return Report(checks=tuple(checks), bridge=liveness_view(lv), native=native)
+
+
+def game_log_check(svc: Services) -> Check:
+    """Info only: worker errors LE wrote to its own log today. Never unhealthy."""
+    try:
+        from . import game_log  # noqa: PLC0415
+
+        summ = game_log.summary(svc)
+    except Exception as e:  # noqa: BLE001 — a diagnostic must never break doctor
+        return Check("Game log", True, f"Game log: unreadable ({e})", "", "info")
+    return Check(
+        "Game log",
+        summ.ok,
+        summ.detail,
+        "" if summ.ok else "Activity > Game log shows the lines (Errors filter).",
+        "info",
+    )
 
 
 def native_section(svc: Services) -> dict[str, Any]:

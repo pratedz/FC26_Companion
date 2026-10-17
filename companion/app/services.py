@@ -12,6 +12,7 @@ from typing import Any
 
 from ..core.clock import Clock
 from ..core.paths import AppPaths
+from .commands.game_log import GameLogMonitor
 from .commands.liveness_hold import LivenessHold
 from .commands.squad_sync_memory import SquadSyncMemory
 from .store import Store
@@ -32,3 +33,5 @@ class Services:
     # Poll memory. Mutable objects inside the frozen bundle; not AppState.
     liveness_hold: LivenessHold = field(default_factory=LivenessHold)
     squad_sync: SquadSyncMemory = field(default_factory=SquadSyncMemory)
+    # Live Editor log tail + ring buffer (Activity > Game log, doctor).
+    game_log: GameLogMonitor = field(default_factory=GameLogMonitor)

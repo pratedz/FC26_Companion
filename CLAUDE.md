@@ -104,6 +104,7 @@ python -m pytest tests/v2 -q                 # ~1,100 tests, headless
 $env:COMPANION_ALLOW_GUI_TESTS=1; python -m pytest tests/v2 -q   # include real-window tests
 python app_entry_v2.py                       # run GUI from source
 python app_entry_v2.py doctor                # any arg -> CLI (companion/cli.py)
+python app_entry_v2.py gamelog --errors       # LE's own log (Logs\live_editor_<date>.log), read-only
 python build_exe_v2.py                       # -> FC26_Companion.exe + _internal_v2/ in repo root
 python tools/sync_futgg_database.py --verify-sync   # FUT.GG catalog gates (see GATES.md)
 ```

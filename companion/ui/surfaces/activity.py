@@ -1,6 +1,8 @@
 """Activity drawer — job history and undo surface.
 
 Refresh rebuilds from the current store. Undo requires typing UNDO.
+The Game log tab (``game_log.py``) tails Live Editor's own log, read-only;
+selecting a History row shows the log lines that name that job.
 """
 
 from __future__ import annotations
@@ -72,6 +74,10 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
     health_page = ctk.CTkFrame(root, fg_color="transparent")
     plans_page = ctk.CTkScrollableFrame(root, fg_color="transparent")
     assets_page = ctk.CTkFrame(root, fg_color="transparent")
+    gamelog_page = ctk.CTkFrame(root, fg_color="transparent")
+    # Packed bottom-first so the history grid fills what is left above it.
+    job_log_host = ctk.CTkFrame(history_page, fg_color="transparent")
+    job_log_host.pack(side="bottom", fill="x")
     inflight_host = ctk.CTkFrame(queue_page, fg_color="transparent")
     history_host = ctk.CTkFrame(history_page, fg_color="transparent")
     action_row = ctk.CTkFrame(root, fg_color="transparent")
@@ -84,8 +90,13 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         "packed_inflight": False,
         "packed_history": False,
         "segment": str(view_model.get("activity_segment") or "queue"),
-        "pages": {"queue": queue_page, "history": history_page, "plans": plans_page, "health": health_page, "assets": assets_page},
+        "pages": {
+            "queue": queue_page, "history": history_page, "plans": plans_page,
+            "health": health_page, "assets": assets_page, "gamelog": gamelog_page,
+        },
         "assets_built": False,
+        "gamelog_built": False,
+        "job_log_host": job_log_host,
         "action_row": action_row,
         "health_host": health_page,
     }
@@ -121,17 +132,28 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
             from .legacy_assets import build as build_assets
             build_assets(assets_page, svc)
             slots["assets_built"] = True
+        elif key == "gamelog":
+            if not slots["gamelog_built"]:
+                from .game_log import build as build_game_log
+                build_game_log(gamelog_page, svc, view_model)
+                slots["gamelog_built"] = True
+            else:
+                getattr(gamelog_page, "refresh_game_log", lambda: None)()
 
     rail = segmented_rail(
         root,
-        (("queue", "Queue"), ("history", "History"), ("plans", "Plans"), ("health", "Health"), ("assets", "Assets")),
+        (
+            ("queue", "Queue"), ("history", "History"), ("plans", "Plans"),
+            ("health", "Health"), ("assets", "Assets"), ("gamelog", "Game log"),
+        ),
         active=str(view_model.get("activity_segment") or "queue"),
         on_select=show_segment,
         compact=True,
     )
     rail.pack(fill="x", pady=(0, theme.SP3))
     action_row.pack(fill="x", pady=(0, theme.SP3))
-    show_segment(str(view_model.get("activity_segment") or "queue"))
+    initial = str(view_model.get("activity_segment") or "queue")
+    show_segment(initial if initial in slots["pages"] else "queue")
     _render_body(svc, view, history_model, slots)
     root.refresh_jobs = refresh_jobs  # type: ignore[attr-defined]
     return root
@@ -283,6 +305,7 @@ def _render_body(
                 history_model,
                 show_checkboxes=False,
                 visible_rows=10,
+                on_selection_change=lambda rows: _show_job_log(svc, slots, rows),
             )
             slots["history_grid"].pack(fill="both", expand=True)
         rows = _history_rows(history)
@@ -298,6 +321,7 @@ def _render_body(
         slots["history_label"] = None
         slots["history_grid"] = None
         _clear_children(history_host)
+        _clear_children(slots.get("job_log_host"))
         states.empty_state(
             history_host,
             headline="No finished jobs yet",
@@ -306,6 +330,24 @@ def _render_body(
             action=lambda: svc.ui.navigate("club"),
             icon="queue",
         ).pack(fill="both", expand=True)
+
+
+def selected_job_id(rows: Any) -> str:
+    """The job id of the first selected History row ("" when none)."""
+    for row in rows or ():
+        key = str((row or {}).get("_key") or "")
+        if key and not key.isdigit():
+            return key
+    return ""
+
+
+def _show_job_log(svc: Any, slots: dict[str, Any], rows: Any) -> None:
+    host = slots.get("job_log_host")
+    if host is None:
+        return
+    from .game_log import render_job_log
+
+    render_job_log(host, svc, selected_job_id(rows))
 
 
 def _job_card(parent: Any, svc: Any, job: dict, *, live: bool) -> None:
