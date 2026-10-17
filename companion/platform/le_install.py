@@ -75,6 +75,7 @@ _REQUIRED_CORE_FILES = (
     "ops/repair_partial_add.lua",
     "ops/legacy_assets.lua",
     "native.lua",
+    "mirror.lua",
 )
 
 #: Files that must never appear as install targets (SI-3).

@@ -29,6 +29,7 @@ class AppPaths(Protocol):
     profiles_file: Path   # profiles.json (authored content, stays a file)
     logs: Path
     assets: Path          # queue/assets/ — isolated per-job game exports/reports
+    mirror: Path          # queue/mirror/ — live squad mirror written by the core
 
     def confine(self, base: Path, name: str) -> Path | None: ...
 
@@ -88,6 +89,8 @@ class RealAppPaths:
         self.profiles_file = self.root / "profiles.json"
         self.logs = self.root / "logs"
         self.assets = self.queue / "assets"
+        # The Lua core cannot mkdir; it writes mirror/squad.json only.
+        self.mirror = self.queue / "mirror"
 
     def ensure_layout(self) -> None:
         """Create the v3 queue subtree. Never touches v1's flat files."""
@@ -101,6 +104,7 @@ class RealAppPaths:
             self.archive,
             self.logs,
             self.assets,
+            self.mirror,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

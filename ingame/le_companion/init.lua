@@ -67,6 +67,8 @@ local events = assert(load_mod("events"), "le_companion.events missing")
 local status = assert(load_mod("status"), "le_companion.status missing")
 local db = assert(load_mod("db"), "le_companion.db missing")
 local ops = assert(load_mod("ops"), "le_companion.ops missing")
+-- Optional, like native: without mirror.lua the core runs as before.
+local mirror = load_mod("mirror")
 local runner = assert(load_mod("runner"), "le_companion.runner missing")
 -- Optional: a missing or broken native.lua must never stop the core.
 local native = load_mod("native")
@@ -88,6 +90,7 @@ LEC.db = db
 LEC.ops = ops
 LEC.runner = runner
 LEC.native = native
+LEC.mirror = mirror
 LEC.dir = DIR
 LEC.load_errors = {}
 
@@ -102,6 +105,7 @@ LEC.config = {
     core_ops = {},
     native = true,              -- load native/lec_native.dll (tick)
     native_tick_writes = true,  -- native tick may run writes on a quiet hub
+    mirror = true,              -- keep <queue>/mirror/squad.json current on a settled hub
 }
 
 local function read_install_config()
@@ -138,7 +142,7 @@ function LEC.configure(opts)
             end
         end
     end
-    for _, key in ipairs({ "native", "native_tick_writes" }) do
+    for _, key in ipairs({ "native", "native_tick_writes", "mirror" }) do
         local v = opts[key]
         if v == nil and installed then v = installed[key] end
         if type(v) == "boolean" then c[key] = v end
@@ -185,6 +189,7 @@ function LEC.core_info()
         last_pump_at = runner.last_pump_at or 0,
         session_id = status.session_id(),
         native = native and { loaded = native.loaded, reason = native.reason } or { loaded = false, reason = "module_missing" },
+        mirror = mirror and mirror.info() or { last = "module_missing" },
     }
 end
 
