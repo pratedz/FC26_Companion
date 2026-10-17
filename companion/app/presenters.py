@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from ..core.transport.native_status import NativeStatus
 from ..core.transport.v3 import Liveness, Pill
 from ..domain.automation_guide import map_job_failure
 from ..domain.outcome import ApplyOutcome, JobResult
@@ -78,6 +79,88 @@ def liveness_view(lv: Liveness) -> dict[str, Any]:
         "core_version": lv.core_version,
         "show_force_drain": lv.pill in (Pill.WAITING, Pill.STALLED),
         "age_text": _age_text(lv.last_drain_age),
+    }
+
+
+# lec_native ``reason`` -> plain words. Unknown reasons fall through to a
+# generic line that still names the code, so a new plugin never renders blank.
+NATIVE_REASON_TEXT: dict[str, str] = {
+    "not_opened": "the native plugin has not started yet",
+    "le_base_not_found": "Live Editor was not found in the game process",
+    "le_build_mismatch_header": "this Live Editor build is not supported (header check failed)",
+    "le_build_mismatch_code": "this Live Editor build is not supported (code check failed)",
+    "waiting_for_career_event": "waiting for the first Career event — open the Career hub",
+    "set_timer_failed": "the native timer could not be started",
+    "ok": "ready",
+    "tick_error_stop": "stopped after a tick error",
+}
+# Reasons that mean something is wrong, not merely "not yet".
+_NATIVE_ATTENTION = frozenset(
+    {"le_base_not_found", "le_build_mismatch_header", "le_build_mismatch_code",
+     "set_timer_failed", "tick_error_stop"}
+)
+
+
+def native_reason_text(reason: str) -> str:
+    return NATIVE_REASON_TEXT.get(reason, f"unrecognised native state ({reason or 'blank'})")
+
+
+def native_view(ns: NativeStatus | None) -> dict[str, Any]:
+    """One honest line about instant mode. Jobs still run on hub events when off."""
+    if ns is None or ns.stale:
+        detail = "not loaded"
+        if ns is not None:
+            detail += (
+                " (status file is from another game session)"
+                if ns.stale_reason == "pid_mismatch"
+                else f" (last update {int(ns.file_age)}s ago)"
+            )
+        return {
+            "state": "not_loaded",
+            "line": "Instant mode: not loaded",
+            "detail": detail,
+            "attention": False,
+            "reason": "" if ns is None else ns.reason,
+            "stale": ns is not None,
+        }
+    if ns.instant:
+        tick = f"native tick {ns.tick_ms} ms" if ns.tick_ms > 0 else "native tick"
+        return {
+            "state": "on",
+            "line": f"Instant mode: on ({tick})",
+            "detail": f"on ({tick})",
+            "attention": False,
+            "reason": ns.reason,
+            "stale": False,
+            "version": ns.version,
+            "tick_ms": ns.tick_ms,
+            "counts": dict(ns.counts),
+        }
+    if ns.disabled:
+        why = "turned off in the worker config"
+        attention = False
+    elif ns.error_stop:
+        why = native_reason_text("tick_error_stop")
+        attention = True
+    elif ns.reason != "ok":
+        why = native_reason_text(ns.reason)
+        attention = ns.reason in _NATIVE_ATTENTION or ns.reason not in NATIVE_REASON_TEXT
+    elif not ns.verified:
+        why = "the Live Editor build is not verified"
+        attention = True
+    else:
+        why = "the native tick is not running"
+        attention = False
+    return {
+        "state": "off",
+        "line": f"Instant mode: off — {why}",
+        "detail": f"off — {why}",
+        "attention": attention,
+        "reason": ns.reason,
+        "stale": False,
+        "version": ns.version,
+        "tick_ms": ns.tick_ms,
+        "counts": dict(ns.counts),
     }
 
 

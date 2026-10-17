@@ -716,6 +716,10 @@ function runner.run_one(job_id, pump_reason)
     end
 
     if result.outcome == "deferred" or result.state == "running" then
+        if result.awaiting ~= json.null and result.awaiting ~= nil then
+            -- Native ticks must not resume this job; only a real hub event may.
+            runner._awaiting_event = true
+        end
         write_progress(job_id, result.progress, result.awaiting ~= json.null)
         status.write_partial(job_id, result)
         emit("job " .. job_id .. " yielded at step "
@@ -920,6 +924,8 @@ function runner.on_career(event_id, phase)
         end
         publish_session(ready)
         if not ready then return "career_required" end
+        runner._last_hub_clock = util.clock()
+        runner._awaiting_event = false
         runner.start_fast_read_timer()
         local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
         return runner.pump("event:" .. events.name(event_id), deadline)
@@ -1046,6 +1052,53 @@ function runner.start_fast_read_timer()
     emit("fast_read timer unavailable — snapshots wait for the career hub")
     advertise_timer(false)
     return false
+end
+
+-- Native plugin tick (lec_native.dll, see native.lua). The DLL calls this on
+-- the Career event thread every ~200 ms. Writes need everything a hub event
+-- needs, plus a quiet hub and no job waiting for a post-transfer event.
+local NATIVE_SETTLE_S = 1.5
+local NATIVE_WRITE_EVERY_S = 1.0
+runner._awaiting_event = false
+runner._last_hub_clock = nil
+runner._native_write_at = nil
+runner._native_live = false
+
+function runner.tick_native_writes()
+    if cfg().native_tick_writes == false then return "off" end
+    if runner._simulating then return "sim_paused" end
+    if not runner._hub_ready then return "hub_required" end
+    if runner._busy or runner._handling_hub then return "busy" end
+    if runner._awaiting_event then return "awaiting_event" end
+    local now = util.clock()
+    if not runner._last_hub_clock or (now - runner._last_hub_clock) < NATIVE_SETTLE_S then
+        return "settling"
+    end
+    if runner._native_write_at and (now - runner._native_write_at) < NATIVE_WRITE_EVERY_S then
+        return "throttled"
+    end
+    runner._native_write_at = now
+    -- pump() always stamps drain.json; stay disk-silent when there is no work.
+    local jobs = util.list_job_ids(qjoin("jobs")) or {}
+    local claimed = util.list_job_ids(qjoin("claimed")) or {}
+    if #jobs == 0 and #claimed == 0 then return "idle" end
+    if not in_career_mode() then return "idle" end
+    local deadline = util.deadline(version.LIMITS.drain_budget_ms or 120)
+    return runner.pump("native_tick", deadline)
+end
+
+function runner.on_native_tick()
+    -- Simulation days and menus: return before any host call or file IO.
+    if runner._simulating or not runner._hub_ready then return "paused" end
+    if not runner._native_live then
+        runner._native_live = true
+        remember_timer({ Enabled = true, native = true })
+        emit("fast_read timer armed (lec_native)")
+        advertise_timer(true)
+    end
+    util.pcall_named("fast_read", runner.tick_fast_read)
+    util.pcall_named("native_writes", runner.tick_native_writes)
+    return "ok"
 end
 
 return runner

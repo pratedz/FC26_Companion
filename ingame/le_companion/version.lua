@@ -30,7 +30,7 @@ WHY THIS MODULE EXISTS
 local version = {}
 
 -- Semantic version of the resident core. Bump on any behaviour change.
-version.VERSION = "2.6.37"
+version.VERSION = "2.6.38"
 
 -- Wire protocol contract number. Job envelopes carry `"schema": 3`; results
 -- carry `"schema": 3`. This is PROTOCOL v3 (docs/V2_ARCHITECTURE.md §3), one
@@ -91,6 +91,7 @@ version.CAPABILITIES = {
     fast_read_timer   = false,  -- set true in session.json only after createTimer enables
     http_push         = false,  -- SendHTTPRequest blocks the game thread; opt-in
     execute_sql       = false,
+    native_tick       = true,   -- 2.6.38: lec_native.dll tick when loaded and verified
 }
 
 --[[ Hard limits. Every one of these is a number that broke something once.

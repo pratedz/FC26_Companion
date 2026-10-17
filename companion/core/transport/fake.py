@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 
 from ...domain.job import Job
 from ...domain.outcome import ApplyOutcome, JobResult
+from .native_status import NativeStatus
 from .v3 import Liveness, Pill
 
 
@@ -30,6 +31,7 @@ class FakeTransport:
             capabilities={"in_career": True, "save_ready": True, "hub_ready": True},
         )
         self.on_submit: Callable[[Job], None] | None = None
+        self._native: NativeStatus | None = None
 
     # ---- BridgeTransport surface --------------------------------------
 
@@ -75,6 +77,9 @@ class FakeTransport:
     def liveness(self) -> Liveness:
         return self._liveness
 
+    def native_status(self, sess: Mapping[str, Any] | None = None) -> NativeStatus | None:
+        return self._native
+
     def sweep_crashed(self) -> list[str]:
         return []
 
@@ -85,6 +90,9 @@ class FakeTransport:
 
     def set_liveness(self, liveness: Liveness) -> None:
         self._liveness = liveness
+
+    def set_native_status(self, status: NativeStatus | None) -> None:
+        self._native = status
 
     def complete(self, job_id: str, result: JobResult | Mapping[str, Any]) -> None:
         """Deliver a result, as the Lua core would. Accepts wire dicts."""

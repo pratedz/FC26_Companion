@@ -73,13 +73,28 @@ keeps every job-derived path inside `queue/` (SI-7).
   show a reviewed diff before any queue write. No animation loops in the UI
   (they froze v1).
 
+## Native plugin (lec_native.dll, core 2.6.38+)
+
+LE has no native plugin API (`GetPlugin` only looks up game objects), but its
+embedded Lua keeps `package.loadlib`. `ingame/le_companion/native.lua` loads
+`native/lec_native.dll` (source: `native/lec_native/`, build: `python build.py`
+with Zig). The DLL adds a ~200 ms tick on the Career-event thread that calls
+`runner.on_native_tick()`: reads on a settled hub, writes only after 1.5 s of
+hub quiet with no job awaiting a post-transfer event. It calls LE's own
+`lua_gettop/settop/load/pcallk` by RVA **only after matching LE v26.3.6's code
+bytes** (`le_sig.h`); any other LE build leaves it idle. Status:
+`<queue>/native_status.json` -> app "Instant mode" (doctor/Health/status).
+Kill switches: `native/DISABLE`, `<queue>/native_disable`,
+`config.json "native": false` / `"native_tick_writes": false`.
+A new LE version needs the RVAs re-located (see `native/lec_native/README.md`).
+
 ## Versions — keep in sync
 
 - `companion/__init__.py`: `__version__` (app), `PROTOCOL_V = 3`,
   `CORE_VERSION`, `SIGN_CORE_MIN`.
 - `ingame/le_companion/version.lua`: `version.VERSION` must equal
   `CORE_VERSION` (enforced by `tests/v2/test_automation_workspace.py`).
-  Both are `2.6.37` (calendar-freeze fix). Bump both on any core change.
+  Both are `2.6.38` (2.6.37 calendar-freeze fix + 2.6.38 native tick). Bump both on any core change.
 - Deployed `README.txt` carries per-release notes (written by the deploy step).
 
 ## Commands
@@ -93,7 +108,7 @@ python build_exe_v2.py                       # -> FC26_Companion.exe + _internal
 python tools/sync_futgg_database.py --verify-sync   # FUT.GG catalog gates (see GATES.md)
 ```
 
-Known failing tests (31 as of 2026-10-16, all pre-existing):
+Known failing tests (31 as of 2026-10-17, all pre-existing):
 `test_runner_event_drain_contract.py` (still asserts pre-2.6.36 event rules),
 `test_legacy_assets.py`, `test_review_reports.py` (needs the gitignored
 `review/` folder), `test_card_collections.py` / `test_add_player_surface.py` /

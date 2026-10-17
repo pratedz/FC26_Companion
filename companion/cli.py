@@ -49,6 +49,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         "claimed": len(svc.transport.claimed_ids()),
     }
     view["queue_dir"] = str(svc.paths.queue)
+    from .app.commands.doctor import native_section
+
+    view["native"] = native_section(svc)
     _print(view)
     return 0 if lv.armed else 1
 

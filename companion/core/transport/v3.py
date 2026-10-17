@@ -27,6 +27,7 @@ from .jobfile import (
     read_worker_json,
     rewrite_job_index,
 )
+from .native_status import NATIVE_STATUS_FILE, NativeStatus, read_native_status
 
 
 class Pill(Enum):
@@ -52,6 +53,7 @@ class Liveness:
     queue_depth: int = 0
     last_drain_age: float | None = None  # seconds; None = never drained
     capabilities: Mapping[str, Any] = field(default_factory=dict)
+    native_instant: bool = False  # lec_native tick is live (diagnostic only)
 
 
 class PidProbe(Protocol):
@@ -373,6 +375,20 @@ class FileTransport:
     def drain(self) -> dict[str, Any] | None:
         return read_json(self._paths.drain_file)
 
+    def native_status(self, sess: Mapping[str, Any] | None = None) -> NativeStatus | None:
+        """The lec_native heartbeat, staleness-checked against session.json's pid."""
+        if sess is None:
+            sess = self.session()
+        try:
+            pid = int((sess or {}).get("le_pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        return read_native_status(
+            self._paths.queue / NATIVE_STATUS_FILE,
+            now_ts=self._clock.now_ts(),
+            session_pid=pid or None,
+        )
+
     def liveness(self) -> Liveness:
         sess = self.session()
         if sess is None:
@@ -442,6 +458,9 @@ class FileTransport:
             last_drain_age=age,
             capabilities=dict(sess.get("capabilities") or {}),
         )
+        native = self.native_status(sess)
+        native_instant = native is not None and native.instant
+        common["native_instant"] = native_instant
         from ... import CORE_VERSION
 
         compatibility_note = ""
@@ -459,7 +478,11 @@ class FileTransport:
             return Liveness(
                 pill=Pill.ARMED,
                 message=(
-                    "Ready. Existing features work on the next Career Mode tick."
+                    (
+                        "Ready. Jobs run instantly on a settled Career hub."
+                        if native_instant
+                        else "Ready. Existing features work on the next Career Mode tick."
+                    )
                     + compatibility_note
                 ),
                 **common,

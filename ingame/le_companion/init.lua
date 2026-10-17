@@ -18,7 +18,9 @@ pcall(function() require("imports/other/helpers") end)
 -- Ensure sibling modules resolve both as le_companion.X and bare X.
 local function self_dir()
     if type(debug) ~= "table" or type(debug.getinfo) ~= "function" then return nil end
-    local ok, info = pcall(debug.getinfo, 1, "S")
+    -- Not pcall(debug.getinfo, 1, ...): there level 1 is pcall itself ("=[C]")
+    -- and DIR was always nil, so config.json and the native DLL were never found.
+    local ok, info = pcall(function() return debug.getinfo(1, "S") end)
     if not ok or type(info) ~= "table" then return nil end
     local src = tostring(info.source or "")
     if src:sub(1, 1) == "@" then src = src:sub(2) end
@@ -66,6 +68,8 @@ local status = assert(load_mod("status"), "le_companion.status missing")
 local db = assert(load_mod("db"), "le_companion.db missing")
 local ops = assert(load_mod("ops"), "le_companion.ops missing")
 local runner = assert(load_mod("runner"), "le_companion.runner missing")
+-- Optional: a missing or broken native.lua must never stop the core.
+local native = load_mod("native")
 
 util.set_error_sink(function(msg) log.write(msg) end)
 
@@ -83,6 +87,7 @@ LEC.status = status
 LEC.db = db
 LEC.ops = ops
 LEC.runner = runner
+LEC.native = native
 LEC.dir = DIR
 LEC.load_errors = {}
 
@@ -95,6 +100,8 @@ LEC.config = {
     drain_max_jobs = version.LIMITS.drain_max_jobs,
     max_playerid = version.LIMITS.max_playerid,
     core_ops = {},
+    native = true,              -- load native/lec_native.dll (tick)
+    native_tick_writes = true,  -- native tick may run writes on a quiet hub
 }
 
 local function read_install_config()
@@ -130,6 +137,11 @@ function LEC.configure(opts)
                 c.core_ops[configured_ops[i]] = true
             end
         end
+    end
+    for _, key in ipairs({ "native", "native_tick_writes" }) do
+        local v = opts[key]
+        if v == nil and installed then v = installed[key] end
+        if type(v) == "boolean" then c[key] = v end
     end
     c.allowed_write_roots = {}
     if type(opts.allowed_write_roots) == "table" then
@@ -172,6 +184,7 @@ function LEC.core_info()
         armed_at = LEC.__armed_at or 0,
         last_pump_at = runner.last_pump_at or 0,
         session_id = status.session_id(),
+        native = native and { loaded = native.loaded, reason = native.reason } or { loaded = false, reason = "module_missing" },
     }
 end
 
@@ -212,12 +225,23 @@ function LEC.arm()
         elseif type(a) == "number" then
             id = a
         end
+        -- First, before any early return: the native plugin pins its tick to
+        -- the thread and lua_State that deliver Career events.
+        if native then native.mark_career() end
         if not id then return end
         runner.on_career(id, phase)
       end
     end
     pcall(add, "pre__CareerModeEvent", career_handler("pre"))
     pcall(add, "post__CareerModeEvent", career_handler("post"))
+
+    -- Native plugin: binds entry points only. Its timer is armed by the
+    -- first Career event, never during LE init (SI-6).
+    if native then
+        local ok, loaded = pcall(native.load, DIR, LEC.config, runner)
+        if not ok then native.reason = "load_threw:" .. tostring(loaded) end
+        log.write("native: " .. tostring(native.reason))
+    end
 
     -- Write session immediately so Python sees ARMED without waiting for LEInitDone.
     if LEC.config.queue_dir then

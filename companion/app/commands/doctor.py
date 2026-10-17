@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..presenters import liveness_view
+from ..presenters import liveness_view, native_view
 from ..services import Services
 
 
@@ -27,6 +27,7 @@ class Check:
 class Report:
     checks: tuple[Check, ...] = ()
     bridge: dict[str, Any] = field(default_factory=dict)
+    native: dict[str, Any] = field(default_factory=dict)
 
     @property
     def healthy(self) -> bool:
@@ -36,6 +37,7 @@ class Report:
         return {
             "healthy": self.healthy,
             "bridge": self.bridge,
+            "native": self.native,
             "checks": [
                 {
                     "name": c.name,
@@ -165,6 +167,17 @@ def run(svc: Services) -> Report:
         )
     )
 
+    native = native_section(svc)
+    checks.append(
+        Check(
+            "Instant mode",
+            not native["attention"],
+            native["detail"],
+            "Jobs still run on Career hub events." if native["attention"] else "",
+            "info",
+        )
+    )
+
     pending = len(svc.transport.pending_ids())
     claimed = len(svc.transport.claimed_ids())
     checks.append(
@@ -198,7 +211,17 @@ def run(svc: Services) -> Report:
                   "Install the worker to detect it.", "warn")
         )
 
-    return Report(checks=tuple(checks), bridge=liveness_view(lv))
+    return Report(checks=tuple(checks), bridge=liveness_view(lv), native=native)
+
+
+def native_section(svc: Services) -> dict[str, Any]:
+    """lec_native instant-mode view; "not loaded" when the transport has none."""
+    reader = getattr(svc.transport, "native_status", None)
+    try:
+        status = reader() if callable(reader) else None
+    except Exception:  # noqa: BLE001 — a diagnostic must never break doctor
+        status = None
+    return native_view(status)
 
 
 def _check_queue_is_local(queue: Any) -> Check:

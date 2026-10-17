@@ -63,6 +63,8 @@ dist_*/
 *.exe
 *.exe.*
 *.dll
+# The in-game native plugin ships with the Lua core.
+!ingame/le_companion/native/lec_native.dll
 *.pyd
 
 # Historical app snapshots and agent worktrees
@@ -78,3 +80,6 @@ Thumbs.db
 .DS_Store
 .idea/
 .vscode/
+
+# Native plugin build output
+native/lec_native/out/
