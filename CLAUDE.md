@@ -46,8 +46,9 @@ keeps every job-derived path inside `queue/` (SI-7).
   Lua `state/ok/counts/failures` onto `domain/outcome.py ApplyOutcome`.
 - Ops: `diag.ping`, `set_fields`, `export_squad`, `snapshot`, `db.dump`,
   `transfer`, `budget`, `bulk_edit`, `career.set`, `growth_sync`,
-  `create_player`, `add_to_team` (v4), `repair_partial_add`, `injury.scan`,
-  `injury.cure`, `assets.legacy`.
+  `create_player`, `add_to_team` (v4), `repair_partial_add`,
+  `restore_partial_add`, `names.sync`, `injury.scan`, `injury.cure`,
+  `assets.legacy`.
 
 ## Safety invariants — do not break
 
@@ -145,8 +146,17 @@ write to FC.
   `C:\FC 26 Live Editor\lua\autorun_disabled\` on 2026-10-16 because it wrote
   heartbeat files on day-passing Career events. Nothing in `companion/`
   depends on it. Move it back to `lua\autorun\` only if v1 is needed.
-- An `add_to_team` that hits `squad_full` can end **partial**: the free-agent
-  dummy already has the card's stats (81 fields) but was never transferred.
+- `add_to_team` counts squad + loaned-out players against
+  `LIMITS.max_squad_with_loans` (52) in step 1 and refuses `squad_full` with
+  zero writes. Older cores could end **partial** (dummy has the card's stats,
+  never transferred). A `squad_full` result never queues anything by itself:
+  Sign shows the counts plus explicit Retry / Restore free agent
+  (`app/commands/sign_recovery.py`); Restore needs the pre-write values that
+  only the new core records (`progress.members[i].original_values`).
+- Club "Check names" / `app_entry_v2.py names-check [--apply]` diff the
+  exported in-game names (`SquadState.game_names`) with signing receipts and
+  queue one `names.sync` job (`ops/names_sync.lua`, helpers exported from
+  `ops/add_to_team.lua` as `M.helpers`).
 - `integrations/grok.py` is the Codex/OpenAI transport despite its name.
 - `card_db/teams.sqlite` exists only in the deployed folder; `profiles.json`,
   `assets/` and most of `card_db/` are gitignored but needed to build.

@@ -758,6 +758,11 @@ def _build_squad(
                            kind="ghost", height=theme.BTN_MD)
     recent_button.pack(side="left", padx=(theme.SP2, 0))
     tooltip(recent_button, "Show only players you signed recently.")
+    names_button = button(search_row, "Check names", lambda: _check_signed_names(svc, root),
+                          kind="ghost", height=theme.BTN_MD)
+    names_button.pack(side="left", padx=(theme.SP2, 0))
+    tooltip(names_button, "Compare signed players' in-game names with the names you signed them "
+                          "with, review the differences, then fix them in one job.")
 
     count_row = ctk.CTkFrame(table_card, fg_color="transparent")
     count_row.pack(fill="x", padx=theme.SP4, pady=(0, theme.SP2))
@@ -869,6 +874,52 @@ def _ask_squad_grok(
         except Exception:
             pass
         set_status(svc, f"Squad session unavailable: {exc}")
+
+
+def _confirm_names_fix(parent: Any, lines: Sequence[str], count: int) -> bool:
+    message = (
+        f"{count} signed player{'s' if count != 1 else ''} show a different name in FC:\n\n"
+        + "\n".join(lines)
+        + "\n\nFix them? Live Editor rewrites only these players' name rows, skips any "
+        "that already match, and reports each one."
+    )
+    try:
+        from tkinter import messagebox
+
+        host = parent.winfo_toplevel() if parent is not None else None
+        return bool(messagebox.askokcancel("Fix signed names", message, parent=host))
+    except Exception:
+        return False
+
+
+def _check_signed_names(svc: Any, parent: Any = None, *, confirm: Any = None) -> str:
+    """Club "Check names": diff (read-only), review, then ONE names.sync job."""
+    from ...app.commands.names_check import (
+        check_signed_names, queue_names_sync, review_lines,
+    )
+    try:
+        check = check_signed_names(svc)
+    except Exception as exc:  # noqa: BLE001
+        set_status(svc, str(exc))
+        return ""
+    if not check.mismatches:
+        if check.checked:
+            set_status(svc, f"All {check.checked} signed player(s) show their signed names in FC.")
+        else:
+            set_status(svc, "No verified signed players from this save are in the current squad.")
+        return ""
+    ask = confirm or (lambda lines, count: _confirm_names_fix(parent, lines, count))
+    if not ask(review_lines(check), len(check.mismatches)):
+        set_status(svc, "Name fix cancelled. Nothing was queued.")
+        return ""
+    try:
+        job_id = queue_names_sync(svc, check)
+    except Exception as exc:  # noqa: BLE001
+        set_status(svc, str(exc))
+        return ""
+    set_status(svc, f"Queued a name fix for {len(check.mismatches)} player(s). "
+                    "Refresh squad after Live Editor reports the result.")
+    return job_id
 
 
 def _confirm_release(parent: Any, names: Sequence[str]) -> bool:

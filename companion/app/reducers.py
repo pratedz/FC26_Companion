@@ -280,7 +280,7 @@ def reduce(state: AppState, event: E.Event) -> AppState:  # noqa: C901 — a fla
         # ---- squad -----------------------------------------------------
         case E.SquadSynced(
             save_uid=uid, session_id=sid, teamid=tid, players=ps, taken=t,
-            free_agents=fa
+            free_agents=fa, game_names=gn
         ):
             return state.with_(
                 squad=SquadState(
@@ -291,6 +291,7 @@ def reduce(state: AppState, event: E.Event) -> AppState:  # noqa: C901 — a fla
                     free_agents=tuple(fa),
                     taken=t,
                     stale=False,
+                    game_names=tuple(gn),
                 )
             )
 

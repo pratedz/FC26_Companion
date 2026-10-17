@@ -240,7 +240,8 @@ local function validate_job(job)
     for i = 1, #job.ops do
         local op = job.ops[i]
         if type(op) ~= "table" then return false, "bad_op", "op is not an object" end
-        if (op.op == "add_to_team" or op.op == "repair_partial_add") and #job.ops ~= 1 then
+        if (op.op == "add_to_team" or op.op == "repair_partial_add"
+            or op.op == "restore_partial_add" or op.op == "names.sync") and #job.ops ~= 1 then
             return false, "experimental_shape",
                 tostring(op.op) .. " must be the only operation in its guarded job"
         end

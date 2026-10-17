@@ -557,13 +557,9 @@ def collect_finished(svc: Services) -> list[JobResult]:
             ingest_result(svc, res)
             out.append(res)
     reconcile_signing_results(svc)
-    try:
-        from .team import queue_squad_full_relink
-
-        queue_squad_full_relink(svc)
-    except Exception:
-        if svc.log is not None:
-            svc.log.exception("could not queue squad-full relink")
+    # A squad_full Sign result never queues another job by itself: the old
+    # automatic "relink" chained a new refused Sign job after every refusal.
+    # Sign shows the counts and an explicit Retry (commands/sign_recovery.py).
     reconciled = reconcile_missing_queue_entries(svc)
     if reconciled:
         svc.store.dispatch(

@@ -70,6 +70,8 @@ KNOWN_OPS: frozenset[str] = frozenset(
         "create_player",
         "add_to_team",
         "repair_partial_add",
+        "restore_partial_add",
+        "names.sync",
         "transfer",
         "budget",
         "bulk_edit",
@@ -93,7 +95,15 @@ OP_GRANTS: Mapping[str, str] = {
     # behind the same explicit grant; it must never become a general-purpose
     # player editor that can be queued by accident.
     "repair_partial_add": "allow_add_to_team",
+    # Undo of a signing that wrote a free agent but never transferred him, and
+    # the signed-player name fix. Both are Add Player follow-ups: same grant,
+    # same worker toggle, single-op jobs bound to one Career save.
+    "restore_partial_add": "allow_add_to_team",
+    "names.sync": "allow_add_to_team",
 }
+
+# Guarded follow-up ops: exactly one op per job and an exact save_uid.
+_SAVE_BOUND_SINGLE_OPS = frozenset({"repair_partial_add", "restore_partial_add", "names.sync"})
 
 
 class JobValidationError(ValueError):
@@ -260,14 +270,14 @@ class Job:
                     "Add Player only supports a live-verified free-agent dummy; "
                     "creating Career players is disabled."
                 )
-            if op.op == "repair_partial_add":
+            if op.op in _SAVE_BOUND_SINGLE_OPS:
                 if len(self.ops) != 1:
                     raise JobValidationError(
-                        "repair_partial_add must be the only operation in its job"
+                        f"{op.op} must be the only operation in its job"
                     )
                 if not str(self.requires.get("save_uid") or ""):
                     raise JobValidationError(
-                        "repair_partial_add requires the exact Career save_uid"
+                        f"{op.op} requires the exact Career save_uid"
                     )
 
     # ---- wire ---------------------------------------------------------
@@ -620,6 +630,120 @@ def op_repair_partial_add(
         op_id,
         body,
         v=2,
+    )
+
+
+_NAME_KEYS = ("firstname", "surname", "commonname", "playerjerseyname")
+_DICT_ID_KEYS = ("firstnameid", "lastnameid", "commonnameid", "playerjerseynameid")
+NAMES_SYNC_MAX_PLAYERS = 60
+RESTORE_MAX_MEMBERS = 6
+
+
+def op_names_sync(
+    op_id: str,
+    *,
+    teamid: int,
+    players: Sequence[Mapping[str, Any]],
+) -> Op:
+    """Re-apply the signed name of each listed player on the user's club.
+
+    Each entry: ``playerid``, ``names`` (first/sur/common/jersey),
+    ``name_strategy`` ("custom" or "native_ids"), ``native_name_ids`` for
+    native, ``detach_name_dictionary`` for custom. The worker re-checks club
+    membership, skips players FC already shows correctly, and reads every
+    written identity back (ingame/le_companion/ops/names_sync.lua).
+    """
+    tid = int(teamid)
+    if tid <= 0:
+        raise JobValidationError("names.sync needs the user's club id")
+    if not players or len(players) > NAMES_SYNC_MAX_PLAYERS:
+        raise JobValidationError(
+            f"names.sync needs 1-{NAMES_SYNC_MAX_PLAYERS} players"
+        )
+    out: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for raw in players:
+        pid = int(raw.get("playerid") or 0)
+        if pid <= 0 or pid > PLAYERID_HARD_MAX or pid in seen:
+            raise JobValidationError(f"names.sync has an invalid or repeated playerid {pid}")
+        seen.add(pid)
+        raw_names = raw.get("names") if isinstance(raw.get("names"), Mapping) else {}
+        names = {key: str(raw_names.get(key) or "").strip() for key in _NAME_KEYS}
+        names = {key: value for key, value in names.items() if value}
+        if not (names.get("commonname") or names.get("surname") or names.get("firstname")):
+            raise JobValidationError(f"names.sync player {pid} has no name")
+        strategy = str(raw.get("name_strategy") or "custom")
+        entry: dict[str, Any] = {"playerid": pid, "names": names, "name_strategy": strategy}
+        if strategy == "native_ids":
+            ids = raw.get("native_name_ids")
+            if not isinstance(ids, Mapping):
+                raise JobValidationError(f"names.sync player {pid} needs native_name_ids")
+            clean: dict[str, int] = {}
+            for key in _DICT_ID_KEYS:
+                try:
+                    value = int(ids[key])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise JobValidationError(
+                        f"names.sync player {pid} native {key} is missing"
+                    ) from exc
+                if value < 0:
+                    raise JobValidationError(f"names.sync player {pid} native {key} is negative")
+                clean[key] = value
+            if not any(clean.values()):
+                raise JobValidationError(f"names.sync player {pid} has no real FC name id")
+            entry["native_name_ids"] = clean
+        elif strategy == "custom":
+            entry["detach_name_dictionary"] = raw.get("detach_name_dictionary") is not False
+        else:
+            raise JobValidationError("names.sync name_strategy must be custom or native_ids")
+        out.append(entry)
+    return Op("names.sync", op_id, {"teamid": tid, "players": out})
+
+
+def op_restore_partial_add(
+    op_id: str,
+    *,
+    source_job_id: str,
+    members: Sequence[Mapping[str, Any]],
+) -> Op:
+    """Put a partially-signed free agent's pre-signing values back.
+
+    ``members``: ``playerid``, ``expected`` (what the failed signing wrote) and
+    ``restore`` (the captured originals) over exactly the same field set. The
+    worker refuses with zero writes unless every dummy is still a free agent
+    holding exactly ``expected`` (ingame/le_companion/ops/restore_partial_add.lua).
+    """
+    if not str(source_job_id or "").strip():
+        raise JobValidationError("restore_partial_add needs the failed signing job id")
+    if not members or len(members) > RESTORE_MAX_MEMBERS:
+        raise JobValidationError(
+            f"restore_partial_add needs 1-{RESTORE_MAX_MEMBERS} free agents"
+        )
+    out: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for raw in members:
+        pid = int(raw.get("playerid") or 0)
+        if pid <= 0 or pid > 459999 or pid in seen:
+            raise JobValidationError(f"restore_partial_add has an invalid or repeated dummy {pid}")
+        seen.add(pid)
+        expected = dict(raw.get("expected") or {})
+        restore = dict(raw.get("restore") or {})
+        expected.pop("playerid", None)
+        restore.pop("playerid", None)
+        if not expected or set(expected) != set(restore):
+            raise JobValidationError(
+                f"restore_partial_add dummy {pid} needs the same written and original fields"
+            )
+        for value in (*expected.values(), *restore.values()):
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise JobValidationError(
+                    f"restore_partial_add dummy {pid} has a non-scalar value"
+                )
+        out.append({"playerid": pid, "expected": expected, "restore": restore})
+    return Op(
+        "restore_partial_add",
+        op_id,
+        {"source_job_id": str(source_job_id), "members": out},
     )
 
 

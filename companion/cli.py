@@ -450,6 +450,45 @@ def cmd_budget(args: argparse.Namespace) -> int:
     return 0 if result.outcome.is_success else 2
 
 
+def cmd_names_check(args: argparse.Namespace) -> int:
+    """Read the live squad, diff signed names; --apply queues one names.sync."""
+    from .app.commands.apply import refresh_liveness
+    from .app.commands.names_check import (
+        build_names_sync_job, check_report, check_signed_names,
+    )
+    from .app.commands.squad import build_sync_job, ingest_result
+    from .domain.job import JobValidationError
+
+    svc = build_services(args.root, inline=True)
+    refresh_liveness(svc)
+    _job_id, result = _submit_and_maybe_wait(
+        svc, build_sync_job(origin="cli.names_check"), timeout=args.timeout, no_wait=False
+    )
+    if result is None or not result.outcome.is_success:
+        _print({"error": "could not read the live squad",
+                "result": job_report(result) if result is not None else None})
+        return 2
+    ingest_result(svc, result)
+    try:
+        check = check_signed_names(svc)
+    except JobValidationError as exc:
+        _print({"error": str(exc)})
+        return 2
+    report = check_report(check)
+    if not args.apply or not check.mismatches:
+        _print(report)
+        return 0 if not check.mismatches else 1
+    try:
+        job = build_names_sync_job(svc, check)
+    except JobValidationError as exc:
+        _print({**report, "error": str(exc)})
+        return 2
+    job_id, fixed = _submit_and_maybe_wait(svc, job, timeout=args.timeout, no_wait=args.no_wait)
+    report["names_sync"] = job_report(fixed) if fixed is not None else {"job_id": job_id, "state": "queued"}
+    _print(report)
+    return 0 if fixed is None or fixed.outcome.is_success else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="companion",
@@ -494,6 +533,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("file", type=Path)
     sp.add_argument("--timeout", type=float, default=45.0)
     sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--no-wait", action="store_true")
+
+    sp = add("names-check", cmd_names_check,
+             "compare signed players' in-game names with their signed names")
+    sp.add_argument("--apply", action="store_true",
+                    help="queue one names.sync job for the mismatches")
+    sp.add_argument("--timeout", type=float, default=60.0)
     sp.add_argument("--no-wait", action="store_true")
 
     sp = add("result", cmd_result, "print the result for a job id")

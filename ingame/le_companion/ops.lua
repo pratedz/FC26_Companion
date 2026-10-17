@@ -1588,6 +1588,39 @@ ops.handlers["repair_partial_add"] = function(op, job, ctx)
     return module.run(op, job, ctx)
 end
 
+-- Undo a signing that wrote a free agent's stats but never transferred him.
+-- Same opt-in switch and grant as Add Player; the module refuses unless the
+-- dummy is still a free agent holding exactly the values that signing wrote.
+ops.handlers["restore_partial_add"] = function(op, job, ctx)
+    local enabled = ctx and ctx.cfg and ctx.cfg.core_ops
+        and ctx.cfg.core_ops.add_to_team == true
+    if not enabled then
+        return fail_result("experimental_disabled",
+            "restore_partial_add requires the Add Player worker toggle")
+    end
+    local ok, module = pcall(require, "ops.restore_partial_add")
+    if not ok or type(module) ~= "table" or type(module.run) ~= "function" then
+        return fail_result("module_load_failed", tostring(module))
+    end
+    return module.run(op, job, ctx)
+end
+
+-- Check & fix the in-game names of verified signings (custom editedplayernames
+-- rows or native dictionary ids), reusing add_to_team's durable-name helpers.
+ops.handlers["names.sync"] = function(op, job, ctx)
+    local enabled = ctx and ctx.cfg and ctx.cfg.core_ops
+        and ctx.cfg.core_ops.add_to_team == true
+    if not enabled then
+        return fail_result("experimental_disabled",
+            "names.sync requires the Add Player worker toggle")
+    end
+    local ok, module = pcall(require, "ops.names_sync")
+    if not ok or type(module) ~= "table" or type(module.step) ~= "function" then
+        return fail_result("module_load_failed", tostring(module))
+    end
+    return module.step(op, job, ctx)
+end
+
 ops.handlers["injury.scan"] = function(op, job, ctx)
     local ok, module = pcall(require, "ops.injury")
     if not ok or type(module) ~= "table" or type(module.scan) ~= "function" then

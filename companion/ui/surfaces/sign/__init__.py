@@ -20,7 +20,10 @@ except ImportError:
 from .assistant import CodexLibraryDraft, SquadAssistantPanel, grok_library_worker
 from .basket import SignListPanel, bag_summary_copy
 from .details import PlayerDetailsPanel
-from .handoff import latest_signing_handoff, open_signed_club, plan_signed_players
+from .handoff import (
+    latest_signing_handoff, open_signed_club, plan_signed_players,
+    restore_refused_signing, retry_refused_signing, signing_recovery,
+)
 from .discovery import DiscoveryPanel
 from .readiness import (
     _active_add_count, _copy_sign_lua_drain, _readiness, _recent_signings,
@@ -77,6 +80,11 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
                              kind="accent", height=theme.BTN_SM)
     club_signed_btn = button(progress_inner, "Recently added in Club", lambda: None,
                              kind="ghost", height=theme.BTN_SM)
+    # Squad-full refusals: nothing is re-queued automatically; these are the
+    # user's explicit choices once a place is free (or to undo a partial).
+    retry_btn = button(progress_inner, "Retry", lambda: None, kind="accent", height=theme.BTN_SM)
+    restore_btn = button(progress_inner, "Restore free agent", lambda: None,
+                         kind="ghost", height=theme.BTN_SM)
     workspace = ctk.CTkFrame(root, fg_color="transparent", height=1, width=1)
     workspace.pack(fill="both", expand=True)
     workspace.grid_rowconfigure(0, weight=1)
@@ -184,7 +192,9 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         if details is not None:
             details.show(search.selected)
         search.grid.refresh()
-        signature = (message, is_busy, tuple(row.get("playerid") or row.get("id") for row in signed_rows))
+        recovery = signing_recovery(batch) if handoff_message and not signed_rows and not is_busy else None
+        signature = (message, is_busy, tuple(row.get("playerid") or row.get("id") for row in signed_rows),
+                     recovery)
         if refs.get("progress") == signature:
             return
         refs["progress"] = signature
@@ -193,6 +203,22 @@ def build(parent: Any, svc: Any, vm: Any = None) -> Any:
         club_signed_btn.pack_forget()
         activity_btn.pack_forget()
         drain_btn.pack_forget()
+        retry_btn.pack_forget()
+        restore_btn.pack_forget()
+        if recovery is not None:
+            def _retry(job_id: str = recovery.job_id) -> None:
+                if retry_refused_signing(svc, job_id):
+                    refresh_signing_progress()
+
+            def _restore(job_id: str = recovery.job_id) -> None:
+                if restore_refused_signing(svc, job_id, root):
+                    refresh_signing_progress()
+
+            retry_btn.configure(command=_retry)
+            restore_btn.configure(command=_restore)
+            if recovery.can_restore:
+                restore_btn.pack(side="right", padx=(theme.SP2, 0))
+            retry_btn.pack(side="right", padx=(theme.SP2, 0))
         if signed_rows and batch is not None:
             plan_signed_btn.configure(text=f"Plan these {len(signed_rows)} signed players",
                                       command=lambda selected=batch: plan_signed_players(svc, selected))

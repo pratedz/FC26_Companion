@@ -1,6 +1,7 @@
 """Verified signing receipts resolved against the refreshed Career roster."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -133,26 +134,37 @@ def recently_added_ids(svc: Any) -> tuple[int, ...]:
 
 
 def _squad_refusal_message(results: list[Any]) -> str:
-    """Explain a finished sign that never joined the club."""
+    """Explain a finished sign that never joined the club (counts + Retry)."""
+    from ....app.commands.sign_recovery import squad_full_message
+
     for result in results:
-        if result is None:
-            continue
-        for failure in getattr(result, "failures", ()):
-            reason = str(getattr(failure, "reason", "") or "")
-            detail = str(getattr(failure, "detail", "") or "")
-            if reason == "squad_full":
-                text = detail or "FC refused the transfer because the squad is full."
-                return (
-                    f"{text} Restart FC with Live Editor and Companion will place "
-                    "these players on the squad."
-                )
-            if reason == "team_not_applied" and "111592" in detail:
-                return (
-                    "FC refused the transfer because the squad is full, so these players "
-                    "stayed free agents. Restart FC with Live Editor and Companion will "
-                    "place them on the squad."
-                )
+        message = squad_full_message(result)
+        if message:
+            return message
     return ""
+
+
+@dataclass(frozen=True, slots=True)
+class SigningRecovery:
+    """Explicit actions for a signing FC refused (nothing is queued by itself)."""
+
+    job_id: str
+    message: str
+    can_restore: bool
+
+
+def signing_recovery(batch: SigningBatch | None) -> SigningRecovery | None:
+    """Retry/Restore for the newest refused job of ``batch``; None otherwise."""
+    if batch is None:
+        return None
+    from ....app.commands.sign_recovery import recovery_for_results
+
+    job_id, message, restorable = recovery_for_results(
+        [(jid, batch.results.get(jid)) for jid in batch.job_ids]
+    )
+    if not job_id or verified_batch_ids(batch):
+        return None
+    return SigningRecovery(job_id, message, restorable)
 
 
 def latest_signing_handoff(svc: Any) -> tuple[str, SigningBatch | None, tuple[dict[str, Any], ...]]:
@@ -183,6 +195,58 @@ def latest_signing_handoff(svc: Any) -> tuple[str, SigningBatch | None, tuple[di
     if missing:
         suffix += f" · {missing} verified players absent from the current squad."
     return f"{len(rows)} signed players ready to plan ({len(ids)} of {batch.selected_count} verified){suffix}", batch, rows
+
+
+def retry_refused_signing(svc: Any, job_id: str) -> str:
+    """The Retry button. Returns the new job id, or '' with the reason in status."""
+    from .._common import set_status
+    from ....app.commands.sign_recovery import retry_signing
+    try:
+        new_id = retry_signing(svc, job_id)
+    except Exception as exc:  # noqa: BLE001 - shown to the user verbatim
+        set_status(svc, str(exc))
+        return ""
+    set_status(svc, "Signing queued again. Live Editor counts the squad before writing anything.")
+    return new_id
+
+
+def _confirm_restore(parent: Any, lines: list[str], count: int) -> bool:
+    message = (
+        f"Restore {count} free agent{'s' if count != 1 else ''} to the values recorded before the "
+        "failed signing?\n\n" + "\n".join(lines) + "\n\nLive Editor refuses if anything changed "
+        "these players since."
+    )
+    try:
+        from tkinter import messagebox
+
+        host = parent.winfo_toplevel() if parent is not None else None
+        return bool(messagebox.askokcancel("Restore free agent", message, parent=host))
+    except Exception:
+        return False
+
+
+def restore_refused_signing(svc: Any, job_id: str, parent: Any = None, *, confirm: Any = None) -> str:
+    """The Restore free agent button: review the exact fields, then queue."""
+    from .._common import set_status
+    from ....app.commands.sign_recovery import (
+        queue_restore_free_agent, restore_plan, restore_review_lines,
+    )
+    try:
+        plan = restore_plan(svc, job_id)
+    except Exception as exc:  # noqa: BLE001
+        set_status(svc, str(exc))
+        return ""
+    ask = confirm or (lambda lines, count: _confirm_restore(parent, lines, count))
+    if not ask(restore_review_lines(plan), len(plan.members)):
+        set_status(svc, "Restore cancelled. Nothing was queued.")
+        return ""
+    try:
+        new_id = queue_restore_free_agent(svc, plan)
+    except Exception as exc:  # noqa: BLE001
+        set_status(svc, str(exc))
+        return ""
+    set_status(svc, f"Queued restore of {plan.field_count} field(s). Check Activity for the result.")
+    return new_id
 
 
 def plan_signed_players(svc: Any, batch: SigningBatch) -> bool:

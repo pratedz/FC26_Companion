@@ -124,6 +124,8 @@ class SquadState:
     free_agents: tuple[Mapping[str, Any], ...] = ()
     taken: datetime | None = None
     stale: bool = True
+    # In-game names as exported, before signed names are shown (Names check).
+    game_names: tuple[tuple[int, str], ...] = ()
 
     def age_seconds(self, now: datetime) -> float | None:
         if self.taken is None:

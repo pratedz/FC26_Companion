@@ -213,7 +213,14 @@ def sync_squad(svc: Services, *, teamid: int | None = None) -> SquadSyncTicket:
     for job_id, view in svc.store.snapshot().jobs.active.items():
         if view.label == "Sync squad" and not view.done:
             return SquadSyncTicket(job_id=job_id, created=False)
-    job = Job(
+    job = build_sync_job(teamid=teamid)
+    job_id = submit_job(svc, job, on_result=lambda r: _ingest(svc, r))
+    return SquadSyncTicket(job_id=job_id, created=True)
+
+
+def build_sync_job(*, teamid: int | None = None, origin: str = "ui.club.sync") -> Job:
+    """The squad read used by Club refresh (and the names-check CLI)."""
+    return Job(
         ops=(
             op_export_squad(
                 "squad",
@@ -224,12 +231,10 @@ def sync_squad(svc: Services, *, teamid: int | None = None) -> SquadSyncTicket:
             ),
         ),
         label="Sync squad",
-        origin="ui.club.sync",
+        origin=origin,
         require_cm=True,
         budget_ms=SQUAD_READ_BUDGET_MS,
     )
-    job_id = submit_job(svc, job, on_result=lambda r: _ingest(svc, r))
-    return SquadSyncTicket(job_id=job_id, created=True)
 
 
 def is_export_result(svc: Services, result: JobResult) -> bool:
@@ -277,6 +282,18 @@ def _failure_detail(result: JobResult) -> str:
     if result.error:
         return str(result.error.get("detail") or result.error.get("message") or "")
     return result.diagnostic
+
+
+def _game_names(players: Sequence[Mapping[str, Any]]) -> tuple[tuple[int, str], ...]:
+    """The worker's own name per row (edited row first, else GetPlayerName)."""
+    out: list[tuple[int, str]] = []
+    for player in players:
+        try:
+            pid = int(player.get("playerid", player.get("id")))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        out.append((pid, str(player.get("name") or "")))
+    return tuple(out)
 
 
 def _with_signed_names(
@@ -377,6 +394,7 @@ def _ingest(svc: Services, result: JobResult) -> None:
     if teamid is None:
         env_tid = result.env.get("user_teamid")
         teamid = int(env_tid) if isinstance(env_tid, (int, float)) else None
+    game_names = _game_names(players)
     players = _with_signed_names(svc, players, save_uid=save_uid)
     svc.store.dispatch(
         E.SquadSynced(
@@ -386,6 +404,7 @@ def _ingest(svc: Services, result: JobResult) -> None:
             players=players,
             taken=svc.clock.now(),
             free_agents=free_agents,
+            game_names=game_names,
         )
     )
     _note_squad_result(svc, job_id=result.job_id, ok=True)
